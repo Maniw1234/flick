@@ -7,10 +7,10 @@ Phone and PC talk directly (Wi-Fi, a USB cable, the phone's hotspot or Bluetooth
 
 | Folder | What it is |
 |---|---|
-| `pc/` | Windows app (Electron): LAN server (HTTP, WebSocket, UDP discovery), the transparent overlay with the animation themes (Roadster, Liquid, Teleport, Halo), the settings panel, and the service that hands phone updates to the phone |
+| `pc/` | Windows app (Electron): LAN server (HTTP, WebSocket, UDP discovery), the transparent overlay with the animation themes (Roadster, Liquid, Teleport, Halo), the settings panel, the service that hands phone updates to the phone, the phone features (`phoneapi.js`, `features.js`, `sync.js`, `clip.js`, `history.js`, `keys.js`) and the "Share with a browser" page (`webshare.js`, `web/`) |
 | `phone/` | The phone app's interface (HTML, CSS, JS) that runs inside the Android app's WebView |
-| `android/` | Android app (Java, built without Gradle): WebView host, file browser access, transfers, folder bundles, self-updater |
-| `native/` | `flick-bt.c`: the small Windows helper that offers Flick's Bluetooth service (built with MinGW) |
+| `android/` | Android app (Java, built without Gradle): WebView host, file browser access, transfers, folder bundles, self-updater, and the background parts of the 2.0 features (link service, auto-send, tiles, widget, notification forwarding, folder sync) |
+| `native/` | Small Windows helpers built with MinGW: `flick-bt.c` offers Flick's Bluetooth service, `flick-keys.c` presses media keys for the phone's remote |
 | `ci/` | The release workflow's phone-app step (`phone_app.sh`) |
 | `installer/` | NSIS script for `Flick-Setup.exe` |
 | `signing/` | How the phone app and releases are signed, plus helper tools (no keys) |
@@ -56,6 +56,13 @@ To try the whole build without publishing: Actions > Release > Run workflow, tic
 - **Large files** go over several connections at once (`/api/part` up, HTTP byte ranges down) when both sides speak
   protocol 2; from protocol 3, **batches** (several files or folders) are split across several `/api/bundle` streams
   (`streams=k&stream=i`) that write into one staging folder on the PC.
+- **Background link** (protocol 5): with "Stay connected in the background" on, the phone's `LinkService` keeps
+  `GET /api/events` open (one JSON event per line: clipboard, links, ringing), so the features work while Flick is
+  closed; tiles, the widget, auto-send and notification forwarding post to the same encrypted link (`PcClient`).
+- **Several phones** (protocol 5): up to four stay connected; PC-initiated sends go to the phone in use, chosen in the
+  panel or by using a phone, and replies about a transfer go to the phone that started it.
+- **Browsers** (Share with a browser): `http://<PC address>:47860/w/<token>/`, from the QR code in the panel. Plain
+  HTTP on the same port, with its own routes and checks (`pc/webshare.js`).
 
 ## Security
 
@@ -83,6 +90,16 @@ To try the whole build without publishing: Actions > Release > Run workflow, tic
 - **Limits.** WebSocket messages, pre-accept Quick Share data, open connections (64 per address, 512 in all) and
   Bluetooth stream buffers are capped; uploads and Quick Shares that won't fit on the disk are refused up front.
 - **Bluetooth** accepts only paired devices over an encrypted link.
+- **Phone features (2.0).** Clipboard, links, notifications, folder sync, the background link and the remote work only
+  for a phone paired with 1.9 or later, over an encrypted link: a token from an older pairing reaches none of them. Links
+  open only `http`/`https` addresses. Synced folders stay inside `<save folder>/Flick Sync/`, one per phone, and refuse
+  `..`, absolute paths, Windows reserved names, `:` streams, links and direction marks; nothing is ever deleted.
+  Notification forwarding is off until the user turns it on and grants access; clipboards that a password manager marks
+  as private are never sent, and a clipboard is never sent back to where it came from.
+- **Share with a browser.** Browsers can't pin Flick's certificate, so this part is plain HTTP: anyone on the network
+  could read what an allowed browser sends or downloads. The link carries a random token; the PC asks before each
+  browser joins and both screens show a 4-digit code; a browser's session works only from the address that was allowed;
+  sharing ends when stopped or after 30 minutes without activity. Its pages can't reach the phone API.
 - **Updates.** Every release's `SHA256SUMS` is signed with an offline release key that GitHub never sees; the PC and the
   phone install nothing that signed list doesn't vouch for, so a hijacked GitHub account can't ship an update. The
   phone app is signed only with Flick's own key (Android 9 and newer), which Android checks too. CI pins every
