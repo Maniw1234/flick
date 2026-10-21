@@ -2,13 +2,16 @@
 'use strict';
 // Signs a published Flick release with Flick's offline release key, so installed copies (PC and phone) accept it.
 //
-//   node signing/sign_release.js <version> [--key <pem>] [--repo Maniw1234/flick] [--dry-run]
+//   node signing/sign_release.js <version> [--key <pem>] [--repo Maniw1234/flick] [--dry-run] [--via-workflow]
 //
 // Downloads the release's SHA256SUMS and every file it lists, checks each one's SHA-256 (and that nothing on the
 // release is missing from SHA256SUMS) and that flick-app-<version>.zip really is that version, then signs
 //   "flick-release-v1\nversion <version>\n" followed by SHA256SUMS exactly as published
 // (ECDSA P-256 with SHA-256, DER, base64) and uploads that as SHA256SUMS.sig. A release that already has a
 // SHA256SUMS.sig is only checked. --dry-run does everything except the upload.
+// Where a file can't be uploaded from (a network that lets only JSON requests through, like Claude's workspace), the
+// signature goes to GitHub as text instead: the "Attach release signature" workflow (.github/workflows/
+// attach-signature.yml) checks it against the release key and attaches it. --via-workflow goes that way directly.
 //
 // Needs gh, signed in with write access to the repository (REST calls only). The key is a PKCS#8 PEM file, by default
 // $FLICK_KEYS/flick-update-key.pem (FLICK_KEYS defaults to /home/claude/tools/keys). Keep it offline: GitHub must never
@@ -21,7 +24,7 @@ const { execFileSync } = require('child_process');
 const core = require('../pc/updatecore');
 const { findEntry, parseManifest } = require('../pc/apkinfo');
 
-const USAGE = 'usage: node signing/sign_release.js <version> [--key <pem>] [--repo owner/name] [--dry-run]';
+const USAGE = 'usage: node signing/sign_release.js <version> [--key <pem>] [--repo owner/name] [--dry-run] [--via-workflow]';
 function die(msg) { console.error('sign_release: ' + msg); process.exit(1); }
 
 const opt = { key: path.join(process.env.FLICK_KEYS || '/home/claude/tools/keys', 'flick-update-key.pem'), repo: 'Maniw1234/flick', dry: false };
@@ -30,6 +33,7 @@ const argv = process.argv.slice(2);
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === '--dry-run') opt.dry = true;
+  else if (a === '--via-workflow') opt.viaWorkflow = true;
   else if (a === '--key' || a === '--repo') { if (i + 1 >= argv.length) die(USAGE); opt[a.slice(2)] = argv[++i]; }
   else if (!version && !a.startsWith('-')) version = a.replace(/^v/, '');
   else die(USAGE);
@@ -106,13 +110,31 @@ const sig = crypto.sign('sha256', core.releaseMessage(version, sums), { key, dsa
 if (!core.verifyRelease(version, sums, sig, TRUSTED)) die("the new signature doesn't verify");
 if (opt.dry) { console.log(`dry run: v${version} checks out and the signature verifies; nothing was uploaded`); process.exit(0); }
 
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'flick-sig-'));
-const file = path.join(dir, 'SHA256SUMS.sig');
-fs.writeFileSync(file, sig);
-try {
-  gh(['--method', 'POST', '-H', 'Content-Type: application/octet-stream', '--input', file,
-    `https://uploads.github.com/repos/${opt.repo}/releases/${rel.id}/assets?name=SHA256SUMS.sig`]);
-} finally { fs.rmSync(dir, { recursive: true, force: true }); }
+// ---- attach it: straight to the release, or as text through the "Attach release signature" workflow
+function tryGh(args) {
+  try { return { ok: true, out: execFileSync(GH, args, { maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] }) }; }
+  catch (e) { return { ok: false, err: String(e.stderr || e.message).trim() }; }
+}
+let direct = { ok: false, err: 'skipped (--via-workflow)' };
+if (!opt.viaWorkflow) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'flick-sig-'));
+  const file = path.join(dir, 'SHA256SUMS.sig');
+  fs.writeFileSync(file, sig);
+  try {
+    direct = tryGh(['api', '--method', 'POST', '-H', 'Content-Type: application/octet-stream', '--input', file,
+      `https://uploads.github.com/repos/${opt.repo}/releases/${rel.id}/assets?name=SHA256SUMS.sig`]);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+}
+if (!direct.ok) {
+  console.log('direct upload: ' + direct.err.split('\n')[0] + '\nattaching it through the "Attach release signature" workflow instead');
+  const run = tryGh(['workflow', 'run', 'attach-signature.yml', '--repo', opt.repo, '-f', 'version=' + version, '-f', 'sig=' + sig.trim()]);
+  if (!run.ok) die("couldn't start the workflow: " + run.err);
+  const nap = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  const until = Date.now() + 15 * 60 * 1000;
+  let seen = null;
+  while (!seen && Date.now() < until) { nap(10000); seen = (release().assets || []).find((a) => a.name === 'SHA256SUMS.sig'); }
+  if (!seen) die("the workflow didn't attach SHA256SUMS.sig within 15 minutes: see Actions > Attach release signature");
+}
 // read it back from the release, the way installed copies will see it
 const up = (release().assets || []).find((a) => a.name === 'SHA256SUMS.sig');
 if (!up || !core.verifyRelease(version, sums, download(up).toString('utf8'), TRUSTED)) die('the upload finished, but the release has no valid SHA256SUMS.sig');

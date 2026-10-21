@@ -1,0 +1,56 @@
+# Attaches a release's SHA256SUMS.sig, made offline with Flick's release key (signing/sign_release.js), when it can't
+# be uploaded directly from where it was signed. Only the signature travels here, never the key, and this job checks
+# it against the release key built into Flick before attaching it: a wrong signature is refused.
+#
+#   gh workflow run attach-signature.yml -f version=1.9.0 -f sig=<contents of SHA256SUMS.sig>
+name: Attach release signature
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version, like 1.9.0
+        required: true
+      sig:
+        description: Contents of SHA256SUMS.sig (base64)
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: attach-signature
+  cancel-in-progress: false
+
+jobs:
+  attach:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ inputs.version }}
+      SIG: ${{ inputs.sig }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+
+      - name: Check the signature and attach it
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || { echo "::error::not a version: $VERSION"; exit 1; }
+          [[ "$SIG" =~ ^[A-Za-z0-9+/]{40,200}={0,2}$ ]] || { echo "::error::not a signature"; exit 1; }
+          d=$(mktemp -d)
+          gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --dir "$d"
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -qx SHA256SUMS.sig; then
+            echo "::error::v$VERSION already has a SHA256SUMS.sig"; exit 1
+          fi
+          printf '%s\n' "$SIG" > "$d/SHA256SUMS.sig"
+          node -e '
+            const fs = require("fs"), core = require("./pc/updatecore");
+            const [sums, sig] = process.argv.slice(1);
+            if (!core.verifyRelease(process.env.VERSION, fs.readFileSync(sums), fs.readFileSync(sig, "utf8"))) {
+              console.error("::error::the signature does not verify with Flick'"'"'s release key"); process.exit(1);
+            }
+            console.log("signature verifies with Flick'"'"'s release key");
+          ' "$d/SHA256SUMS" "$d/SHA256SUMS.sig"
+          gh release upload "v$VERSION" "$d/SHA256SUMS.sig" --repo "$GITHUB_REPOSITORY"
+          echo "attached SHA256SUMS.sig to v$VERSION"

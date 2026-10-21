@@ -56,8 +56,11 @@ After each release, on the computer that has the key:
     node signing/sign_release.js <version> [--key flick-update-key.pem] [--dry-run]
 
 It downloads the release, checks every file against `SHA256SUMS` and that `flick-app-<version>.zip` is that version,
-signs, uploads `SHA256SUMS.sig` and reads it back. If the release already has one, it only checks it, and stops (deleting
-nothing) if it's wrong. Until a release is signed, PCs on 1.9+ skip it quietly and phones on 1.9+ don't install it.
+signs, uploads `SHA256SUMS.sig` and reads it back. Where a file can't be uploaded from (a network that only lets JSON
+requests through), it sends the signature as text to the "Attach release signature" workflow
+(`.github/workflows/attach-signature.yml`), which checks it against the release key before attaching it; `--via-workflow`
+goes that way directly. Only the signature reaches GitHub, never the key. If the release already has one, it only
+checks it, and stops (deleting nothing) if it's wrong. Until a release is signed, PCs on 1.9+ skip it quietly and phones on 1.9+ don't install it.
 1.8 doesn't check the signature yet, so it moves to 1.9 as before.
 
 To change keys later: add the new public key to both lists and release that, then sign later releases with the new key.
