@@ -446,4 +446,11 @@ final class Transfers {
             return label + "/Flick";
         }
     }
+
+    // ------------------------------------------------------------ Flick 2.0: sends that don't come from the page
+    /**
+     * A send from a tile, the widget or folder sync counts as a transfer too: the same count, locks and service as the
+     * page's own (so neither stops the other's). Calls come in pairs (on, then off); any thread.
+     */
+    static void hold(Context c, boolean on) { new Transfers(c, null, null).busy(on); }
 }

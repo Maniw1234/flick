@@ -283,7 +283,7 @@ function watchdog() {
       log('transfer', t.tid, 'stalled for', Math.round(quiet / 1000) + 's: fail');
       if (t.qs && qs) { qs.cancel(t.tid.slice(3), 'stalled'); if (!transfers.has(t.tid)) continue; }   // its failure path cleans up
       fx('failed', { tid: t.tid });
-      if (!t.qs && server) { server.pushToPhone({ t: 'failed', tid: t.tid, why: 'stalled' }); server.abortUpload(t.tid); }
+      if (!t.qs && server) { server.pushToPhone({ t: 'failed', tid: t.tid, why: 'stalled' }); server.abortUpload(t.tid); hist({ dir: 'in', tid: t.tid, name: t.name, size: 0, ok: false, how: 'fling' }); }
       clearTimeout(t.failT);
       discard(t);
     }
@@ -607,6 +607,7 @@ async function onQsDone(m) {
     const now = new Date(); fs.utimes(dest, now, now, () => {});
     markOfWeb(dest);
     placed.push(dest);
+    hist({ dir: 'in', path: dest, deviceName: m.from || 'Quick Share', how: 'quickshare' });
   }
   for (const x of m.texts) {
     if (!x.value) continue;
@@ -630,7 +631,7 @@ function onQsFailed(m) {
   if (qsAsking && qsAsking.id === m.id) { qsAsking = null; if (panel) { panel.setAlwaysOnTop(false); panelSend('panel:qs-done', { id: m.id }); } }
   const tid = qsTransfers.get(m.id);
   qsTransfers.delete(m.id);
-  if (tid && transfers.get(tid)) { fx('failed', { tid }); transfers.delete(tid); }
+  if (tid && transfers.get(tid)) { fx('failed', { tid }); hist({ dir: 'in', name: transfers.get(tid).name, size: 0, ok: false, how: 'quickshare' }); transfers.delete(tid); }
 }
 
 // Explorer's right-click "Send to" menu gets "Flick (phone)" (a shortcut that starts Flick with --send <files>)
@@ -845,6 +846,7 @@ function updateTray() {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: status, enabled: false },
     { type: 'separator' },
+    ...(feats ? feats.trayItems() : []),             // "Send clipboard link to phone", when the clipboard holds a link
     { label: 'Open Flick', click: showPanel },
     { label: `Open ${saveDirLabel()}`, click: () => shell.openPath(saveDirPath()) },
     { type: 'separator' },
@@ -959,7 +961,7 @@ function scheduleRestart(ver) {
     restartT = null;
     const moving = [...transfers.values()].some((t) => !t.done && (t.state === 'lifted' || t.state === 'dropped'));
     const queued = sendQueue.length > 0 && Date.now() - (sendQueue.at || 0) < 10 * 60000;   // a queue goes stale after 10 min
-    const busy = moving || queued || (server && server.outgoingBusy()) || overlayShown || (panel && panel.isVisible() && panel.isFocused());
+    const busy = moving || queued || (server && server.outgoingBusy()) || overlayShown || (panel && panel.isVisible() && panel.isFocused()) || (web && web.busy());
     if (busy) { restartT = setTimeout(tryNow, 30000); return; }
     log('restarting into', ver);
     // only --hidden: the original command line may hold "--send <files>" from Explorer, which must not be sent again
@@ -986,6 +988,9 @@ function startUpdater() {
 // ------------------------------------------------------------ transfers (phone -> PC)
 const transfers = new Map(); // tid -> state
 const gone = new Map();      // tid -> when it was canceled: late events for it are ignored
+// Flick 2.0 (features.js: several phones, clipboard, links, notifications, remote, sync, history); set once started
+let feats = null;
+function hist(e) { if (feats) feats.record(e); }   // a transfer history entry
 function isGone(tid) {
   const now = Date.now();
   for (const [k, at] of gone) if (now - at > 5 * 60000) gone.delete(k);
@@ -1099,6 +1104,7 @@ async function finalizeBundle(t, dir) {
         const now = new Date(); fs.utimes(dest, now, now, () => {});
         markTree(dest);
         placed.push(path.basename(dest));
+        hist({ dir: 'in', tid: t.tid, path: dest, how: 'fling' });
       } catch (e) { lost++; log('could not save', top, e.message); }
       finally { release(dest); }
     }
@@ -1140,11 +1146,13 @@ async function finalize(t) {
     const now = new Date(); fs.utimes(dest, now, now, () => {});
     markOfWeb(dest);
     log('saved', dest);
+    hist({ dir: 'in', tid: t.tid, path: dest, how: 'fling' });
     if (store.openAfter) setTimeout(() => openAfterArrival(dest), 900);
     fx('saved', { tid: t.tid, name: path.basename(dest), where: saveDirLabel() });
     if (server) server.pushToPhone({ t: 'saved', tid: t.tid, name: path.basename(dest), where: saveDirLabel() });
   } catch (e) {
     log('finalize failed', e.message);
+    hist({ dir: 'in', tid: t.tid, name: t.name, size: 0, ok: false, how: 'fling' });
     release(dest);
     if (t.tmpPath) fs.rm(t.tmpPath, { recursive: true, force: true }, () => {});   // don't leave the received copy in temp
     fx('failed', { tid: t.tid });
@@ -1179,8 +1187,10 @@ function wireServer() {
     log('disconnected', s && s.name);
     pushPanelState();
     ensureCatcher();
-    for (const t of transfers.values()) if (t.state === 'lifted') { fx('cancel', { tid: t.tid }); discard(t); }
+    // cards still held by the phone that left (another connected phone's stay)
+    for (const t of transfers.values()) if (t.state === 'lifted' && (!s || !server.ownerOf(t.tid) || server.ownerOf(t.tid) === s.device)) { fx('cancel', { tid: t.tid }); discard(t); }
   });
+  server.on('active', () => { pushPanelState(); ensureCatcher(); });   // another phone is in use: its name, its height
   server.on('pair-request', (s) => {
     log('pair request', s.name);
     showPanel();
@@ -1279,7 +1289,7 @@ function wireServer() {
     clearTimeout(t.failT);
     t.failT = setTimeout(() => {
       if (transfers.get(tid) !== t || t.upload !== 'failed' || t.done) return;
-      if (t.state === 'dropped') { fx('failed', { tid }); server.pushToPhone({ t: 'failed', tid, why: 'upload' }); }
+      if (t.state === 'dropped') { fx('failed', { tid }); server.pushToPhone({ t: 'failed', tid, why: 'upload' }); hist({ dir: 'in', tid, name: t.name, size: 0, ok: false, how: 'fling' }); }
       else if (t.state === 'lifted') fx('cancel', { tid });
       transfers.delete(tid);
     }, 15000);
@@ -1298,6 +1308,147 @@ function wireServer() {
   });
 }
 
+// ------------------------------------------------------------ share with a browser (webshare.js, qr.js)
+// An iPhone, iPad, Mac or any other device on the same network sends and receives files in its web browser, with no
+// app: the panel shows a QR code for a page this PC serves, and each browser has to be allowed here first. Files from
+// a browser are saved exactly like files from the phone and fly in on the screen like a Quick Share.
+const { WebShare, shareAddresses } = require('./webshare');
+const QR = require('./qr');
+let web = null, webAddr = null, webAsking = null, webAddrsSig = '';
+let webQr = { url: '', qr: null };
+const webCards = new Map();     // batch id -> the transfer whose card is on screen
+
+function webState() {
+  const addrs = shareAddresses(lanAddresses());
+  if (!addrs.some((a) => a.address === webAddr)) webAddr = addrs.length ? addrs[0].address : null;
+  const on = !!(web && web.active);
+  const url = on && webAddr ? web.urlFor(webAddr) : '';
+  if (webQr.url !== url) webQr = { url, qr: url ? QR.svgPath(QR.encode(url, { ecl: 'M' }), 4) : null };
+  return {
+    on, url, qr: webQr.qr, addrs, addr: webAddr, ended: web ? web.endedWhy : '', idleMin: web ? Math.round(web.limits.idleMs / 60000) : 30, isWin: IS_WIN,
+    browsers: on ? web.browsers() : [], files: on ? web.sharedFiles() : [], texts: on ? web.texts : [], asking: webAsking,
+  };
+}
+function pushWebState() { panelSend('panel:web', webState()); }
+setInterval(() => {
+  // Wi-Fi changed while sharing: the QR code must show an address that works
+  if (!web || !web.active) return;
+  const sig = JSON.stringify(shareAddresses(lanAddresses()));
+  if (sig !== webAddrsSig) { webAddrsSig = sig; pushWebState(); }
+}, 5000).unref();
+
+// a file from a browser lands like one from the phone: the same folder, a safe unique name, marked as downloaded
+async function webSave(tmpPath, name) {
+  const dir = await saveDirNow();
+  fs.mkdirSync(dir, { recursive: true });
+  const dest = uniquePath(dir, sanitizeName(name));
+  try { await placeItem(tmpPath, dest); } finally { release(dest); }
+  const now = new Date(); fs.utimes(dest, now, now, () => {});
+  markOfWeb(dest);
+  log('saved', dest);
+  return { name: path.basename(dest), path: dest, where: saveDirLabel() };
+}
+
+function onWebAsk(a) {
+  // like a phone asking to pair: make sure the question is really in front of whatever the user is doing
+  webAsking = a;
+  showPanel();
+  if (panel) {
+    panel.setAlwaysOnTop(true, 'floating');
+    panel.show(); panel.focus(); panel.flashFrame(true);
+    panelSend('panel:web-ask', a);
+  }
+}
+function onWebAskDone({ id }) {
+  if (webAsking && webAsking.id === id) webAsking = null;
+  if (panel) { panel.setAlwaysOnTop(false); panel.flashFrame(false); panelSend('panel:web-ask-done', { id }); }
+}
+
+// the files a browser sends together fly in as one card, from the phone's side of the screen
+function onWebIncoming(g) {
+  const tid = 'web-' + g.gid;
+  const t = tState(tid);
+  webCards.set(g.gid, t);
+  t.name = g.count === 1 ? g.name : g.count + ' files';
+  t.state = 'dropped'; t.upload = 'uploading'; t.seen = Date.now(); t.web = true; t.liftAt = Date.now();
+  log('receiving from a browser:', g.device, g.count === 1 ? '1 file' : g.count + ' files');
+  const ps = phoneScreen(), w = 150, h = 150;
+  fx('lift', { tid, name: t.name, kind: 'doc', badge: g.count === 1 ? (extOf(g.name) || 'file').toUpperCase().slice(0, 4) : '', thumb: null, thumbs: [],
+    count: Math.max(1, g.count), folder: false, size: g.total, card: { w, h } });
+  const x = store.side === 'right' ? -w * 0.55 : ps.w - w * 0.45;
+  setTimeout(() => fx('drop', { tid, x, y: ps.h / 2 - h / 2, w, h, r: 0, vx: store.side === 'right' ? -2.6 : 2.6, vy: 0, pw: ps.w, ph: ps.h }), 140);
+}
+function onWebProgress(g) {
+  const t = webCards.get(g.gid);
+  if (!t || transfers.get(t.tid) !== t || !g.total) return;
+  const now = Date.now();
+  if (!t.rt) { t.rt = now; t.rs = g.received; } else if (now - t.rt > 400) { const inst = Math.max(0, g.received - t.rs) / ((now - t.rt) / 1000); t.rate = t.rate ? t.rate * 0.6 + inst * 0.4 : inst; t.rt = now; t.rs = g.received; }
+  t.seen = now;
+  fx('progress', { tid: t.tid, p: Math.min(1, g.received / g.total), rate: store.showSpeed ? t.rate || 0 : 0 });
+}
+const WEB_OPENABLE = /\.(jpe?g|png|gif|webp|heic|heif|bmp|tiff?|mp4|mov|m4v|webm|mkv|avi|mp3|m4a|aac|wav|flac|ogg|opus|pdf|txt)$/i;
+function onWebDone(g) {
+  const t = webCards.get(g.gid);
+  webCards.delete(g.gid);
+  const n = g.saved.length;
+  log('from a browser:', n + ' saved', g.failed ? g.failed + ' not' : '');
+  // "open after it arrives", for a browser (a guest's device): only pictures, videos, music, PDFs and plain text open;
+  // anything else is shown in its folder
+  if (store.openAfter && n === 1 && !g.failed) {
+    const p = g.saved[0].path;
+    setTimeout(() => { if (WEB_OPENABLE.test(p)) openAfterArrival(p); else { try { shell.showItemInFolder(p); } catch (e) { /* ignore */ } } }, 900);
+  }
+  if (!t || transfers.get(t.tid) !== t) return;
+  t.done = true;
+  // a quick batch can be over before its card has even been thrown (the drop follows the lift): never answer before it
+  setTimeout(() => {
+    if (n) fx('saved', { tid: t.tid, name: n === 1 ? g.saved[0].name : n + ' files', where: saveDirLabel() });
+    else fx('failed', { tid: t.tid });
+  }, Math.max(0, (t.liftAt || 0) + 400 - Date.now()));
+  setTimeout(() => transfers.delete(t.tid), 5000);
+}
+
+ipcMain.on('panel:web', async (_e, m) => {
+  if (!web || !m || typeof m !== 'object') return;
+  switch (m.what) {
+    case 'start': web.start(); break;
+    case 'stop': web.stop('user'); break;
+    case 'addr': if (typeof m.addr === 'string') webAddr = m.addr; break;
+    case 'pick': {
+      if (!web.active) break;
+      const r = await dialog.showOpenDialog(panel, { title: 'Share with browsers', properties: ['openFile', 'multiSelections'] });
+      if (!r.canceled && r.filePaths.length) web.addFiles(expandPaths(r.filePaths));
+      break;
+    }
+    case 'add': if (web.active && Array.isArray(m.paths)) web.addFiles(expandPaths(m.paths.filter((p) => typeof p === 'string').slice(0, MAX_SEND))); break;
+    case 'remove': web.removeFile(String(m.id)); break;
+    case 'answer': if (m.allow) web.allow(String(m.id)); else web.deny(String(m.id)); break;
+    case 'kick': web.kick(String(m.id)); break;
+    case 'copy': {
+      const t = m.text ? web.texts.find((x) => x.id === m.text) : null;
+      const v = t ? t.text : m.url ? webState().url : '';
+      if (v) require('electron').clipboard.writeText(v);
+      break;
+    }
+    case 'drop-text': web.removeText(String(m.id)); break;
+    default: break;                               // 'hello': the panel (re)loaded and needs the state
+  }
+  pushWebState();
+});
+
+function startWeb() {
+  web = new WebShare({ server, save: webSave, where: saveDirLabel });
+  server.web = web;                             // server.js hands /w/ requests to it
+  web.on('log', (m) => log(m));
+  web.on('state', pushWebState);
+  web.on('ask', onWebAsk);
+  web.on('ask-done', onWebAskDone);
+  web.on('incoming-start', onWebIncoming);
+  web.on('incoming-progress', onWebProgress);
+  web.on('incoming-done', onWebDone);
+  web.on('text', (t) => { showPanel(); panelSend('panel:web-text', { id: t.id }); });
+}
+
 // ------------------------------------------------------------ app
 app.on('second-instance', (_e, argv) => {
   // a second start counted against this version's start attempts; it's clearly running, so clear them again
@@ -1312,6 +1463,7 @@ app.on('before-quit', () => {
   if (saveTimer) { clearTimeout(saveTimer); writeStoreNow(); }      // don't lose a setting changed just before quitting
   try { if (bt) bt.stop(); } catch (e) { /* ignore */ }
   try { if (qs) qs.stop(); } catch (e) { /* ignore */ }
+  try { if (feats) feats.stop(); } catch (e) { /* ignore */ }
   try { server && server.stop(); } catch (e) { /* ignore */ }
 });
 
@@ -1350,6 +1502,13 @@ app.whenReady().then(async () => {
   wireServer();
   try { const port = await server.start(); log('listening', port, lanAddresses().map((a) => a.address).join(',')); }
   catch (e) { log('server failed', e.message); dialog.showErrorBox('Flick', 'Flick could not start its connection service.\n\n' + e.message); }
+  startWeb();
+  feats = require('./features').attach({
+    electron: require('electron'), server, store, saveStore, log, userDir, appDir: __dirname,
+    saveReceived: webSave, saveDirNow, markOfWeb, openAfterArrival, panelSend, getPanel: () => panel,
+    sendFiles: (paths) => queueForPhone(paths), updateTray,
+  });
+  feats.watchWeb(web);                          // files from browsers go into the history too
   refreshPhoneApp();
   startUpdater();
 
@@ -1374,6 +1533,7 @@ function startTestControl() {
   require('http').createServer(async (req, res) => {
     const u = new URL(req.url, 'http://x');
     try {
+      if (u.pathname.startsWith('/f/') && feats) return feats.test(u, res);    // Flick 2.0 (features.js)
       if (u.pathname === '/capture') {
         const w = u.searchParams.get('w') === 'panel' ? panel : overlay;
         const img = await w.webContents.capturePage();

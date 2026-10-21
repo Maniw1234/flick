@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Flick 2.0 features: tiles, widget, the invisible activity they start -->
+<resources>
+    <string name="f20_tile_photo">Send last photo</string>
+    <string name="f20_tile_clip">Send clipboard</string>
+    <string name="f20_last_photo">Last photo</string>
+    <string name="f20_clipboard">Clipboard</string>
+    <string name="f20_widget_desc">Send your latest photo or your clipboard to your PC in one tap</string>
+    <color name="f20_widget_bg">#E6120F19</color>
+    <color name="f20_widget_btn">#26FFFFFF</color>
+    <!-- ActionActivity: nothing to see, no animation, the screen below stays as it is -->
+    <style name="FlickAction" parent="@android:style/Theme.Translucent.NoTitleBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:windowContentOverlay">@null</item>
+    </style>
+</resources>

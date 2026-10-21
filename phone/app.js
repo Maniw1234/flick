@@ -525,6 +525,7 @@
     $('cdot').classList.toggle('on', st.connected);
     nc('keepAwake', st.screen === 'main' && st.connected);
     if (SEL.on) renderSelection();
+    runHooks('conn');                        // Flick 2.0 features (phone/features/*.js)
   }
 
   // "connect" on the user's go-ahead. Not paired yet (protocol 4): it also commits to this phone's half of the pairing
@@ -718,7 +719,7 @@
       case 'incoming': if (linkTrusted()) onIncoming(m); break;
       case 'edge': if (linkTrusted()) onEdge(m); break;
       case 'app': if (linkTrusted()) { UPD.pcKnows = true; onAppInfo(m.app, true); } break;
-      default: break;
+      default: runHooks('ws', m); break;      // Flick 2.0 messages (clip, link, ring…): phone/features/*.js
     }
   }
 
@@ -1033,6 +1034,7 @@
     }
     $('hsub').innerHTML = sub;
     if (SEL.on) renderSelection();
+    runHooks('view');                        // Flick 2.0: the folder picker follows the view
   }
 
   function needsPermission() { return V.cat !== 'shelf' && !STG.granted; }
@@ -1484,6 +1486,7 @@
     ]);
   };
   $('pcBtn').onclick = () => {
+    if (runHooks('pcTap')) return;           // Flick 2.0: several paired PCs, a sheet to switch
     if (st.connected) {
       openSheet('Connected to ' + st.pc.name, [
         { label: 'Disconnect', icon: 'off', danger: true, run: () => { st.wantResume = false; closeLink(); showScreen('pair'); openLinkSoon(); } },
@@ -1526,6 +1529,7 @@
     openSheet('', [
       upd ? { label: 'Update to Flick ' + (UPD.app.name || UPD.app.code), icon: 'update', tag: 'Ready', run: startUpdate } : null,
       { label: 'Animation', icon: 'spark', tag: themeOf(st.theme).name, run: themeSheet },
+      ...runHooksList('menu'),               // Flick 2.0 features
       { label: 'Refresh', icon: 'refresh', run: () => refreshStorage(true) },
       V.cat === 'shelf' && V.items.length ? { label: 'Clear the Flick list', icon: 'clear', danger: true, run: () => {
         V.total = 0;
@@ -1614,6 +1618,7 @@
       } : { label: 'No PC yet', sub: 'Open Flick on your PC, then hold Connect', action: { text: 'Connect', run: () => { closeSettings(); showScreen('pair'); } } },
       { label: 'Ways to connect', sub: 'Wi-Fi, USB cable, hotspot or Bluetooth', run: waysSheet },
     ]);
+    runHooks('settings', body);             // Flick 2.0: the Features section
     group('Transfers', [
       { label: 'Faster transfers', sub: 'Large files travel over several connections at once', toggle: 'parallel' },
       { label: 'Show transfer speed', toggle: 'showSpeed', set: () => updateCount() },
@@ -2212,6 +2217,7 @@
   function onSaved(m) {
     const p = st.pending.get(m.tid);
     if (!p) return;
+    runHooks('sent', itemsOf(p));            // Flick 2.0: the history notes what reached the PC
     st.pending.delete(m.tid);
     // real phone files always stay; Flick-list items follow the "keep" setting
     const gone = [];
@@ -2407,6 +2413,7 @@
   window.__native = function (ev) {
     let e = ev;
     if (typeof ev === 'string') { try { e = JSON.parse(ev); } catch (x) { return; } }
+    runHooks('native', e);                   // Flick 2.0 features see Android's events too
     switch (e.t) {
       case 'res': { const r = pendingReq.get(e.req); if (r) { pendingReq.delete(e.req); r(e.data); } break; }
       case 'pcs':
@@ -2445,6 +2452,7 @@
   window.__back = function () {
     if (!$('ask').hidden) { $('ask').hidden = true; return true; }
     if (sheetOpen) { closeSheet(); return true; }
+    if (runHooks('back')) return true;       // Flick 2.0 pages and overlays
     if (closeSettings()) return true;
     if (D && D.phase === 'drag') { dragEnd(); return true; }
     if (SEL.on) { setSelecting(false); return true; }
@@ -2452,6 +2460,57 @@
     if (st.screen === 'main' && !st.connected) { showScreen('pair'); return true; }
     return false;
   };
+
+  // ------------------------------------------------------------------ Flick 2.0 features (phone/features/*.js)
+  // The feature files load before this file and queue their start functions in window.FlickFeatures. They reach the
+  // app only through FlickApp below; the app calls them back through hooks (FlickApp.on(name, fn)):
+  //   ws       a PC message the app doesn't handle itself (clip, link, ring, ring-stop)
+  //   native   every Android event (before the app's own handling)
+  //   sent     the items of a send the PC confirmed ('saved')
+  //   back     Android's back button (return true when handled)
+  //   menu     items for the ••• sheet (return one item or a list)
+  //   settings the Settings page is being drawn (its body element; add sections to it)
+  //   pcTap    the PC button on the main screen (return true when handled)
+  //   view     the file view changed (folder, category, loading)
+  //   conn     connected or not
+  function runHooks(name, a) {
+    let r;
+    for (const f of (runHooks.list && runHooks.list[name]) || []) {
+      try { const x = f(a); if (r === undefined && x) r = x; } catch (err) { console.log('feature (' + name + ') failed: ' + err); }
+    }
+    return r;
+  }
+  function runHooksList(name) {
+    const out = [];
+    for (const f of (runHooks.list && runHooks.list[name]) || []) {
+      try { const x = f(); if (x) out.push.apply(out, Array.isArray(x) ? x : [x]); } catch (err) { console.log('feature (' + name + ') failed: ' + err); }
+    }
+    return out;
+  }
+  runHooks.list = {};
+  const FlickApp = Object.freeze({
+    on(name, fn) { if (typeof fn === 'function') (runHooks.list[name] = runHooks.list[name] || []).push(fn); },
+    // live state, for reading (a change to settings is kept with saveSettings())
+    st, V, settings, INFO, DEVICE, LINK_NAMES, icons: ICONS,
+    get stg() { return STG; },
+    get sheetOpen() { return sheetOpen; },
+    // the Android bridge: has(name) tells whether this phone app has that method
+    has: (name) => !!(NV && typeof NV[name] === 'function'),
+    nc, njson, pref, saveSettings, haptic,
+    // the link to the PC. linkAuthed: the PC proved itself on this link (signed in), connected or not
+    wsSend, linkTrusted, linkAuthed: () => !!(st.wsOpen && st.trusted && st.pcProved && hasToken()),
+    paired: (pcId) => !!pref.get(tokenKey(pcId), ''), rankOf, busyMoving, choosePc, closeLink, openLinkSoon,
+    // screens, sheets, toasts, formatting
+    toast, openSheet, closeSheet, showScreen, openSettings, closeSettings, renderSettings,
+    svgEl, esc, rid, fmtSize, fmtWhen, midName,
+    // the file browser, and sending to the PC
+    openCat, showInFolder, sendItems, phoneName,
+  });
+  window.FlickApp = FlickApp;
+  const FEATURES = {};                      // what the feature files share among themselves (features/core.js)
+  for (const start of window.FlickFeatures || []) {
+    try { start(FlickApp, FEATURES); } catch (err) { console.log('a feature failed to start: ' + err); }
+  }
 
   // ------------------------------------------------------------------ boot
   window.addEventListener('resize', () => { measureHeader(); layout(false); wsSend({ t: 'screen', w: innerWidth, h: innerHeight, dpr: devicePixelRatio }); });

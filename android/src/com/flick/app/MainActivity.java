@@ -57,6 +57,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        Page.attach(this);                           // Flick 2.0: background features reach the page through it
         setupWindow();
 
         web = new WebView(this);
@@ -149,6 +150,7 @@ public class MainActivity extends Activity {
         onScreen = true;
         Updater u = Updater.peek();
         if (u != null) u.onResume(this);
+        Page.onResume(this);                         // Flick 2.0
     }
 
     @Override
@@ -160,6 +162,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        Page.detach(this);                           // Flick 2.0
         Updater u = Updater.peek();
         if (u != null) u.detach(this);
         if (discovery != null) discovery.setActive(false);
@@ -359,6 +362,7 @@ public class MainActivity extends Activity {
         super.onRequestPermissionsResult(req, perms, res);
         if (req == REQ_STORAGE) emitEvent("storage");
         if (req == REQ_BT) emitEvent("bt-perm");
+        Page.onPermissions(this, req);               // Flick 2.0
     }
 
     // ------------------------------------------------------------ services
@@ -483,6 +487,8 @@ public class MainActivity extends Activity {
             ClipData cd = in.getClipData();
             for (int k = 0; k < cd.getItemCount(); k++) { Uri u = cd.getItemAt(k).getUri(); if (u != null) uris.add(u); }
         }
+        // Flick 2.0: a single web address goes to the page ("Open on <PC>" / "Save to the Flick list"), not into a .txt
+        if (uris.isEmpty() && text != null && Page.sharedLink(this, text, in.getStringExtra(Intent.EXTRA_SUBJECT))) { in.setAction(Intent.ACTION_MAIN); return; }
         String subject = in.getStringExtra(Intent.EXTRA_SUBJECT);
         importAll(uris, text == null ? null : new String[]{text, subject});
         in.setAction(Intent.ACTION_MAIN); // don't re-import on recreate
