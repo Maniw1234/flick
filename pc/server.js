@@ -264,6 +264,14 @@ class FlickServer extends EventEmitter {
     return !this.devices[device].tls || this._chan(req.socket) !== 'plain';
   }
 
+  // The protocol 5 features (clipboard, links, notifications, folder sync, the background link, the remote) are for
+  // phones that paired securely (Flick 1.9+: tls) and only over an encrypted link (TLS or Bluetooth). A phone paired
+  // before 1.9 sent its token in the clear, so that token reaches none of them, on any link; it pairs again first.
+  _v5ok(device, chan) {
+    const d = device && Object.prototype.hasOwnProperty.call(this.devices, device) ? this.devices[device] : null;
+    return !!(d && d.tls === true && chan && chan !== 'plain');
+  }
+
   _proof(token, role, s) {
     return hmac(token, 'flick-auth-v1|' + role + '|' + s.nonceP + '|' + s.nonceS + '|' + s.chan + '|' + s.device + '|' + this.id);
   }
@@ -402,7 +410,11 @@ class FlickServer extends EventEmitter {
    */
   sendEvent(device, obj) {
     const s = this._pageFor(device);
-    if (s) { s.conn.send(obj); return true; }
+    if (s) {
+      if (!this._v5ok(s.device, s.chan)) return false;      // never the clipboard etc. to a phone paired before 1.9
+      s.conn.send(obj);
+      return true;
+    }
     return this.api.streamSend(device, obj);
   }
 
@@ -663,7 +675,7 @@ class FlickServer extends EventEmitter {
         break;
       // protocol 5 (§3): the remote, the clipboard and links from the page, and "found it" after the PC rang the phone
       case 'media': case 'clip': case 'link': case 'ring-found':
-        if (s.trusted && s.device) this.api.fromPage(s, m);
+        if (s.trusted && s.device && this._v5ok(s.device, s.chan)) this.api.fromPage(s, m);
         break;
       default:
         break;

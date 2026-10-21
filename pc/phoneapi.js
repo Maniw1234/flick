@@ -52,6 +52,8 @@ class PhoneApi {
     if (req.method !== want) { this._refuse(req, res, 405, 'method'); return true; }
     const device = q.get('device');
     if (!this.s._trustedReq(req, device, q.get('token'))) { this._refuse(req, res, 403, 'not paired'); return true; }
+    // a phone paired before 1.9 (its token crossed the network in the clear), or any plain link: none of this
+    if (!this.s._v5ok(device, this.s._chan(req.socket))) { this._refuse(req, res, 403, 'pair again'); return true; }
     let p;
     switch (u.pathname) {
       case '/api/events': this._openStream(req, res, device); return true;
@@ -209,6 +211,14 @@ class PhoneApi {
     if (!n.key) n.key = n.pkg + '|' + n.title;
     if (!n.removed && !n.title && !n.text) return { code: 400, error: 'empty' };
     const k = device + '|' + n.key, now = Date.now();
+    // at most 5 new notifications a second from one phone (it throttles too; this keeps a misbehaving one from
+    // burying the screen)
+    if (!n.removed) {
+      this.noteRate = this.noteRate || new Map();
+      const r = (this.noteRate.get(device) || []).filter((t) => now - t < 1000);
+      if (r.length >= 5) { this.noteRate.set(device, r); return { code: 429, error: 'slow down' }; }
+      r.push(now); this.noteRate.set(device, r);
+    }
     for (const [x, v] of this.notes) if (now - v.at > 10000) this.notes.delete(x);
     if (n.removed) this.notes.delete(k);
     else {

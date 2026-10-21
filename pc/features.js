@@ -84,7 +84,7 @@ class Features {
   _v20(device) {
     if (!device) return false;
     const s = this.server._pageFor(device);
-    if (s) return (s.app || 0) >= V20;
+    if (s) return (s.app || 0) >= V20 && this.server._v5ok(s.device, s.chan);   // and paired securely, on an encrypted link
     return this.server.api.streams.has(device);              // only Flick 2.0 keeps a background link
   }
 

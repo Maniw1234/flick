@@ -13,7 +13,8 @@ const MAX_FILES = 20000;
 const MAX_DEPTH = 32;
 const MAX_REL = 1024;
 // ':' covers drive letters and alternate data streams; '\' is a separator on Windows (paths come with '/')
-const BAD_CHARS = /[<>:"|?*\\\u0000-\u001f\u007f]/;
+// (and the invisible direction marks that can make "photo<RLO>gnp.exe" look like "photoexe.png")
+const BAD_CHARS = /[<>:"|?*\\\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
 const RESERVED = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$)( *\..*)?$/i;
 // what a listing leaves out: hidden (dot) files, Windows' own files, and files still being written (ours and others')
 const SKIP_NAME = /^(desktop\.ini|thumbs\.db|ehthumbs(_vista)?\.db|\$recycle\.bin|system volume information|~\$.*)$/i;
@@ -129,8 +130,14 @@ class SyncStore extends EventEmitter {
     }
     const root = path.join(await this.root(), 'Flick Sync');
     let folder = path.join(root, base);
-    // another phone's folder of that name: this phone gets one of its own (two phones' cameras don't mix)
-    if (Object.values(this.pairs).some((p) => p.device !== device && samePath(p.folder, folder))) folder = path.join(root, cleanName(base + ' (' + (phone || 'phone') + ')'));
+    // another phone's folder of that name: this phone gets one of its own (two phones' cameras don't mix), and never
+    // one another phone already has, whatever names the phones give themselves
+    const others = (f) => Object.values(this.pairs).some((p) => p.device !== device && samePath(p.folder, f));
+    if (others(folder)) {
+      const mine = cleanName(base + ' (' + (phone || 'phone') + ')');
+      folder = path.join(root, mine);
+      for (let i = 2; others(folder); i++) folder = path.join(root, mine + ' (' + i + ')');
+    }
     await fs.promises.mkdir(folder, { recursive: true });
     const id = crypto.randomBytes(6).toString('hex');
     this.pairs[id] = { device, phone: phone || '', name: base, folder, created: Date.now(), last: Date.now() };
