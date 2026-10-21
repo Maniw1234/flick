@@ -45,13 +45,14 @@ final class TlsProxy {
     final String host;
     final int port;
     final String fp;                    // SHA-256 of the PC's certificate (lowercase hex): every connection must show it
+    private final Pin pin;
     private final SSLSocketFactory factory;
     private final ServerSocket server;
     private final Set<Socket> live = Collections.newSetFromMap(new ConcurrentHashMap<Socket, Boolean>());
     private volatile boolean closed;
 
-    private TlsProxy(String host, int port, String fp, SSLSocketFactory factory, ServerSocket server) {
-        this.host = host; this.port = port; this.fp = fp; this.factory = factory; this.server = server;
+    private TlsProxy(String host, int port, String fp, Pin pin, ServerSocket server) throws IOException {
+        this.host = host; this.port = port; this.fp = fp; this.pin = pin; this.factory = factory(pin); this.server = server;
     }
 
     int localPort() { return server.getLocalPort(); }
@@ -79,7 +80,9 @@ final class TlsProxy {
         }
         if (probe.seen == null) throw new IOException("no certificate");
         ServerSocket ss = new ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"));
-        final TlsProxy p = new TlsProxy(host, port, probe.seen, factory(new Pin(probe.seen)), ss);
+        final TlsProxy p;
+        try { p = new TlsProxy(host, port, probe.seen, new Pin(probe.seen), ss); }
+        catch (IOException e) { try { ss.close(); } catch (IOException x) { /* ignore */ } throw e; }
         OPEN.put(p.localPort(), p);
         Thread t = new Thread(new Runnable() { @Override public void run() { p.acceptLoop(); } }, "flick-tls-accept");
         t.setDaemon(true);
@@ -122,6 +125,9 @@ final class TlsProxy {
             remote = connect(factory, host, port);
         } catch (IOException e) {
             quiet(local);
+            // another certificate answers there now (the PC was reinstalled, or it isn't the PC): this link is done,
+            // so the page's next attempt checks again and can say why instead of failing silently forever
+            if (pin.mismatch) close();
             return;
         }
         live.add(local);

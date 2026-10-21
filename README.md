@@ -54,19 +54,31 @@ To try the whole build without publishing: Actions > Release > Run workflow, tic
 
 ## Security
 
-- **Pairing.** A phone gets a random token only after the user clicks Allow on the PC. Every upload, download and
-  update fetch needs it, and the phone in turn only accepts files, status and updates from a PC it holds a token for.
-  Pairing prompts are rate-limited, and browsers are refused (a web page can't reach the PC's server: requests with a
-  web `Origin` or a DNS-name `Host` get 403).
+- **Encrypted links.** Everything between phone and PC travels over TLS on the PC's port 47860 (the same port also
+  answers plain HTTP, for phone apps before 1.9 and the browser page). Each PC makes its own certificate once
+  (`tls-cert.pem` in its settings folder); a phone pins its SHA-256 when it pairs and from then on connects to no
+  other. The phone app reaches the PC through a local port inside the phone (`TlsProxy`); its network security config
+  allows unencrypted connections only to the phone itself. Bluetooth links are encrypted by Bluetooth.
+- **Pairing.** The PC asks before a new phone can connect, and both screens show the same 6-digit code: the phone
+  commits to its half of the code before the PC sends its half, so nobody in between can make the codes match. A
+  phone gets a random token only after the user clicks Allow.
+- **Signing in.** The token never crosses the network: on every connection the PC proves it holds the phone's token
+  (an HMAC over both sides' random numbers and the certificate the phone sees), then the phone proves the same. A
+  relay in the middle (with its own certificate) can neither read nor pass on these proofs. A phone paired with an
+  older Flick gets its certificate pinned and a fresh token on its first encrypted connection, and plain connections
+  stop working for it.
+- **Requests.** Every upload, download and update fetch needs the token, and once a phone has signed in securely, its
+  token works only over an encrypted link. The phone only accepts files, status and updates from the PC it signed in
+  to. Pairing prompts are rate-limited, and browsers can't reach the phone API (a web `Origin` or a DNS-name `Host`
+  gets 403).
 - **Received files** are marked as downloaded from the internet (`Zone.Identifier`), so Windows SmartScreen and
   Office Protected View apply. "Open files when they arrive" never launches programs, scripts or shortcuts.
 - **Limits.** WebSocket messages, pre-accept Quick Share data, sockets per address and Bluetooth stream buffers are
   capped; uploads and Quick Shares that won't fit on the disk are refused up front.
-- **Bluetooth** accepts only paired devices over an encrypted link.
-- **Updates.** The PC verifies each update bundle's SHA-256 (from GitHub, over HTTPS) before installing it; Android
-  checks the phone app's signature. CI pins every downloaded tool by checksum and the checkout action by commit.
-- **Not yet:** traffic between phone and PC is plain HTTP on the local network (pairing tokens included), so someone
-  sniffing the same Wi-Fi could read it. Encrypting it (TLS with a key pinned at pairing) is the next step.
+- **Updates.** Each release's `SHA256SUMS` is signed with Flick's release key, which is kept off GitHub (see
+  signing/README.md); the PC and the phone install an update only if that signature checks out and the file matches.
+  The phone app is signed only with Flick's own key (Android 9 and newer). CI pins every downloaded tool by checksum
+  and the checkout action by commit.
 
 ## Building by hand
 
