@@ -7,9 +7,10 @@ Security: the three open items from the 1.8 review.
 - **Encrypted connections.** Everything between the phone and the PC is now encrypted. The phone remembers your PC's
   security key when you pair and connects to no other computer, so nobody on the same network can read your files or
   pretend to be your PC.
-- **Pairing code.** When you pair, the phone and the PC show the same 6-digit code: click Allow only if they match.
+- **Pairing code.** When you pair, the phone and the PC show the same 6-digit code. If they match, click Allow on the
+  PC and tap Same code on the phone.
 - **No secret on the network.** The phone's pairing secret no longer travels over the network: each connection proves
-  it instead. Phones paired with an older Flick get a fresh one on their first encrypted connection.
+  it instead. A phone paired with an older Flick is confirmed once more with the pairing code after the update.
 - **Signed by Flick only.** The phone app is now signed only with Flick's own key, which needs Android 9 or newer;
   phones on Android 9 to 12 switch to that key with this update. Phones on Android 7 and 8 stay on Flick 1.8.
 - **Signed releases.** Every release is also signed with a separate key that's kept off GitHub. Flick on the PC and

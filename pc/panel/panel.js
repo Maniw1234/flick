@@ -118,6 +118,8 @@
       const b = document.createElement('b');
       b.className = 'pin';
       b.textContent = s.code.slice(0, 3) + ' ' + s.code.slice(3);
+      // a phone paired before 1.9: asked once more, now that connections are encrypted
+      if (s.upgrade) sub.append('Flick now encrypts connections, so this phone is confirmed once more. ');
       sub.append('Pairing code ', b, '. Allow only if your phone shows the same code.');
     } else {
       sub.textContent = 'Allow it to send files to this PC?';

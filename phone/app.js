@@ -78,10 +78,12 @@
     screen: 'pair',
   };
   const tokenKey = (pcId) => 'token:' + pcId;
-  // the SHA-256 of the PC's certificate, pinned when this phone paired with it (or when a PC paired before 1.9 first
-  // proved over an encrypted link that it holds this phone's token): only that PC gets a connection
+  // the SHA-256 of the PC's certificate, pinned when this phone paired with it (the user checked the pairing code on
+  // both screens): only that PC gets a connection
   const pinKey = (pcId) => 'pin:' + pcId;
   const rhex = (n) => { const a = new Uint8Array(n); crypto.getRandomValues(a); return Array.from(a, (b) => b.toString(16).padStart(2, '0')).join(''); };
+  // compares two strings in time that doesn't depend on where they differ
+  const sameStr = (a, b) => { a = String(a || ''); b = String(b || ''); if (!a || a.length !== b.length) return false; let x = 0; for (let i = 0; i < a.length; i++) x |= a.charCodeAt(i) ^ b.charCodeAt(i); return x === 0; };
   const SEL = { on: false, ids: new Set() };   // multi-select: ids of the selected items in the current view
   // wireless update: the PC announces the newest phone app it has; app = { code, name, size, sha256, url }
   const UPD = { app: null, pcApp: null, ghApp: null, ghAt: 0, ghAsk: false, pcKnows: false, state: 'idle', got: 0, total: 0, why: '', dismissed: 0, checkT: 0, auto: false };
@@ -409,11 +411,12 @@
       if ((+pc.v || 1) < 4) { linkProblem('old'); return null; }
       return { ip: pc.ip, port: pc.port, chan: 'bluetooth', key: 'bt:' + pc.port };
     }
-    if (!pc.tls) { linkProblem('old'); return null; }
     const pin = pref.get(pinKey(pc.id), '');
+    // a PC this phone pinned is known to encrypt, whatever a discovery reply (which anyone can send) says
+    if (!pc.tls && !pin) { linkProblem('old'); return null; }
     const r = await nreqT(20000, 'tlsOpen', pc.ip, pc.port, pin);
     if (!r) return null;
-    if (!r.ok) { if (r.why === 'pin') linkProblem('pin'); return null; }
+    if (!r.ok) { if (r.why === 'pin') linkProblem('pin'); else if (r.why === 'tls') linkProblem('old'); return null; }
     return { ip: '127.0.0.1', port: r.port, chan: r.fp, fp: r.fp, pinned: !!pin, key: pc.ip + ':' + pc.port };
   }
   // where HTTP requests to the connected PC go (the encrypted link's local port, or the Bluetooth one)
@@ -499,6 +502,8 @@
       else if (p.phase === 'sent' && p.uploaded) { st.pending.delete(tid); for (const it of itemsOf(p)) if (it.path || st.keep) restoreItem(it); }
     }
     st.pairAsked = false; st.awaitingApproval = false;
+    // a pairing the PC already allowed can still be confirmed here (see 'paired'); one it hadn't is over
+    if (!st.pairWait) st.pairOk = false;
     // another phone took over this PC: wait for the user rather than fighting over it
     if (st.replaced) { st.wantResume = false; return; }
     if (was) { st.wantResume = true; if (!document.hidden) toast('Reconnecting to ' + st.pc.name + '…', 1800); }
@@ -554,6 +559,50 @@
   const hasToken = () => !!(st.pc && pref.get(tokenKey(st.pc.id), ''));
   const linkTrusted = () => st.connected && hasToken() && st.pcProved;
 
+  // A phone paired before 1.9 confirms itself once: its token travelled over the network in the clear, so it proves
+  // nothing by itself. Holding Connect pairs again, with the code on both screens.
+  function needConfirm() {
+    if (st.pairAsked || st.awaitingApproval || st.pairWait) return;
+    if (st.screen !== 'pair') { st.wantResume = false; showScreen('pair'); }
+    pairHint('Connections to <b>' + esc(st.pc ? st.pc.name : 'your PC') + '</b> are now encrypted. Confirm this phone once: hold <b>Connect</b>, then check that both screens show the same code.');
+  }
+
+  // The pairing code, and the user's half of the check: pairing completes only when the PC allowed it AND the user
+  // said here that both screens show the same code. A stranger answering in the PC's place can send "paired" too, but
+  // the PC's own screen won't show this code.
+  function showPairCode() {
+    const name = '<b>' + esc(st.pc ? st.pc.name : 'your PC') + '</b>';
+    const code = '<b class="pcode">' + esc(st.pairCode.slice(0, 3) + ' ' + st.pairCode.slice(3)) + '</b>';
+    const btn = '<br><button class="pok" id="pairOk">Same code</button>';
+    if (st.pairOk) pairHint(code + '<br>Now click <b>Allow</b> on ' + name + '.');
+    else if (st.pairWait) pairHint(name + ' allowed this phone. Tap <b>Same code</b> if it shows<br>' + code + btn);
+    else pairHint(code + '<br>Check that ' + name + ' shows the same code, then click <b>Allow</b> there and tap <b>Same code</b> here.' + btn);
+    const b = $('pairOk');
+    if (b) b.onclick = () => { st.pairOk = true; haptic('tick'); if (st.pairWait) finishPairing(); else showPairCode(); };
+  }
+
+  function finishPairing() {
+    const w = st.pairWait;
+    if (!w || !st.pc || w.pc !== st.pc.id) { st.pairWait = null; return; }
+    st.pairWait = null;
+    pref.set(tokenKey(st.pc.id), w.token);
+    // the certificate of the PC the user just approved is the one this phone trusts from now on
+    if (w.fp) pref.set(pinKey(st.pc.id), w.fp);
+    st.pairAsked = false; st.pairNonce = ''; st.pairCode = ''; st.pairOk = false;
+    const held = st.pairConnected; st.pairConnected = null;
+    if (w.gen !== wsGen || !st.wsOpen) { st.awaitingApproval = false; pairHint(''); openLink(); return; }   // signs in afresh
+    if (st.link && w.fp && st.link.fp === w.fp) st.link.pinned = true;
+    st.pcProved = true;
+    st.trusted = true;
+    pairHint('');
+    // the PC said "connected" while this phone was still checking: take it now (or ask again, should it not come)
+    if (held) onMsg(held);
+    else {
+      const gen = wsGen;
+      setTimeout(() => { if (gen === wsGen && !st.connected && st.trusted) wsSend({ t: 'connect', user: true }); }, 1500);
+    }
+  }
+
   function onMsg(m) {
     switch (m.t) {
       case 'auth?': {
@@ -562,23 +611,20 @@
         // token itself never crosses the network.
         if (!st.pc || !st.link || (m.pc && m.pc.id && m.pc.id !== st.pc.id)) { closeLink(); break; }
         const chan = st.link.chan, nS = String(m.nonce || '');
-        const want = /^[0-9a-f]{32,64}$/.test(nS) ? nc('authProof', st.pc.id, 'pc', st.nonceP, nS, chan) : '';
-        if (!want || want !== m.proof) {
+        // Over Wi-Fi only a PC whose certificate this phone pinned when it paired can sign in. One without a pin was
+        // paired before 1.9, with a token that crossed the network in the clear: it pairs once more instead.
+        const pinned = chan === 'bluetooth' || st.link.pinned;
+        const want = pinned && /^[0-9a-f]{32,64}$/.test(nS) ? nc('authProof', st.pc.id, 'pc', st.nonceP, nS, chan) : '';
+        if (!want || !sameStr(want, m.proof)) {
           // not the PC this phone paired with, or it no longer knows this phone: prove nothing to it
           wsSend({ t: 'auth', proof: 'none' });
-          if (hasToken()) linkProblem('auth');
+          if (hasToken()) { if (pinned) linkProblem('auth'); else needConfirm(); }
           break;
         }
         st.pcProved = true;
         wsSend({ t: 'auth', proof: nc('authProof', st.pc.id, 'phone', st.nonceP, nS, chan) });
-        // it proved itself over this very link: a PC paired before 1.9 gets its certificate pinned now
-        if (st.link.fp && !pref.get(pinKey(st.pc.id), '')) { pref.set(pinKey(st.pc.id), st.link.fp); st.link.pinned = true; }
         break;
       }
-      case 'token':
-        // the PC's first sign-in from this phone over a secure link replaces a token that may have travelled in the clear
-        if (st.pcProved && typeof m.token === 'string' && /^[0-9a-f]{32}$/.test(m.token)) pref.set(tokenKey(st.pc.id), m.token);
-        break;
       case 'welcome':
         // a different PC answered at this address (its IP went to another computer): leave every pairing alone
         if (m.pc && m.pc.id && st.pc && m.pc.id !== st.pc.id) { closeLink(); break; }
@@ -590,10 +636,12 @@
         if (m.pc && m.pc.name && st.pc) { st.pc.name = m.pc.name; pref.set('lastPcName', m.pc.name); setPcName(); }
         // the PC doesn't know this phone (any more): its pairing is over. Believed only from a PC this phone can be
         // sure of (pinned certificate, or Bluetooth), so a stranger can't make it throw a pairing away.
-        if (!m.trusted && (st.link.pinned || st.link.chan === 'bluetooth') && m.why !== 'auth' && !st.pcProved) pref.set(tokenKey(st.pc.id), '');
+        if (!m.trusted && (st.link.pinned || st.link.chan === 'bluetooth') && m.why !== 'auth' && m.why !== 'confirm' && !st.pcProved) pref.set(tokenKey(st.pc.id), '');
         if (st.connectWanted && Date.now() - st.connectWanted < 10000) { st.connectWanted = 0; st.pairAsked = true; clearTimeout(connectT); sendConnectUser(); }
         else if (st.wantResume && st.trusted && !st.connected && !st.replaced) wsSend({ t: 'connect' });   // pick the session back up
-        else if (st.screen === 'pair' && !st.linkBlocked) pairHint('');
+        // paired before 1.9 (a token but no pinned certificate): confirm once, whatever this PC claims
+        else if (!st.trusted && (m.why === 'confirm' || (hasToken() && st.link.chan !== 'bluetooth' && !st.link.pinned))) needConfirm();
+        else if (st.screen === 'pair' && !st.linkBlocked && !st.pairWait) pairHint('');
         break;
       case 'pairing': {
         if (!st.pairAsked || !st.pairNonce) break;  // only after this phone asked to connect
@@ -602,28 +650,32 @@
         // the PC's half of the code is here: now this phone reveals its own, and both screens show the same code
         wsSend({ t: 'pair-reveal', nonce: st.pairNonce });
         st.pairCode = nc('pairCode', st.link.chan, st.pairNonce, nS) || '';
+        st.pairOk = false; st.pairWait = null; st.pairConnected = null;
         st.awaitingApproval = true;
         setPcName();
-        pairHint('Click <b>Allow</b> on your PC only if it shows this code:<br><b class="pcode">' + esc(st.pairCode.slice(0, 3) + ' ' + st.pairCode.slice(3)) + '</b>');
+        showPairCode();
         G.hold = 0.35;
         break;
       }
-      case 'paired':
+      case 'paired': {
         if (!st.pairAsked || !st.pairCode || typeof m.token !== 'string' || !/^[0-9a-f]{32}$/.test(m.token)) break;   // never a pairing this phone didn't ask for
-        pref.set(tokenKey(st.pc.id), m.token);
-        // the certificate of the PC the user just approved is the one this phone trusts from now on
-        if (st.link && st.link.fp) { pref.set(pinKey(st.pc.id), st.link.fp); st.link.pinned = true; }
-        st.pcProved = true;
-        st.trusted = true; st.awaitingApproval = false; st.pairAsked = false; st.pairNonce = ''; st.pairCode = '';
+        // The PC allowed this phone; it counts once the user has also said here that the codes match (showPairCode).
+        // Over Bluetooth the phone sees no certificate: the PC names its own, to pin for Wi-Fi.
+        const lk = st.link || {};
+        const fp = lk.fp || (lk.chan === 'bluetooth' && /^[0-9a-f]{64}$/.test(String(m.fp || '')) ? m.fp : '');
+        st.pairWait = { token: m.token, fp, gen: wsGen, pc: st.pc.id };
+        if (st.pairOk) finishPairing(); else showPairCode();
         break;
+      }
       case 'denied':
-        st.pairAsked = false;
+        st.pairAsked = false; st.pairOk = false; st.pairWait = null;
         st.awaitingApproval = false; setPcName();
         pairHint('The PC said no. Try again and click <b>Allow</b> on the PC.');
         G.hold = 0;
         haptic('reject');
         break;
       case 'connected':
+        if (st.pairWait) { st.pairConnected = m; break; }   // allowed on the PC, not yet confirmed here (finishPairing)
         if (!hasToken() || !st.pcProved) break;
         lostSince = 0; st.lostToast = false;
         st.connected = true; st.trusted = true; st.awaitingApproval = false; st.connectWanted = 0;

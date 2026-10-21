@@ -17,6 +17,8 @@ const { BundleReceiver } = require('./bundle');
 // 2: large files in parallel parts (/api/part) and byte ranges; 3: bundles over several streams; 4: encrypted links
 // (TLS on the same port, a pinned certificate) and a sign-in that never sends the pairing token (see "sign-in")
 const PROTO = 4;
+// open connections allowed at once from one address, and in all (see _onSocket)
+const SOCKS_PER_ADDR = 64, SOCKS_TOTAL = 512;
 
 function rid(n = 12) { return crypto.randomBytes(n).toString('hex'); }
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
@@ -73,6 +75,8 @@ class FlickServer extends EventEmitter {
     // (it couldn't be made) Flick still answers plain links, which phone apps from 1.9 on refuse to use.
     this.tlsId = opts.tls || null;
     this.fp = this.tlsId ? this.tlsId.fp : null;
+    this.sockByAddr = new Map(); // address -> open connections (see _onSocket)
+    this.sockCount = 0;
     fs.mkdirSync(this.tmpDir, { recursive: true });
   }
 
@@ -125,6 +129,17 @@ class FlickServer extends EventEmitter {
 
   _onSocket(sock) {
     sock.on('error', () => sock.destroy());
+    // Caps on open connections, per address and in all, so nobody can tie up the PC with idle or half-made ones (a phone
+    // uses a few at a time: the WebSocket, a handful of parallel transfer streams, thumbnails)
+    const addr = sock.remoteAddress || '';
+    const n = this.sockByAddr.get(addr) || 0;
+    if (n >= SOCKS_PER_ADDR || this.sockCount >= SOCKS_TOTAL) { sock.destroy(); return; }
+    this.sockByAddr.set(addr, n + 1); this.sockCount++;
+    sock.once('close', () => {
+      this.sockCount--;
+      const k = (this.sockByAddr.get(addr) || 1) - 1;
+      if (k > 0) this.sockByAddr.set(addr, k); else this.sockByAddr.delete(addr);
+    });
     // a connection that never says anything doesn't get to hold a socket
     const quiet = setTimeout(() => sock.destroy(), 15000);
     sock.once('close', () => clearTimeout(quiet));
@@ -235,7 +250,9 @@ class FlickServer extends EventEmitter {
     if (s && s.conn && s.conn.open) {
       s.trusted = true;
       s.token = token;
-      s.conn.send({ t: 'paired', token });
+      // fp: this PC's certificate, for a phone that paired over Bluetooth (it sees no certificate there) to pin before
+      // its first Wi-Fi connection. Over TLS the phone pins the one it sees itself.
+      s.conn.send({ t: 'paired', token, fp: this.fp || undefined });
       this._takeOver(s);                          // the user just allowed this phone: it becomes the one in use
       this._connected(s);
     }
@@ -368,12 +385,14 @@ class FlickServer extends EventEmitter {
           // HMAC over both sides' random numbers and the link's identity (this PC's certificate), so someone in the
           // middle can neither read it nor relay the proof onto a link of their own. The PC proves itself first.
           s.v4 = true; s.nonceP = m.nonce; s.nonceS = rid(16);
-          if (d && d.token && !(d.tls && s.chan === 'plain')) {
+          if (d && d.token && d.tls && s.chan !== 'plain') {
             s.authWait = true;
             s.conn.send({ t: 'auth?', v: PROTO, nonce: s.nonceS, proof: this._proof(d.token, 'pc', s), pc: { id: this.id, name: this.name } });
             break;                                              // continues at 'auth'
           }
-          this._helloDone(s, false);                            // not paired here: it can ask to pair
+          // Not paired here: it can ask to pair. A phone paired before 1.9 is one too: its token travelled in the clear
+          // and may have been overheard, so it isn't enough to sign in with. It confirms once with the pairing code.
+          this._helloDone(s, false, d && d.token && !d.tls && s.chan !== 'plain' ? 'confirm' : undefined);
           break;
         }
         // phone apps before 1.9 send the token itself: good only over a plain link, from a phone that never signed in
@@ -393,15 +412,6 @@ class FlickServer extends EventEmitter {
           break;
         }
         s.token = d.token;
-        if (s.chan !== 'plain' && !d.tls) {
-          // its first sign-in over a secure link: a new token that never travelled in the clear (an old one might
-          // have been overheard), and from now on plain links don't work for this phone
-          const token = rid(16);
-          this.devices[s.device] = Object.assign({}, d, { token, tls: true });
-          s.token = token;
-          s.conn.send({ t: 'token', token });
-          this.emit('devices-changed', this.devices);
-        }
         this._helloDone(s, true);
         break;
       }
@@ -458,7 +468,9 @@ class FlickServer extends EventEmitter {
           break;
         }
         s.pairCode = pairCode(s.chan, n, s.pairNonceS);
-        this.emit('pair-request', Object.assign(this._publicSession(s), { code: s.pairCode }));
+        const was = this.devices[s.device];
+        // upgrade: a phone paired before 1.9 confirming itself once for encrypted connections
+        this.emit('pair-request', Object.assign(this._publicSession(s), { code: s.pairCode, upgrade: !!(was && was.token && !was.tls) }));
         break;
       }
       case 'lift': case 'move': case 'drop': case 'cancel': case 'send':

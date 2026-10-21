@@ -60,21 +60,23 @@ To try the whole build without publishing: Actions > Release > Run workflow, tic
   other. The phone app reaches the PC through a local port inside the phone (`TlsProxy`); its network security config
   allows unencrypted connections only to the phone itself. Bluetooth links are encrypted by Bluetooth.
 - **Pairing.** The PC asks before a new phone can connect, and both screens show the same 6-digit code: the phone
-  commits to its half of the code before the PC sends its half, so nobody in between can make the codes match. A
-  phone gets a random token only after the user clicks Allow.
+  commits to its half of the code before the PC sends its half, so nobody in between can make the codes match. The
+  user clicks Allow on the PC and taps Same code on the phone: the PC gives the phone a random token only after Allow,
+  and the phone keeps it (and pins the certificate) only after Same code, so a stranger answering in the PC's place
+  gets nowhere either.
 - **Signing in.** The token never crosses the network: on every connection the PC proves it holds the phone's token
   (an HMAC over both sides' random numbers and the certificate the phone sees), then the phone proves the same. A
   relay in the middle (with its own certificate) can neither read nor pass on these proofs. A phone paired with an
-  older Flick gets its certificate pinned and a fresh token on its first encrypted connection, and plain connections
-  stop working for it.
+  older Flick sent its token in the clear, so that token signs nothing in: the phone is confirmed once more with the
+  pairing code, and plain connections stop working for it.
 - **Requests.** Every upload, download and update fetch needs the token, and once a phone has signed in securely, its
   token works only over an encrypted link. The phone only accepts files, status and updates from the PC it signed in
   to. Pairing prompts are rate-limited, and browsers can't reach the phone API (a web `Origin` or a DNS-name `Host`
   gets 403).
 - **Received files** are marked as downloaded from the internet (`Zone.Identifier`), so Windows SmartScreen and
   Office Protected View apply. "Open files when they arrive" never launches programs, scripts or shortcuts.
-- **Limits.** WebSocket messages, pre-accept Quick Share data, sockets per address and Bluetooth stream buffers are
-  capped; uploads and Quick Shares that won't fit on the disk are refused up front.
+- **Limits.** WebSocket messages, pre-accept Quick Share data, open connections (64 per address, 512 in all) and
+  Bluetooth stream buffers are capped; uploads and Quick Shares that won't fit on the disk are refused up front.
 - **Updates.** Each release's `SHA256SUMS` is signed with Flick's release key, which is kept off GitHub (see
   signing/README.md); the PC and the phone install an update only if that signature checks out and the file matches.
   The phone app is signed only with Flick's own key (Android 9 and newer). CI pins every downloaded tool by checksum
