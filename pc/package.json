@@ -1,0 +1,9 @@
+{
+  "name": "flick",
+  "productName": "Flick",
+  "version": "1.4.0",
+  "description": "Flick - throw files from your phone onto your PC screen",
+  "main": "main.js",
+  "author": "Flick",
+  "license": "UNLICENSED"
+}

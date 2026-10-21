@@ -1,0 +1,37 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline';">
+<style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:rgba(0,0,0,0.012);}</style>
+</head>
+<body>
+<script>
+  (function () {
+    var last = 0, inside = false;
+    function hover(e) {
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+      var t = Date.now();
+      if (!inside || t - last > 30) { last = t; inside = true; window.flick.send('catcher:hover', { y: e.clientY }); }
+    }
+    document.addEventListener('dragenter', hover, true);
+    document.addEventListener('dragover', hover, true);
+    document.addEventListener('dragleave', function (e) {
+      if (e.relatedTarget) return;
+      inside = false;
+      window.flick.send('catcher:leave');
+    }, true);
+    document.addEventListener('mousedown', function () { window.flick.send('catcher:yield'); }, true);
+    document.addEventListener('drop', function (e) {
+      e.preventDefault();
+      inside = false;
+      var paths = [];
+      var files = (e.dataTransfer && e.dataTransfer.files) || [];
+      for (var i = 0; i < files.length; i++) { var p = window.flick.pathFor(files[i]); if (p) paths.push(p); }
+      window.flick.send('catcher:drop', { paths: paths, y: e.clientY });
+    }, true);
+  })();
+</script>
+</body>
+</html>

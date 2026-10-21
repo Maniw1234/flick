@@ -1,0 +1,822 @@
+'use strict';
+const { app, BrowserWindow, Tray, Menu, nativeImage, screen, ipcMain, desktopCapturer, shell, dialog } = require('electron');
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const { execFile, spawn } = require('child_process');
+const { FlickServer, lanAddresses, rid } = require('./server');
+const { apkInfoAsync } = require('./apkinfo');
+
+const VERSION = require('./package.json').version;
+const IS_WIN = process.platform === 'win32';
+const HIDDEN_START = process.argv.includes('--hidden');
+const TEST_MODE = process.env.FLICK_TEST === '1';
+
+if (process.env.FLICK_USERDATA) app.setPath('userData', process.env.FLICK_USERDATA);
+if (!app.requestSingleInstanceLock()) { app.quit(); process.exit(0); }
+app.setAppUserModelId('com.flick.pc');
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+
+// ------------------------------------------------------------ settings
+const userDir = app.getPath('userData');
+const SETTINGS = path.join(userDir, 'settings.json');
+const LOG = path.join(userDir, 'flick.log');
+function log(...a) {
+  const line = new Date().toISOString() + ' ' + a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ') + '\n';
+  try {
+    if (fs.existsSync(LOG) && fs.statSync(LOG).size > 512 * 1024) fs.renameSync(LOG, LOG + '.1');
+    fs.appendFileSync(LOG, line);
+  } catch (e) { /* ignore */ }
+  if (TEST_MODE) process.stdout.write(line);
+}
+
+const DEFAULTS = {
+  id: null, name: null, side: 'right', anchor: 0.5, size: 1, saveDir: 'desktop', sound: true,
+  startup: true, edgeSend: true, devices: {}, firstRun: true, displayId: null, theme: 'roadster',
+};
+let store = Object.assign({}, DEFAULTS);
+try { store = Object.assign({}, DEFAULTS, JSON.parse(fs.readFileSync(SETTINGS, 'utf8'))); } catch (e) { /* first run */ }
+if (!store.id) store.id = rid(8);
+let saveTimer = null;
+function saveStore() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    try { fs.mkdirSync(userDir, { recursive: true }); fs.writeFileSync(SETTINGS, JSON.stringify(store, null, 2)); } catch (e) { log('save failed', e.message); }
+  }, 150);
+}
+
+function defaultName() {
+  return new Promise((resolve) => {
+    let user = '';
+    try { user = (os.userInfo().username || '').replace(/[^\p{L}\p{N} ._-]/gu, '').trim(); } catch (e) { /* ignore */ }
+    const host = os.hostname() || '';
+    const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+    const first = (s) => cap(String(s).trim().split(/[\s._-]+/)[0] || '');
+    // A real-looking account name ("Mani Weinstein") beats a generated host name ("DESKTOP-4F2K9QX")
+    const looksLikeName = /^\p{L}[\p{L} .'-]{1,40}$/u.test(user) && !/^(user|admin|administrator|owner|pc)$/i.test(user) && !/^(desktop|laptop|win)\b/i.test(user);
+    const genericHost = !host || /^(DESKTOP|LAPTOP|WIN|PC)-[A-Z0-9]{5,}$/i.test(host);
+    const fallback = looksLikeName ? first(user) + "'s PC" : (!genericHost ? host : (user ? first(user) + "'s PC" : 'My PC'));
+    if (!IS_WIN || !user) return resolve(fallback);
+    execFile('net', ['user', os.userInfo().username], { windowsHide: true, timeout: 4000 }, (err, out) => {
+      if (err || !out) return resolve(fallback);
+      // value must be on the same line (an empty "Full Name" used to swallow the next line, e.g. "Comment")
+      const m = out.match(/^Full Name[ \t]+(\S[^\r\n]*)$/im);
+      const full = m && m[1].trim();
+      if (full && full.length > 1 && !/^comment$/i.test(full)) return resolve(first(full) + "'s PC");
+      resolve(fallback);
+    });
+  });
+}
+
+function saveDirPath() {
+  if (store.saveDir === 'desktop') return app.getPath('desktop');
+  if (store.saveDir === 'downloads') return app.getPath('downloads');
+  try { if (store.saveDir && fs.statSync(store.saveDir).isDirectory()) return store.saveDir; } catch (e) { /* fallthrough */ }
+  return app.getPath('desktop');
+}
+function saveDirLabel() {
+  if (store.saveDir === 'desktop') return 'Desktop';
+  if (store.saveDir === 'downloads') return 'Downloads';
+  return path.basename(saveDirPath()) || 'folder';
+}
+
+// ------------------------------------------------------------ windows
+const PRELOAD = path.join(__dirname, 'preload.js');
+let overlay = null, overlayShown = false, overlayReady = false;
+let panel = null, catcher = null, tray = null;
+let server = null;
+
+function displays() { return screen.getAllDisplays(); }
+function targetDisplay() {
+  const ds = displays();
+  if (store.displayId) { const d = ds.find((x) => x.id === store.displayId); if (d) return d; }
+  return ds.reduce((best, d) => {
+    if (store.side === 'right') return (d.bounds.x + d.bounds.width > best.bounds.x + best.bounds.width) ? d : best;
+    return d.bounds.x < best.bounds.x ? d : best;
+  }, ds[0]);
+}
+
+function overlayBounds() {
+  const b = targetDisplay().bounds;
+  return { x: b.x, y: b.y, width: b.width, height: b.height - 1 }; // 1px short so Windows never treats it as a fullscreen app
+}
+
+function kFactor() { return 0.66 * (store.size || 1); }
+
+function phoneScreen() {
+  return (server && server.session && server.session.screen) || { w: 412, h: 915, dpr: 2.6 };
+}
+
+function overlayConfig() {
+  const d = targetDisplay();
+  const ob = overlayBounds();
+  const taskbar = Math.max(0, (d.bounds.y + d.bounds.height) - (d.workArea.y + d.workArea.height));
+  return { W: ob.width, H: ob.height, dispW: d.bounds.width, dispH: d.bounds.height, dpr: d.scaleFactor || 1,
+    side: store.side, anchor: store.anchor, k: kFactor(), sound: !!store.sound, taskbar: taskbar || 0, saveLabel: saveDirLabel(), theme: themeName() };
+}
+
+function createOverlay() {
+  const ob = overlayBounds();
+  overlay = new BrowserWindow({
+    x: ob.x, y: ob.y, width: ob.width, height: ob.height,
+    transparent: true, frame: false, resizable: false, movable: false, minimizable: false, maximizable: false,
+    fullscreenable: false, skipTaskbar: true, focusable: false, show: false, hasShadow: false, alwaysOnTop: true,
+    thickFrame: false, backgroundColor: '#00000000', title: 'Flick Overlay',
+    webPreferences: { preload: PRELOAD, backgroundThrottling: false, autoplayPolicy: 'no-user-gesture-required', spellcheck: false },
+  });
+  overlay.setAlwaysOnTop(true, 'screen-saver');
+  overlay.setIgnoreMouseEvents(true);
+  overlay.setMenu(null);
+  overlay.loadFile(path.join(__dirname, 'overlay', 'overlay.html'));
+  overlay.on('closed', () => { overlay = null; overlayShown = false; overlayReady = false; });
+}
+
+function placeOverlay() {
+  if (!overlay) return;
+  const ob = overlayBounds();
+  overlay.setBounds(ob);
+  overlay.webContents.send('fx:config', overlayConfig());
+}
+
+const THEMES = ['roadster', 'liquid', 'teleport', 'halo'];
+function themeName() { return THEMES.includes(store.theme) ? store.theme : 'roadster'; }
+
+// Moments that start from a quiet screen take a fresh photo of the desktop first (used for blur, refraction and
+// night grading), while the overlay is still hidden so it can never photograph itself.
+const SHOT_FIRST = { lift: true, hold: true, outgoing: true, demo: true, 'edge-hover': true, preview: true };
+let revealT = null;
+function reveal() {
+  clearTimeout(revealT); revealT = null;
+  if (!overlay || overlayShown) return;
+  overlay.setBounds(overlayBounds());
+  overlay.showInactive();
+  overlay.setAlwaysOnTop(true, 'screen-saver');
+  overlayShown = true;
+}
+function ensureShown(withShot) {
+  if (!overlay || overlayShown || revealT) return;
+  if (withShot && Date.now() - lastShot > 1500) {
+    // photograph the desktop first and only then show the overlay, so the picture never contains the overlay itself;
+    // a very slow capture is abandoned (the effects then run without it) rather than holding the animation back
+    let done = false;
+    const go = () => { if (done) return; done = true; reveal(); };
+    revealT = setTimeout(() => { shotAbandoned = true; go(); }, 1100);
+    shotAbandoned = false;
+    captureShot().then(go, go);
+  } else reveal();
+}
+function fx(type, data) {
+  if (!overlay) return;
+  overlay.webContents.send('fx:' + type, data);
+  ensureShown(!!SHOT_FIRST[type]);
+}
+
+ipcMain.on('fx:ready', () => { overlayReady = true; if (overlay) overlay.webContents.send('fx:config', overlayConfig()); });
+ipcMain.on('fx:idle', () => {
+  if (overlay && overlayShown) { overlay.hide(); overlayShown = false; }
+});
+
+// full-resolution photo of the desktop (raw BGRA pixels, so it lines up pixel-for-pixel with the real screen)
+let shotBusy = null, lastShot = 0, shotAbandoned = false;
+function captureShot() {
+  if (!overlay) return Promise.resolve();
+  if (shotBusy) return shotBusy;
+  shotBusy = (async () => {
+    try {
+      const d = targetDisplay();
+      const w = Math.round(d.size.width * d.scaleFactor), h = Math.round(d.size.height * d.scaleFactor);
+      const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: w, height: h } });
+      const src = sources.find((s) => String(s.display_id) === String(d.id)) || sources[0];
+      if (shotAbandoned) {
+        // the overlay went up before this picture was taken: it may contain the overlay, and the old one is stale
+        log('shot too slow, effects run without it');
+        if (overlay) overlay.webContents.send('fx:noshot');
+      } else if (src && src.thumbnail && !src.thumbnail.isEmpty() && overlay) {
+        const sz = src.thumbnail.getSize();
+        lastShot = Date.now();
+        overlay.webContents.send('fx:shot', { bgra: src.thumbnail.toBitmap(), w: sz.width, h: sz.height });
+      }
+    } catch (e) { log('shot failed', e.message); }
+  })();
+  shotBusy.finally(() => { shotBusy = null; });
+  return shotBusy;
+}
+
+// ------------------------------------------------------------ catcher (drag a PC file to the screen edge -> phone)
+function catcherBounds() {
+  // 1px strip on the phone-side screen edge, only as tall as the phone (so the rest of the edge stays untouched)
+  const b = targetDisplay().bounds;
+  const h = Math.round(Math.min(b.height, Math.max(260, phoneScreen().h * kFactor() * 1.15)));
+  const y = Math.round(b.y + Math.max(0, Math.min(b.height - h, store.anchor * b.height - h / 2)));
+  const x = store.side === 'right' ? b.x + b.width - 1 : b.x;
+  return { x, y, width: 1, height: h };
+}
+let catcherYieldT = null;
+ipcMain.on('catcher:yield', () => {
+  // The user clicked the very edge pixel: get out of the way for a few seconds.
+  if (!catcher) return;
+  catcher.setIgnoreMouseEvents(true);
+  clearTimeout(catcherYieldT);
+  catcherYieldT = setTimeout(() => { if (catcher) catcher.setIgnoreMouseEvents(false); }, 5000);
+});
+function ensureCatcher() {
+  const want = store.edgeSend && server && server.connected;
+  if (!want) { if (catcher) { catcher.destroy(); catcher = null; } return; }
+  if (catcher) { catcher.setBounds(catcherBounds()); return; }
+  const cb = catcherBounds();
+  catcher = new BrowserWindow({
+    x: cb.x, y: cb.y, width: cb.width, height: cb.height, frame: false, transparent: true, resizable: false, movable: false,
+    minimizable: false, maximizable: false, fullscreenable: false, skipTaskbar: true, focusable: false, show: false,
+    hasShadow: false, alwaysOnTop: true, thickFrame: false, backgroundColor: '#01000000', title: 'Flick Edge',
+    webPreferences: { preload: PRELOAD, backgroundThrottling: false, spellcheck: false },
+  });
+  catcher.setAlwaysOnTop(true, 'screen-saver');
+  catcher.setMenu(null);
+  catcher.loadFile(path.join(__dirname, 'catcher', 'catcher.html'));
+  catcher.once('ready-to-show', () => { if (catcher) { catcher.showInactive(); catcher.setBounds(catcherBounds()); } });
+  catcher.on('closed', () => { catcher = null; });
+}
+
+function overlayYFromScreenY(sy) { return sy - overlayBounds().y; }
+function phoneYFromOverlayY(oy) {
+  const ps = phoneScreen();
+  const H = overlayBounds().height;
+  return (oy - store.anchor * H) / kFactor() + ps.h / 2;
+}
+
+let hoverOn = false;
+ipcMain.on('catcher:hover', (_e, d) => {
+  if (!server || !server.connected || !catcher) return;
+  const sy = catcher.getBounds().y + ((d && d.y) || 0);
+  const oy = overlayYFromScreenY(sy);
+  fx('edge-hover', { on: true, y: oy, h: phoneScreen().h * kFactor() * 0.55 });
+  if (!hoverOn || Math.random() < 0.5) server.pushToPhone({ t: 'edge', on: true, y: phoneYFromOverlayY(oy) });
+  hoverOn = true;
+});
+ipcMain.on('catcher:leave', () => {
+  hoverOn = false;
+  fx('edge-hover', { on: false });
+  if (server) server.pushToPhone({ t: 'edge', on: false });
+});
+
+const MIME = {
+  jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', heic: 'image/heic', heif: 'image/heif', svg: 'image/svg+xml',
+  mp4: 'video/mp4', mov: 'video/quicktime', mkv: 'video/x-matroska', webm: 'video/webm', avi: 'video/x-msvideo', m4v: 'video/mp4', '3gp': 'video/3gpp',
+  mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', ogg: 'audio/ogg', flac: 'audio/flac', aac: 'audio/aac',
+  pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown', csv: 'text/csv', json: 'application/json', html: 'text/html', htm: 'text/html',
+  doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ppt: 'application/vnd.ms-powerpoint', pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  zip: 'application/zip', rar: 'application/vnd.rar', '7z': 'application/x-7z-compressed', apk: 'application/vnd.android.package-archive',
+};
+function extOf(name) { const m = /\.([^.]+)$/.exec(name || ''); return m ? m[1].toLowerCase() : ''; }
+function kindOf(name) {
+  const m = MIME[extOf(name)] || '';
+  if (m.startsWith('image/')) return 'image';
+  if (m.startsWith('video/')) return 'video';
+  return 'doc';
+}
+
+async function thumbFor(p) {
+  const kind = kindOf(p);
+  try {
+    if (kind === 'image' && !IS_WIN) {
+      const img = nativeImage.createFromPath(p);
+      if (!img.isEmpty()) { const s = img.getSize(); const r = Math.min(1, 360 / Math.max(s.width, s.height)); const t = img.resize({ width: Math.max(1, Math.round(s.width * r)), height: Math.max(1, Math.round(s.height * r)) }); return { url: 'data:image/jpeg;base64,' + t.toJPEG(82).toString('base64'), w: t.getSize().width, h: t.getSize().height }; }
+    }
+    if (IS_WIN && (kind === 'image' || kind === 'video' || extOf(p) === 'pdf')) {
+      const t = await nativeImage.createThumbnailFromPath(p, { width: 360, height: 360 });
+      if (t && !t.isEmpty()) return { url: 'data:image/jpeg;base64,' + t.toJPEG(82).toString('base64'), w: t.getSize().width, h: t.getSize().height };
+    }
+  } catch (e) { /* no thumb */ }
+  return null;
+}
+
+ipcMain.on('catcher:drop', async (_e, d) => {
+  hoverOn = false;
+  if (!server || !server.connected) return;
+  const paths = ((d && d.paths) || []).filter((p) => { try { return fs.statSync(p).isFile(); } catch (e) { return false; } }).slice(0, 20);
+  if (!paths.length) { fx('edge-hover', { on: false }); server.pushToPhone({ t: 'edge', on: false }); return; }
+  const sy = catcher ? catcher.getBounds().y + ((d && d.y) || 0) : overlayBounds().y + store.anchor * overlayBounds().height;
+  let oy = overlayYFromScreenY(sy);
+  fx('edge-hover', { on: false });
+  for (let i = 0; i < paths.length; i++) {
+    const p = paths[i];
+    const name = path.basename(p);
+    const mime = MIME[extOf(name)] || 'application/octet-stream';
+    const offer = server.offerFile(p, mime);
+    const th = await thumbFor(p);
+    const ext = extOf(name);
+    const kind = kindOf(name);
+    const aspect = th ? th.w / th.h : 0.72;
+    const cw = 150, ch = Math.round(Math.max(110, Math.min(220, cw / Math.max(0.55, Math.min(1.8, aspect)))));
+    const y = oy + i * 22;
+    fx('outgoing', { fid: offer.fid, name, thumb: th && th.url, kind, badge: kind === 'doc' ? (ext || 'file').toUpperCase().slice(0, 4) : '', y, card: { w: cw, h: ch } });
+    server.pushToPhone({
+      t: 'incoming', fid: offer.fid, name, size: offer.size, mime, kind, ext,
+      thumb: th && th.url, aspect, y: phoneYFromOverlayY(y), url: '/api/file/' + encodeURIComponent(offer.fid), delay: i * 90,
+    });
+    log('offer', name, offer.size);
+  }
+});
+
+// ------------------------------------------------------------ panel (status + settings)
+function createPanel() {
+  const wa = screen.getPrimaryDisplay().workArea;
+  const W = 420, H = 680;
+  panel = new BrowserWindow({
+    width: W, height: H, x: wa.x + wa.width - W - 16, y: wa.y + wa.height - H - 16,
+    frame: false, resizable: false, maximizable: false, fullscreenable: false, show: false, backgroundColor: '#202020',
+    title: 'Flick', icon: path.join(__dirname, 'assets', IS_WIN ? 'icon.ico' : 'icon.png'),
+    webPreferences: { preload: PRELOAD, spellcheck: false },
+  });
+  panel.setMenu(null);
+  panel.loadFile(path.join(__dirname, 'panel', 'panel.html'));
+  panel.on('close', (e) => { if (!app.isQuitting) { e.preventDefault(); panel.hide(); sendPreview(false); } });
+  panel.on('closed', () => { panel = null; });
+  panel.webContents.on('did-finish-load', () => pushPanelState());
+}
+
+function showPanel() {
+  if (!panel) createPanel();
+  const wa = screen.getPrimaryDisplay().workArea;
+  const [W, H] = panel.getSize();
+  panel.setPosition(wa.x + wa.width - W - 16, wa.y + wa.height - H - 16);
+  panel.show();
+  panel.focus();
+  pushPanelState();
+}
+function togglePanel() { if (panel && panel.isVisible()) panel.hide(); else showPanel(); }
+
+// the user's Windows accent color, lightened the way Windows 11 does it on dark surfaces
+function accentColors() {
+  let hex = '0078d4';
+  try { const { systemPreferences } = require('electron'); const a = systemPreferences.getAccentColor && systemPreferences.getAccentColor(); if (a && /^[0-9a-f]{6}/i.test(a)) hex = a.slice(0, 6); } catch (e) { /* default */ }
+  const n = parseInt(hex, 16);
+  const mix = (c) => Math.round(c + (255 - c) * 0.42);
+  const r = mix((n >> 16) & 255), g = mix((n >> 8) & 255), b = mix(n & 255);
+  const lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+  return { accent: `rgb(${r},${g},${b})`, onAccent: lum > 0.55 ? '#000' : '#fff' };
+}
+
+function panelState() {
+  const s = server && server.session;
+  const ac = accentColors();
+  return {
+    accent: ac.accent, onAccent: ac.onAccent,
+    version: VERSION, name: server ? server.name : store.name, port: server ? server.port : null,
+    ips: lanAddresses().map((a) => a.address),
+    connected: !!(server && server.connected), phone: s && s.connected ? s.name : null,
+    phoneApp: server && server.phoneApp ? { name: server.phoneApp.name, code: server.phoneApp.code } : null,
+    phoneHas: s && s.connected ? { code: s.app || 0, name: s.appName || '' } : null,
+    side: store.side, anchor: store.anchor, size: store.size, saveDir: store.saveDir, saveDirLabel: saveDirLabel(), saveDirPath: saveDirPath(),
+    sound: store.sound, startup: store.startup, edgeSend: store.edgeSend, isWin: IS_WIN, theme: themeName(),
+    devices: Object.entries(store.devices || {}).map(([id, d]) => ({ id, name: d.name, added: d.added })),
+    displays: displays().map((d, i) => ({ id: d.id, label: `Display ${i + 1} (${d.size.width}×${d.size.height})`, primary: d.id === screen.getPrimaryDisplay().id })),
+    displayId: store.displayId, firstRun: store.firstRun,
+  };
+}
+function pushPanelState() { if (panel && !panel.isDestroyed()) panel.webContents.send('panel:state', panelState()); updateTray(); }
+
+let previewOn = false;
+function sendPreview(on) {
+  if (on === previewOn) return;
+  previewOn = on;
+  fx('preview', { on, ph: phoneScreen().h });
+}
+
+ipcMain.on('panel:set', (_e, { key, value }) => {
+  switch (key) {
+    case 'name': {
+      const v = String(value || '').trim().slice(0, 40);
+      if (v) { store.name = v; if (server) server.setName(v); }
+      break;
+    }
+    case 'side': if (value === 'left' || value === 'right') { store.side = value; } break;
+    case 'anchor': store.anchor = Math.max(0.15, Math.min(0.85, +value || 0.5)); break;
+    case 'size': store.size = Math.max(0.7, Math.min(1.5, +value || 1)); break;
+    case 'sound': store.sound = !!value; break;
+    case 'edgeSend': store.edgeSend = !!value; break;
+    case 'displayId': store.displayId = value || null; break;
+    case 'saveDir': if (value === 'desktop' || value === 'downloads') store.saveDir = value; break;
+    case 'theme': if (THEMES.includes(value)) { store.theme = value; setTimeout(() => fx('demo', {}), 120); } break;
+    case 'startup': store.startup = !!value; applyStartup(); break;
+    default: return;
+  }
+  saveStore();
+  if (server) server.setSettings({ side: store.side, anchor: store.anchor, theme: themeName() });
+  placeOverlay();
+  ensureCatcher();
+  pushPanelState();
+  if (key === 'anchor' || key === 'side' || key === 'size' || key === 'displayId') {
+    sendPreview(true);
+    clearTimeout(ipcMain._pv); ipcMain._pv = setTimeout(() => sendPreview(false), 1400);
+  }
+});
+
+ipcMain.on('panel:action', async (_e, { what, arg }) => {
+  switch (what) {
+    case 'hide': if (panel) panel.hide(); sendPreview(false); break;
+    case 'quit': app.isQuitting = true; app.quit(); break;
+    case 'openFolder': shell.openPath(saveDirPath()); break;
+    case 'chooseFolder': {
+      const r = await dialog.showOpenDialog(panel, { properties: ['openDirectory', 'createDirectory'], defaultPath: saveDirPath() });
+      if (!r.canceled && r.filePaths[0]) { store.saveDir = r.filePaths[0]; saveStore(); pushPanelState(); }
+      break;
+    }
+    case 'forget': if (server) server.forget(arg); break;
+    case 'fixFirewall': fixFirewall(); break;
+    case 'testFx': fx('connect', {}); break;
+    case 'demo': fx('demo', {}); break;
+    case 'dismissIntro': store.firstRun = false; saveStore(); pushPanelState(); break;
+    case 'openLog': shell.openPath(LOG); break;
+    default: break;
+  }
+});
+
+ipcMain.on('panel:pair-answer', (_e, { device, allow }) => {
+  if (!server) return;
+  if (allow) server.approve(device); else server.deny(device);
+});
+
+ipcMain.on('panel:preview', (_e, d) => sendPreview(!!(d && d.on)));
+
+function fixFirewall() {
+  if (!IS_WIN) return;
+  const exe = process.execPath;
+  const cmdFile = path.join(os.tmpdir(), 'flick-firewall.cmd');
+  const body = [
+    '@echo off',
+    'netsh advfirewall firewall delete rule name="Flick" >nul 2>&1',
+    `netsh advfirewall firewall add rule name="Flick" dir=in action=allow program="${exe}" enable=yes profile=any`,
+  ].join('\r\n');
+  try { fs.writeFileSync(cmdFile, body); } catch (e) { return; }
+  const ps = `Start-Process -FilePath '${cmdFile.replace(/'/g, "''")}' -Verb RunAs -WindowStyle Hidden`;
+  spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true, detached: true, stdio: 'ignore' }).unref();
+}
+
+function applyStartup() {
+  if (!IS_WIN || !app.isPackaged) return;
+  try { app.setLoginItemSettings({ openAtLogin: !!store.startup, path: process.execPath, args: ['--hidden'], name: 'Flick' }); } catch (e) { log('startup failed', e.message); }
+}
+
+// ------------------------------------------------------------ tray
+function updateTray() {
+  if (!tray) return;
+  const s = server && server.session;
+  const status = server && server.connected ? `Connected to ${s.name}` : 'Waiting for your phone';
+  tray.setToolTip(`Flick — ${status}`);
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: status, enabled: false },
+    { type: 'separator' },
+    { label: 'Open Flick', click: showPanel },
+    { label: `Open ${saveDirLabel()}`, click: () => shell.openPath(saveDirPath()) },
+    { type: 'separator' },
+    { label: 'Quit Flick', click: () => { app.isQuitting = true; app.quit(); } },
+  ]));
+}
+function createTray() {
+  const img = nativeImage.createFromPath(path.join(__dirname, 'assets', IS_WIN ? 'tray.ico' : 'tray.png'));
+  tray = new Tray(img.isEmpty() ? nativeImage.createEmpty() : img);
+  tray.on('click', togglePanel);
+  tray.on('double-click', showPanel);
+  updateTray();
+}
+
+// ------------------------------------------------------------ phone app updates (over Wi-Fi, from this PC)
+// Candidates: the phone app that ships inside this PC app, plus any Flick APK in Downloads\Flick (so a newer phone
+// build can be dropped there without reinstalling the PC app). The highest version code wins; the phone itself checks
+// package, version, size, SHA-256 and signature before it offers to install.
+const PHONE_PKG = 'com.flick.app';
+const BUNDLED_APK = process.env.FLICK_PHONE_APK || path.join(__dirname, 'phone-app', 'Flick.apk');
+function apkDir() { return process.env.FLICK_APK_DIR || path.join(app.getPath('downloads'), 'Flick'); }
+const apkCache = new Map(); // path -> { size, mtime, info }
+
+async function scanPhoneApps() {
+  const cands = [BUNDLED_APK];
+  try {
+    for (const n of await fs.promises.readdir(apkDir())) if (/\.apk$/i.test(n)) cands.push(path.join(apkDir(), n));
+  } catch (e) { /* no Downloads\Flick folder */ }
+  let best = null;
+  for (const p of cands) {
+    let st;
+    try { st = await fs.promises.stat(p); } catch (e) { apkCache.delete(p); continue; }
+    if (!st.isFile()) continue;
+    let c = apkCache.get(p);
+    if (!c || c.size !== st.size || c.mtime !== st.mtimeMs) {
+      let info = null;
+      try { info = await apkInfoAsync(p, 64 * 1024 * 1024); } catch (e) { /* not an app (or still being written) */ }
+      c = { size: st.size, mtime: st.mtimeMs, info };
+      apkCache.set(p, c);
+    }
+    const i = c.info;
+    if (!i || i.package !== PHONE_PKG) continue;
+    if (!best || i.code > best.code) best = Object.assign({ path: p }, i);
+  }
+  return best;
+}
+
+let appScan = null;
+async function refreshPhoneApp(always) {
+  if (!server) return;
+  while (appScan) await appScan;
+  appScan = scanPhoneApps().catch((e) => { log('phone app scan failed', e.message); return null; });
+  const best = await appScan;
+  appScan = null;
+  const prev = server.phoneApp;
+  if ((!prev) !== (!best) || (prev && best && (prev.sha256 !== best.sha256 || prev.path !== best.path))) {
+    log('phone app', best ? `${best.name} (${best.code}) ${best.path}` : 'none');
+  }
+  server.setPhoneApp(best, !!always);
+  pushPanelState();
+}
+setInterval(() => { if (server && server.connected) refreshPhoneApp(); }, 20000);
+
+// ------------------------------------------------------------ transfers (phone -> PC)
+const transfers = new Map(); // tid -> state
+
+function sanitizeName(n) {
+  let s = String(n || 'file').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/, '').trim();
+  if (!s) s = 'file';
+  if (/^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i.test(s)) s = '_' + s;
+  if (s.length > 180) { const e = path.extname(s); s = s.slice(0, 180 - e.length) + e; }
+  return s;
+}
+function uniquePath(dir, name) {
+  const ext = path.extname(name), base = name.slice(0, name.length - ext.length);
+  let p = path.join(dir, name), i = 2;
+  while (fs.existsSync(p)) p = path.join(dir, `${base} (${i++})${ext}`);
+  return p;
+}
+
+// what the overlay needs to draw the card: a photo, a document, a folder, or a stack of several items
+function liftInfo(m, t) {
+  const f = m.file || {};
+  const thumbs = Array.isArray(m.thumbs) ? m.thumbs.filter((x) => typeof x === 'string' && x.startsWith('data:image/')).slice(0, 2) : [];
+  return {
+    tid: m.tid, name: t.name, kind: f.kind, badge: f.badge, thumb: m.thumb || null, thumbs,
+    count: Math.max(1, Math.min(100000, +f.count || 1)), folder: !!f.folder,
+    size: f.size || 0, card: { w: m.w || 160, h: m.h || 160 },
+  };
+}
+
+function uniqueDirPath(dir, name) {
+  let p = path.join(dir, name), i = 2;
+  while (fs.existsSync(p)) p = path.join(dir, `${name} (${i++})`);
+  return p;
+}
+
+// move one staged file or folder into place; across drives (or when Windows briefly locks a fresh file) copy instead
+async function placeItem(src, dest) {
+  try { await fs.promises.rename(src, dest); return; }
+  catch (e) { if (!['EXDEV', 'EPERM', 'EBUSY', 'EACCES', 'ENOTEMPTY'].includes(e.code)) throw e; }
+  await fs.promises.cp(src, dest, { recursive: true, errorOnExist: true, force: false, preserveTimestamps: true });
+  await fs.promises.rm(src, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {});
+}
+
+async function finalizeBundle(t) {
+  const dir = saveDirPath();
+  fs.mkdirSync(dir, { recursive: true });
+  const placed = [];
+  for (const top of t.bundle.tops) {
+    const src = path.join(t.tmpPath, top);
+    let st;
+    try { st = await fs.promises.stat(src); } catch (e) { continue; }
+    const dest = st.isDirectory() ? uniqueDirPath(dir, top) : uniquePath(dir, top);
+    await placeItem(src, dest);
+    const now = new Date(); fs.utimes(dest, now, now, () => {});
+    placed.push(path.basename(dest));
+  }
+  fs.rm(t.tmpPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }, () => {});
+  if (!placed.length) throw new Error('nothing received');
+  log('saved', placed.length, 'item(s) in', dir, t.bundle.files, 'files');
+  return placed.length === 1 ? placed[0] : placed.length + ' items';
+}
+
+function tState(tid) {
+  let t = transfers.get(tid);
+  if (!t) { t = { tid, state: 'lifted', upload: 'none', name: 'file', t0: Date.now() }; transfers.set(tid, t); }
+  return t;
+}
+
+async function finalize(t) {
+  if (t.done) return;
+  t.done = true;
+  const dir = saveDirPath();
+  try {
+    if (t.bundle) {
+      const name = await finalizeBundle(t);
+      fx('saved', { tid: t.tid, name, where: saveDirLabel() });
+      if (server) server.pushToPhone({ t: 'saved', tid: t.tid, name, where: saveDirLabel() });
+      setTimeout(() => transfers.delete(t.tid), 5000);
+      return;
+    }
+    fs.mkdirSync(dir, { recursive: true });
+    const dest = uniquePath(dir, sanitizeName(t.name));
+    try { await fs.promises.rename(t.tmpPath, dest); }
+    catch (e) {
+      if (e.code === 'EXDEV' || e.code === 'EPERM') { await fs.promises.copyFile(t.tmpPath, dest); await fs.promises.unlink(t.tmpPath).catch(() => {}); }
+      else throw e;
+    }
+    const now = new Date(); fs.utimes(dest, now, now, () => {});
+    log('saved', dest);
+    fx('saved', { tid: t.tid, name: path.basename(dest), where: saveDirLabel() });
+    if (server) server.pushToPhone({ t: 'saved', tid: t.tid, name: path.basename(dest), where: saveDirLabel() });
+  } catch (e) {
+    log('finalize failed', e.message);
+    fx('failed', { tid: t.tid });
+    if (server) server.pushToPhone({ t: 'failed', tid: t.tid, why: 'save' });
+  }
+  setTimeout(() => transfers.delete(t.tid), 5000);
+}
+
+function discard(t) {
+  if (t.tmpPath && t.bundle) fs.rm(t.tmpPath, { recursive: true, force: true }, () => {});
+  else if (t.tmpPath) fs.unlink(t.tmpPath, () => {});
+  transfers.delete(t.tid);
+}
+
+function wireServer() {
+  server.on('log', (m) => log(m));
+  server.on('phone-hello', (s) => { log('hello', s.name, s.address, 'app', s.appName || 'before 1.4'); pushPanelState(); });
+  server.on('app-check', () => refreshPhoneApp(true));
+  server.on('app-download', (a) => log('phone downloading app update', a.code, a.size));
+  server.on('hold', ({ p }) => {
+    fx('hold', { p, ph: phoneScreen().h });
+  });
+  server.on('connected', (s) => {
+    log('connected', s.name);
+    fx('connect', { name: s.name });
+    pushPanelState();
+    ensureCatcher();
+    refreshPhoneApp();
+  });
+  server.on('disconnected', (s) => {
+    log('disconnected', s && s.name);
+    pushPanelState();
+    ensureCatcher();
+    for (const t of transfers.values()) if (t.state === 'lifted') { fx('cancel', { tid: t.tid }); discard(t); }
+  });
+  server.on('pair-request', (s) => {
+    log('pair request', s.name);
+    showPanel();
+    if (panel) {
+      // make sure the "Allow" prompt is really in front of whatever the user is doing
+      panel.setAlwaysOnTop(true, 'floating');
+      panel.show();
+      panel.focus();
+      panel.flashFrame(true);
+      panel.webContents.send('panel:pair', s);
+    }
+  });
+  server.on('pair-cancel', (device) => {
+    if (panel) {
+      panel.setAlwaysOnTop(false);
+      panel.flashFrame(false);
+      panel.webContents.send('panel:pair-cancel', { device });
+    }
+  });
+  server.on('devices-changed', (devs) => { store.devices = devs; saveStore(); pushPanelState(); });
+
+  server.on('lift', (m) => {
+    const t = tState(m.tid);
+    t.name = (m.file && m.file.name) || t.name;
+    t.state = 'lifted';
+    fx('lift', liftInfo(m, t));
+  });
+  server.on('move', (m) => fx('move', m));
+  server.on('drop', (m) => {
+    const t = tState(m.tid);
+    t.state = 'dropped';
+    fx('drop', m);
+    if (t.upload === 'done') finalize(t);
+    else if (t.upload === 'failed') { fx('failed', { tid: t.tid }); }
+    clearTimeout(t.timer);
+    t.timer = setTimeout(() => { if (!t.done && t.upload !== 'done') { fx('failed', { tid: t.tid }); server.pushToPhone({ t: 'failed', tid: t.tid, why: 'timeout' }); discard(t); } }, 10 * 60 * 1000);
+  });
+  server.on('send', (m) => { // programmatic send (from the phone menu): fly in from the phone edge
+    const t = tState(m.tid);
+    t.name = (m.file && m.file.name) || t.name;
+    t.state = 'dropped';
+    const ps = { w: m.pw || phoneScreen().w, h: m.ph || phoneScreen().h };
+    const w = m.w || 160, h = m.h || 160;
+    fx('lift', Object.assign(liftInfo(m, t), { card: { w, h } }));
+    const x = store.side === 'right' ? -w * 0.55 : ps.w - w * 0.45;
+    setTimeout(() => fx('drop', { tid: m.tid, x, y: ps.h / 2 - h / 2, w, h, r: 0, vx: store.side === 'right' ? -2.6 : 2.6, vy: 0, pw: ps.w, ph: ps.h }), 140);
+    if (t.upload === 'done') finalize(t);
+  });
+  server.on('cancel', (m) => {
+    const t = tState(m.tid);
+    const wasDropped = t.state === 'dropped';
+    t.state = 'canceled';
+    fx(m.failed && wasDropped ? 'failed' : 'cancel', { tid: m.tid });
+    if (t.upload === 'done') discard(t);
+  });
+  server.on('upload-start', ({ tid, name }) => { const t = tState(tid); t.upload = 'uploading'; if (name && t.name === 'file') t.name = name; });
+  server.on('upload-progress', ({ tid, received, total }) => { const t = transfers.get(tid); if (t && t.state === 'dropped' && total) fx('progress', { tid, p: received / total }); });
+  server.on('bundle-manifest', ({ tid, files, bytes }) => {
+    fx('info', { tid, size: bytes, files });
+  });
+  server.on('upload-done', ({ tid, tmpPath, name, bundle }) => {
+    const t = tState(tid);
+    t.upload = 'done'; t.tmpPath = tmpPath; if (name) t.name = name;
+    if (bundle) t.bundle = bundle;
+    if (t.state === 'dropped') finalize(t);
+    else if (t.state === 'canceled') discard(t);
+    else { clearTimeout(t.timer); t.timer = setTimeout(() => { if (t.state === 'lifted') discard(t); }, 120000); }
+  });
+  server.on('upload-failed', ({ tid, why }) => {
+    const t = tState(tid);
+    t.upload = 'failed';
+    log('upload failed', tid, why);
+    if (t.state === 'dropped') { fx('failed', { tid }); server.pushToPhone({ t: 'failed', tid, why: 'upload' }); }
+    transfers.delete(tid);
+  });
+  server.on('set-theme', (name) => {
+    if (!THEMES.includes(name)) return;
+    store.theme = name; saveStore();
+    server.setSettings({ side: store.side, anchor: store.anchor, theme: themeName() });
+    placeOverlay(); pushPanelState();
+    setTimeout(() => fx('demo', {}), 150);         // show it on the PC right away
+  });
+  server.on('set-side', (side) => {
+    store.side = side; saveStore();
+    server.setSettings({ side: store.side, anchor: store.anchor, theme: themeName() });
+    placeOverlay(); ensureCatcher(); pushPanelState();
+  });
+}
+
+// ------------------------------------------------------------ app
+app.on('second-instance', () => showPanel());
+app.on('window-all-closed', (e) => { /* keep running in tray */ });
+app.on('before-quit', () => { app.isQuitting = true; try { server && server.stop(); } catch (e) { /* ignore */ } });
+
+app.whenReady().then(async () => {
+  // 1.0.0 could name the PC "Comment's PC" (Windows account without a full name): fix it automatically
+  if (!store.name || store.name === "Comment's PC") { store.name = await defaultName(); saveStore(); }
+  server = new FlickServer({
+    id: store.id, name: store.name, port: 47860, discoveryPort: 47870, version: VERSION,
+    tmpDir: path.join(app.getPath('temp'), 'flick-incoming'), devices: store.devices,
+    settings: { side: store.side, anchor: store.anchor, theme: themeName() },
+  });
+  wireServer();
+  try { const port = await server.start(); log('listening', port, lanAddresses().map((a) => a.address).join(',')); }
+  catch (e) { log('server failed', e.message); dialog.showErrorBox('Flick', 'Flick could not start its connection service.\n\n' + e.message); }
+  refreshPhoneApp();
+
+  createOverlay();
+  createTray();
+  applyStartup();
+  screen.on('display-metrics-changed', () => { placeOverlay(); ensureCatcher(); });
+  screen.on('display-added', () => { placeOverlay(); ensureCatcher(); });
+  screen.on('display-removed', () => { placeOverlay(); ensureCatcher(); });
+
+  if (!HIDDEN_START || store.firstRun) showPanel();
+  if (TEST_MODE) startTestControl();
+});
+
+// ------------------------------------------------------------ test-only control port (never enabled in normal use)
+function startTestControl() {
+  require('http').createServer(async (req, res) => {
+    const u = new URL(req.url, 'http://x');
+    try {
+      if (u.pathname === '/capture') {
+        const w = u.searchParams.get('w') === 'panel' ? panel : overlay;
+        const img = await w.webContents.capturePage();
+        fs.writeFileSync(u.searchParams.get('out'), img.toPNG());
+        return res.end('ok');
+      }
+      if (u.pathname === '/state') {
+        return res.end(JSON.stringify({
+          overlayShown, overlayReady, connected: !!(server && server.connected),
+          transfers: [...transfers.values()].map((t) => ({ tid: t.tid, state: t.state, upload: t.upload, done: !!t.done })),
+          panel: !!(panel && panel.isVisible()), catcher: !!catcher, catcherBounds: catcher && catcher.getBounds(),
+          overlayBounds: overlay && overlay.getBounds(), saveDir: saveDirPath(), name: server && server.name,
+        }));
+      }
+      if (u.pathname === '/eval') {
+        const w = u.searchParams.get('w') === 'panel' ? panel : overlay;
+        const r = await w.webContents.executeJavaScript(u.searchParams.get('js'));
+        return res.end(JSON.stringify(r));
+      }
+      if (u.pathname === '/set') {
+        ipcMain.emit('panel:set', {}, { key: u.searchParams.get('key'), value: u.searchParams.get('value') });
+        return res.end('ok');
+      }
+      if (u.pathname === '/action') {
+        ipcMain.emit('panel:action', {}, { what: u.searchParams.get('what') });
+        return res.end('ok');
+      }
+      if (u.pathname === '/catcher-drop') {
+        ipcMain.emit('catcher:drop', {}, { paths: [u.searchParams.get('path')], y: +(u.searchParams.get('y') || 300) });
+        return res.end('ok');
+      }
+      if (u.pathname === '/pair') {
+        const dev = u.searchParams.get('device');
+        if (u.searchParams.get('allow') === '1') server.approve(dev); else server.deny(dev);
+        return res.end('ok');
+      }
+      res.statusCode = 404; res.end();
+    } catch (e) { res.statusCode = 500; res.end(String(e && e.stack)); }
+  }).listen(47999, '127.0.0.1');
+}

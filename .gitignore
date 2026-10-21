@@ -1,0 +1,10 @@
+# build output (installers, APKs, unpacked Electron)
+build/
+node_modules/
+
+# signing secrets never belong in the repo (see signing/README.md)
+*.p12
+*.jks
+*.keystore
+*.lineage
+password.txt

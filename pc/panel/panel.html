@@ -1,0 +1,139 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; media-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self';">
+<title>Flick</title>
+<link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <header class="bar">
+    <div class="brand"><img class="logo" src="../assets/icon.png" alt=""><span>Flick</span></div>
+    <button class="x" id="close" title="Close (Flick keeps running)">
+      <svg viewBox="0 0 12 12"><path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+    </button>
+  </header>
+
+  <main id="main">
+    <section class="status-row">
+      <div class="scene" id="scene" aria-hidden="true">
+        <svg class="monitor" viewBox="0 0 120 80"><rect x="2" y="2" width="116" height="66" rx="4"/><path d="M48 70v6M72 70v6M40 77h40"/></svg>
+        <svg class="phone" viewBox="0 0 30 56"><rect x="1.5" y="1.5" width="27" height="53" rx="5"/></svg>
+      </div>
+      <div class="status-text">
+        <div class="status"><span class="dot" id="dot"></span><span id="statusText">Waiting for your phone</span></div>
+        <div class="hint" id="hint">On your phone, open Flick and press and hold Connect.</div>
+      </div>
+    </section>
+
+    <section class="card intro" id="intro" hidden>
+      <div class="intro-title">Welcome to Flick</div>
+      <ol>
+        <li>Install the Flick app on your Android phone.</li>
+        <li>Connect the phone and this PC to the same Wi-Fi.</li>
+        <li>Open Flick on the phone, hold it next to this screen, then press and hold Connect.</li>
+        <li>Drag a file off the edge of the phone toward the PC.</li>
+      </ol>
+      <button class="btn" id="introOk">Got it</button>
+    </section>
+
+    <h2>Animation</h2>
+    <section class="themes" id="themes">
+      <button class="theme" data-v="roadster">
+        <video src="../assets/themes/roadster.webm" muted loop playsinline preload="auto"></video>
+        <span class="tname">Roadster</span><span class="tdesc">Launches on jets, flips, lands</span>
+      </button>
+      <button class="theme" data-v="liquid">
+        <video src="../assets/themes/liquid.webm" muted loop playsinline preload="auto"></video>
+        <span class="tname">Liquid</span><span class="tdesc">Ripples through your desktop</span>
+      </button>
+      <button class="theme" data-v="teleport">
+        <video src="../assets/themes/teleport.webm" muted loop playsinline preload="auto"></video>
+        <span class="tname">Teleport</span><span class="tdesc">Beamed in, pixel by pixel</span>
+      </button>
+      <button class="theme" data-v="halo">
+        <video src="../assets/themes/halo.webm" muted loop playsinline preload="auto"></video>
+        <span class="tname">Halo</span><span class="tdesc">Soft light and a glass sweep</span>
+      </button>
+    </section>
+    <button class="link play" id="playFx">Play it on the screen</button>
+
+    <h2>Placement</h2>
+    <section class="card">
+      <div class="row">
+        <div class="lbl">Phone is on the</div>
+        <div class="seg" id="side">
+          <button data-v="left">Left</button>
+          <button data-v="right">Right</button>
+        </div>
+      </div>
+      <div class="row col">
+        <div class="lbl">Phone height <span class="sub">where the phone sits next to the screen</span></div>
+        <input type="range" id="anchor" min="0.15" max="0.85" step="0.01">
+        <div class="ticks"><span>Top</span><span>Middle</span><span>Bottom</span></div>
+      </div>
+      <div class="row col">
+        <div class="lbl">Card size on the PC</div>
+        <input type="range" id="size" min="0.7" max="1.5" step="0.05">
+      </div>
+      <div class="row" id="displayRow" hidden>
+        <div class="lbl">Screen next to the phone</div>
+        <select id="display"></select>
+      </div>
+    </section>
+
+    <h2>Files</h2>
+    <section class="card">
+      <div class="row">
+        <div class="lbl">Save files to</div>
+        <select id="saveDir">
+          <option value="desktop">Desktop</option>
+          <option value="downloads">Downloads</option>
+          <option value="custom">Choose folder…</option>
+        </select>
+      </div>
+      <div class="row"><div class="lbl">Sounds</div><label class="tog"><input type="checkbox" id="sound"><span></span></label></div>
+      <div class="row"><div class="lbl">Send PC files by dragging them to the screen edge</div><label class="tog"><input type="checkbox" id="edgeSend"><span></span></label></div>
+      <div class="row" id="startupRow"><div class="lbl">Start Flick with Windows</div><label class="tog"><input type="checkbox" id="startup"><span></span></label></div>
+    </section>
+
+    <h2>This PC</h2>
+    <section class="card">
+      <div class="row col">
+        <div class="lbl">Name shown on the phone</div>
+        <input type="text" id="name" maxlength="40" spellcheck="false">
+      </div>
+      <div class="row col">
+        <div class="lbl">Address <span class="sub">type this on the phone if it can't find the PC</span></div>
+        <div class="mono" id="addr">…</div>
+      </div>
+    </section>
+
+    <section id="devicesCard" hidden>
+      <h2>Paired phones</h2>
+      <div class="card" id="devices"></div>
+    </section>
+
+    <footer class="foot">
+      <button class="link" id="openFolder">Open received files</button>
+      <button class="link" id="firewall">Phone can't connect? Fix it</button>
+      <button class="link danger" id="quit">Quit Flick</button>
+      <div class="ver" id="ver"></div>
+    </footer>
+  </main>
+
+  <div class="modal" id="pair" hidden>
+    <div class="sheet">
+      <svg class="pair-ico" viewBox="0 0 48 48"><rect x="15" y="6" width="18" height="36" rx="4"/><path d="M21 37h6"/></svg>
+      <div class="ptitle"><span id="pairName">Phone</span> wants to connect</div>
+      <div class="psub">Allow it to send files to this PC?</div>
+      <div class="pbtns">
+        <button class="btn ghost" id="deny">Don't allow</button>
+        <button class="btn" id="allow">Allow</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="panel.js"></script>
+</body>
+</html>
