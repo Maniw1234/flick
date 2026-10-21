@@ -61,6 +61,30 @@ final class Bridge {
         catch (Throwable e) { a.updater().fail("bad request"); }
     }
 
+    /** Asks GitHub for the latest Flick release; answers with a "gh" event carrying GitHub's JSON (the page picks the APK). */
+    @JavascriptInterface
+    public void updateCheckGitHub() {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                JSONObject o = new JSONObject();
+                try {
+                    o.put("t", "gh");
+                    try {
+                        o.put("body", UpdateFetch.getText(GITHUB_LATEST, 2 * 1024 * 1024));
+                        o.put("ok", true);
+                    } catch (Throwable e) {
+                        o.put("ok", false);
+                        o.put("why", String.valueOf(e.getMessage()));
+                    }
+                } catch (Throwable e) { return; }
+                a.emit(o.toString());
+            }
+        }, "flick-github-check").start();
+    }
+
+    static final String GITHUB_LATEST = "https://api.github.com/repos/Maniw1234/flick/releases/latest";
+
     @JavascriptInterface
     public void updateInstall() {
         a.runOnUiThread(new Runnable() { @Override public void run() { a.updater().install(a); } });

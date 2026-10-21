@@ -66,7 +66,7 @@
   const tokenKey = (pcId) => 'token:' + pcId;
   const SEL = { on: false, ids: new Set() };   // multi-select: ids of the selected items in the current view
   // wireless update: the PC announces the newest phone app it has; app = { code, name, size, sha256, url }
-  const UPD = { app: null, pcKnows: false, state: 'idle', got: 0, total: 0, why: '', dismissed: 0, checkT: 0, auto: false };
+  const UPD = { app: null, pcApp: null, ghApp: null, ghAt: 0, ghAsk: false, pcKnows: false, state: 'idle', got: 0, total: 0, why: '', dismissed: 0, checkT: 0, auto: false };
   const MY_CODE = +INFO.code || 0;
 
   // ------------------------------------------------------------------ animation themes (the PC is the source of truth)
@@ -472,27 +472,81 @@
     }
   }
 
-  // ------------------------------------------------------------------ wireless updates (from the PC)
+  // ------------------------------------------------------------------ updates (from GitHub, or over Wi-Fi from the PC)
+  // Both sources offer { code, name, size, sha256, url }; the newer one wins. Whatever is downloaded, Android-side
+  // code checks it is Flick, that exact version, and signed with Flick's key before it can be installed.
   const isNewer = (a) => !!(a && a.code > MY_CODE);
-  function onAppInfo(app, answer) {
+  const GH_DL = /^https:\/\/github\.com\/Maniw1234\/flick\/releases\/download\//;
+  const canFetch = (a) => !!a && (a.src === 'github' || !!(st.connected && st.pc));
+
+  function bestApp() {
+    const p = UPD.pcApp, g = UPD.ghApp;
+    if (!p || !g) return p || g;
+    if (g.code !== p.code) return g.code > p.code ? g : p;
+    return st.connected ? p : g;                        // same version: over Wi-Fi when connected
+  }
+
+  function applyApp() {
     const was = UPD.app;
-    UPD.app = app && app.code && app.size > 0 && /^[0-9a-f]{64}$/i.test(app.sha256 || '') && app.url ? app : null;
-    if (answer && UPD.checkT) {
-      // reply to "Check for updates"
-      clearTimeout(UPD.checkT); UPD.checkT = 0;
-      if (isNewer(UPD.app)) UPD.dismissed = 0;
-      else toast('Flick is up to date (' + (INFO.version || 'this version') + ')', 2200);
-    }
+    UPD.app = bestApp();
     if (isNewer(UPD.app) && (!was || was.code !== UPD.app.code || was.sha256 !== UPD.app.sha256) && !/^(downloading|installing|perm)$/.test(UPD.state)) UPD.state = 'ready';
     if (!isNewer(UPD.app) && UPD.state !== 'installing') UPD.state = 'idle';
     renderUpd();
-    if (UPD.state === 'ready' && st.connected) autoFetch();
+    if (UPD.state === 'ready' && canFetch(UPD.app)) autoFetch();
   }
 
-  // a newer version is waiting on the PC: fetch it in the background, so installing takes one tap
+  function onAppInfo(app, answer) {
+    UPD.pcApp = app && app.code && app.size > 0 && /^[0-9a-f]{64}$/i.test(app.sha256 || '') && app.url ? Object.assign({}, app, { src: 'pc' }) : null;
+    applyApp();
+    if (answer && UPD.checkT && !UPD.ghAsk) {
+      // reply to "Check for updates" (when GitHub isn't being asked)
+      clearTimeout(UPD.checkT); UPD.checkT = 0;
+      if (isNewer(UPD.app)) { UPD.dismissed = 0; renderUpd(); }
+      else toast('Flick is up to date (' + (INFO.version || 'this version') + ')', 2200);
+    }
+  }
+
+  // GitHub: the latest release of github.com/Maniw1234/flick carries Flick-<version>.apk
+  function checkGitHub(ask) {
+    if (!NV || typeof NV.updateCheckGitHub !== 'function') return false;
+    UPD.ghAt = Date.now();
+    if (ask) UPD.ghAsk = true;
+    nc('updateCheckGitHub');
+    return true;
+  }
+
+  function ghRelease(body) {
+    const r = JSON.parse(body);
+    if (!r || r.draft || r.prerelease) return null;
+    for (const as of r.assets || []) {
+      const m = /^Flick-(\d{1,3})\.(\d{1,2})\.(\d{1,2})\.apk$/.exec((as && as.name) || '');
+      const d = /^sha256:([0-9a-f]{64})$/i.exec((as && as.digest) || '');
+      if (m && d && as.size > 0 && GH_DL.test(as.browser_download_url || '')) {
+        return { src: 'github', code: +m[1] * 10000 + +m[2] * 100 + +m[3], name: +m[1] + '.' + +m[2] + '.' + +m[3], size: +as.size, sha256: d[1].toLowerCase(), url: as.browser_download_url };
+      }
+    }
+    return null;
+  }
+
+  function onGitHub(e) {
+    if (e.ok) { try { UPD.ghApp = ghRelease(e.body); } catch (x) { UPD.ghApp = null; } }
+    const ask = UPD.ghAsk;
+    UPD.ghAsk = false;
+    applyApp();
+    if (ask && UPD.checkT) {
+      clearTimeout(UPD.checkT); UPD.checkT = 0;
+      if (isNewer(UPD.app)) { UPD.dismissed = 0; renderUpd(); }
+      else toast(e.ok ? 'Flick is up to date (' + (INFO.version || 'this version') + ')' : 'Couldn’t reach GitHub. Try again.', 2400);
+    }
+  }
+
+  setTimeout(() => checkGitHub(false), 2500);
+  setInterval(() => { if (!document.hidden && Date.now() - UPD.ghAt > 3 * 3600e3) checkGitHub(false); }, 10 * 60e3);
+
+  // a newer version is out: fetch it in the background, so installing takes one tap
   function autoFetch() {
     const a = UPD.app;
-    if (!isNewer(a) || !st.pc) return;
+    if (!isNewer(a) || !canFetch(a)) return;
     const ns = njson('updateState');
     if (!ns) return;                                    // this phone app can't update itself
     if (ns.ready === a.code && ns.readySha === a.sha256.slice(0, 16).toLowerCase()) { UPD.state = 'fetched'; renderUpd(); return; }
@@ -500,26 +554,27 @@
     UPD.auto = true;
     UPD.state = 'downloading'; UPD.got = 0; UPD.total = a.size || 0; UPD.why = '';
     renderUpd();
-    if (nc('updateDownload', updUrl(), String(a.code), String(a.size), a.sha256) === null) { UPD.auto = false; UPD.state = 'ready'; renderUpd(); }
+    if (nc('updateDownload', updUrl(a), String(a.code), String(a.size), a.sha256) === null) { UPD.auto = false; UPD.state = 'ready'; renderUpd(); }
   }
 
-  function updUrl() {
+  function updUrl(a) {
+    if (a.src === 'github') return a.url;
     const tok = pref.get(tokenKey(st.pc.id), '');
-    return 'http://' + st.pc.ip + ':' + st.pc.port + UPD.app.url + '?device=' + encodeURIComponent(DEVICE) + '&token=' + encodeURIComponent(tok);
+    return 'http://' + st.pc.ip + ':' + st.pc.port + a.url + '?device=' + encodeURIComponent(DEVICE) + '&token=' + encodeURIComponent(tok);
   }
 
   function startUpdate() {
     const a = UPD.app;
     if (!isNewer(a)) return;
     UPD.dismissed = 0;
-    if (!st.connected || !st.pc) { toast('Connect to your PC to update', 2200); renderUpd(); return; }
+    if (!canFetch(a)) { toast('Connect to your PC to update', 2200); renderUpd(); return; }
     const ns = njson('updateState') || {};
     if (ns.ready === a.code && ns.readySha === a.sha256.slice(0, 16).toLowerCase()) { installUpdate(); return; }      // already downloaded and checked
     UPD.auto = false;
     UPD.state = 'downloading'; UPD.got = 0; UPD.total = a.size || 0; UPD.why = '';
     renderUpd();
     haptic('tick');
-    if (nc('updateDownload', updUrl(), String(a.code), String(a.size), a.sha256) === null) { UPD.state = 'error'; UPD.why = 'unsupported'; renderUpd(); }
+    if (nc('updateDownload', updUrl(a), String(a.code), String(a.size), a.sha256) === null) { UPD.state = 'error'; UPD.why = 'unsupported'; renderUpd(); }
   }
 
   function installUpdate() {
@@ -529,18 +584,21 @@
   }
 
   function checkForUpdates() {
-    if (!st.connected) { toast('Connect to your PC to check for updates', 2400); return; }
+    const gh = checkGitHub(true);
+    if (!gh && !st.connected) { toast('Connect to your PC to check for updates', 2400); return; }
     clearTimeout(UPD.checkT);
     UPD.checkT = setTimeout(() => {
-      UPD.checkT = 0;
-      toast(UPD.pcKnows ? 'Couldn’t check right now. Try again.' : 'Update Flick on your PC to get phone updates', 2800);
-    }, 4000);
-    wsSend({ t: 'app-check' });
+      UPD.checkT = 0; UPD.ghAsk = false;
+      toast(gh || UPD.pcKnows ? 'Couldn’t check right now. Try again.' : 'Update Flick on your PC to get phone updates', 2800);
+    }, gh ? 15000 : 4000);
+    if (st.connected) wsSend({ t: 'app-check' });
   }
 
   function updWhy(w) {
     w = String(w || '');
+    const gh = !!(UPD.app && UPD.app.src === 'github');
     if (/checksum|incomplete|too long|size changed|bad size/.test(w)) return 'The download didn’t arrive intact. Try again.';
+    if (gh && /^http /.test(w)) return 'GitHub didn’t send the update (' + w + '). Try again later.';
     if (/^http 403/.test(w)) return 'Your PC didn’t recognize this phone. Reconnect first.';
     if (/^http (404|409)/.test(w)) return 'The update on your PC changed. Try again.';
     if (/not newer/.test(w)) return 'You already have this version.';
@@ -549,7 +607,7 @@
     if (/settings/.test(w)) return 'Android settings didn’t open.';
     if (/no space/.test(w)) return 'Your phone is out of space.';
     if (/unsupported/.test(w)) return 'Install this update from your PC once.';
-    return 'Couldn’t reach your PC. Try again.';
+    return gh ? 'Couldn’t reach GitHub. Try again.' : 'Couldn’t reach your PC. Try again.';
   }
 
   function renderUpd() {
@@ -562,7 +620,7 @@
     document.body.classList.toggle('upd-on', !!show);
     if (!show) { card.hidden = true; return; }
     const v = a.name || String(a.code);
-    const pc = st.pc ? st.pc.name : 'your PC';
+    const pc = a.src === 'github' ? 'GitHub' : st.pc ? st.pc.name : 'your PC';
     let title, sub, btn = '';
     switch (UPD.state) {
       case 'downloading': {
@@ -577,7 +635,7 @@
       case 'back': title = 'Flick ' + v + ' is downloaded'; sub = 'Tap Install to finish'; btn = 'Install'; break;
       case 'fetched': title = 'Flick ' + v + ' is ready'; sub = 'Downloaded from ' + pc; btn = 'Install'; break;
       case 'error': title = 'Update didn’t finish'; sub = updWhy(UPD.why); btn = 'Try again'; break;
-      default: title = 'Flick ' + v + ' is ready'; sub = 'Over Wi-Fi from ' + pc; btn = 'Update';
+      default: title = 'Flick ' + v + ' is ready'; sub = a.src === 'github' ? 'New version on GitHub' : 'Over Wi-Fi from ' + pc; btn = 'Update';
     }
     $('updTitle').textContent = title;
     $('updSub').textContent = sub;
@@ -1873,9 +1931,11 @@
       case 'toast': if (e.msg) toast(String(e.msg), 2600); break;
       case 'upd': case 'upd-done': case 'upd-installing': case 'upd-perm': case 'upd-perm-denied': case 'upd-back': case 'upd-fail':
         onUpdEvent(e); break;
+      case 'gh': onGitHub(e); break;
       case 'storage': refreshStorage(false); break;
       case 'resume':
         refreshStorage(false);
+        if (Date.now() - UPD.ghAt > 3600e3) checkGitHub(false);
         if (st.pc && !st.wsOpen && !st.connecting) openLink(st.trusted);
         break;
       case 'pause': break;

@@ -32,9 +32,9 @@ To try the whole build without publishing: Actions > Release > Run workflow, tic
   `flick-app-<version>.zip`, checks its SHA-256 against GitHub's, unpacks it into `%LOCALAPPDATA%\Flick\app`, and
   restarts into it once no transfer is running (`pc/updater.js`, `pc/boot.js`). No installer and no admin prompt is
   involved. If a new version fails to start three times, Flick goes back to the installed copy and skips that version.
-- **Phone:** the PC app carries the phone app. When a paired phone connects, the PC tells it the newest version.
-  The phone downloads it in the background over Wi-Fi, checks the size, SHA-256, version and signing key, and shows
-  **Install**. Android then asks for one more tap to confirm.
+- **Phone:** the phone app checks the latest GitHub release when it opens (and every few hours while open) and
+  downloads the new `Flick-<version>.apk` from it; a paired PC also offers it over Wi-Fi. Either way the phone checks
+  the size, SHA-256, version and signing key, and shows **Install**. Android then asks for one more tap to confirm.
 
 ## Building by hand
 

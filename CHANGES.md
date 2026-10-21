@@ -1,5 +1,11 @@
 # Changes
 
+## 1.6.0
+
+- The phone app now checks GitHub for new versions by itself and downloads them from there, so it updates even when
+  it isn't near the PC. Installing is still one tap (Android asks you to confirm).
+- GitHub builds and signs the phone app for each release that changes it.
+
 ## 1.5.0
 
 - Flick on the PC now updates itself from GitHub: when a new version is released, it downloads it in the

@@ -65,6 +65,36 @@ final class UpdateFetch {
         }
     }
 
+    /** A small text resource (GitHub's "latest release" JSON). */
+    static String getText(String url, int max) throws IOException {
+        HttpURLConnection c = null;
+        try {
+            c = (HttpURLConnection) new URL(url).openConnection();
+            c.setConnectTimeout(10000);
+            c.setReadTimeout(20000);
+            c.setUseCaches(false);
+            c.setRequestProperty("Accept", "application/vnd.github+json");
+            c.setRequestProperty("User-Agent", "Flick-phone");
+            int code = c.getResponseCode();
+            if (code != 200) throw new IOException("http " + code);
+            InputStream in = c.getInputStream();
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            try {
+                byte[] buf = new byte[16384];
+                int n;
+                while ((n = in.read(buf)) > 0) {
+                    if (out.size() + n > max) throw new IOException("too long");
+                    out.write(buf, 0, n);
+                }
+            } finally {
+                try { in.close(); } catch (IOException e) { /* ignore */ }
+            }
+            return new String(out.toByteArray(), "UTF-8");
+        } finally {
+            if (c != null) c.disconnect();
+        }
+    }
+
     static String hex(byte[] b) {
         char[] d = "0123456789abcdef".toCharArray();
         StringBuilder s = new StringBuilder(b.length * 2);
