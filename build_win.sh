@@ -32,6 +32,7 @@ for d in overlay panel catcher assets phone-app web; do if [ -d "$PC/$d" ]; then
 # the Bluetooth bridge (a small native helper, see native/flick-bt.c)
 mkdir -p "$APP/resources/app/bin"
 "$MINGW_CC" -O2 -s -Wall -o "$APP/resources/app/bin/flick-bt.exe" "$ROOT/native/flick-bt.c" -lws2_32
+"$MINGW_CC" -O2 -s -Wall -o "$APP/resources/app/bin/flick-keys.exe" "$ROOT/native/flick-keys.c" -luser32
 # the phone app ships inside the PC app, so phones can update over Wi-Fi from here
 node -e "const i=require('$PC/apkinfo').apkInfo('$APP/resources/app/phone-app/Flick.apk'); if (i.package !== 'com.flick.app') process.exit(1); console.log('phone app', i.name, '(' + i.code + ')')"
 # record which Electron this code was built for (an update for another Electron needs the full installer)

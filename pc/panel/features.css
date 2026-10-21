@@ -1,0 +1,79 @@
+/* Flick 2.0 (features.js): phones and "Find my phone", the link field, History, synced folders, phone feature settings */
+
+/* phones */
+.fph { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); min-width: 0; }
+.card > .fph:first-child { border-top: 0; }
+.fph.pick { cursor: pointer; }
+.fradio { flex: none; width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid rgba(255,255,255,0.6); display: grid; place-items: center; background: transparent; padding: 0; cursor: pointer; }
+.fradio::after { content: ''; width: 8px; height: 8px; border-radius: 50%; background: transparent; transition: background .15s, transform .15s; transform: scale(.4); }
+.fradio[aria-checked="true"] { border-color: var(--accent); background: var(--accent); }
+.fradio[aria-checked="true"]::after { background: var(--on-accent); transform: scale(1); }
+.fphico { flex: none; width: 18px; height: 18px; fill: none; stroke: var(--sub); stroke-width: 1.6; stroke-linecap: round; }
+.fph .fmain { flex: 1; min-width: 0; }
+.fph .fname { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.fph .fname > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fph .d { color: var(--sub); font-size: 12px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fbtn { flex: none; padding: 4px 10px; font-size: 12.5px; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.fbtn svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+
+/* send a link */
+.flink { display: flex; gap: 8px; margin: 8px 0 0; }
+.flink input[type=text] { flex: 1; min-width: 0; }
+.flink .btn { flex: none; padding: 6px 16px; }
+
+/* history entry and synced folders on the main view */
+#fHistEntry { margin-top: 8px; }
+.fhico { width: 26px; height: 26px; flex: none; fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+#fHistSub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fpair { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); min-width: 0; }
+.card > .fpair:first-child { border-top: 0; }
+.fpair .fmain { flex: 1; min-width: 0; }
+.fpair .fname { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fpair .d { color: var(--sub); font-size: 12px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fpair .fbtns { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 1px; }
+.fpair .link { padding: 1px 0; font-size: 12.5px; }
+
+/* phone features: the apps whose notifications show */
+.fapps { padding: 4px 0 6px; }
+.fapps-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; border: 0; background: transparent; padding: 6px 0; text-align: left; cursor: pointer; }
+.fapps-head .sub0 { display: block; }
+.fapps-head .wchev { transition: transform .15s; }
+.fapps-head[aria-expanded="true"] .wchev { transform: rotate(90deg); }
+.fapp { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 0 7px 2px; }
+.fapp .fan { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fapp.muted .fan { color: var(--sub); }
+
+/* the history view */
+.whead .fclear { margin-left: auto; padding: 4px 6px; font-size: 13px; }
+.fday { color: var(--sub); font-size: 12px; font-weight: 600; margin: 16px 2px 6px; }
+.fday:first-child { margin-top: 6px; }
+.fh { position: relative; display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 6px; min-width: 0; }
+.fh + .fh { margin-top: 1px; }
+.fh:hover, .fh:focus-within { background: #2b2b2b; }
+.fh .fhopen { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; border: 0; background: transparent; padding: 2px 0; text-align: left; cursor: pointer; }
+.fh .fhopen:disabled { cursor: default; }
+.fhdir { flex: none; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; background: rgba(255,255,255,0.07); }
+.fhdir svg { width: 14px; height: 14px; fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.fh.bad .fhdir { background: rgba(255,153,164,0.14); }
+.fh.bad .fhdir svg { stroke: #ff99a4; }
+.fhmain { flex: 1; min-width: 0; }
+.fhname, .fhsub { display: block; }
+.fhname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fh.gone .fhname { color: var(--sub); }
+.fhsub { color: var(--sub); font-size: 12px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fh.bad .fhsub .why { color: #ff99a4; }
+/* the actions sit over the end of the row while it's pointed at or focused: the text has the whole width otherwise */
+.fhacts { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); display: flex; gap: 2px; padding-left: 18px;
+  background: linear-gradient(to right, rgba(43,43,43,0), #2b2b2b 16px); opacity: 0; pointer-events: none; transition: opacity .12s; }
+.fh:hover .fhacts, .fh:focus-within .fhacts { opacity: 1; pointer-events: auto; }
+.fhacts .wx svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.fhacts .wx[hidden] { display: none; }
+.fhempty { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 70px 18px 0; }
+.fhempty .psub { line-height: 1.45; max-width: 290px; }
+
+/* "Find my phone": ringing */
+.fring-ico .w1, .fring-ico .w2 { animation: fring 1.2s ease-in-out infinite; }
+.fring-ico .w2 { animation-delay: .25s; }
+@keyframes fring { 0%, 100% { opacity: .15; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .fring-ico .w1, .fring-ico .w2 { animation: none; } }
+#fRing .psub { line-height: 1.45; }

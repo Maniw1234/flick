@@ -13,12 +13,16 @@ const { URL } = require('url');
 const { EventEmitter } = require('events');
 const { acceptUpgrade } = require('./ws');
 const { BundleReceiver } = require('./bundle');
+const { PhoneApi } = require('./phoneapi');
 
 // 2: large files in parallel parts (/api/part) and byte ranges; 3: bundles over several streams; 4: encrypted links
-// (TLS on the same port, a pinned certificate) and a sign-in that never sends the pairing token (see "sign-in")
-const PROTO = 4;
+// (TLS on the same port, a pinned certificate) and a sign-in that never sends the pairing token (see "sign-in");
+// 5: several phones at once, the background link (/api/events), clipboard, links, notifications, folder sync (phoneapi.js)
+const PROTO = 5;
 // open connections allowed at once from one address, and in all (see _onSocket)
 const SOCKS_PER_ADDR = 64, SOCKS_TOTAL = 512;
+// phones connected at once; past that a phone gets a place only when its user asks for it (busy / replaced)
+const MAX_PHONES = 4;
 
 function rid(n = 12) { return crypto.randomBytes(n).toString('hex'); }
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
@@ -73,7 +77,10 @@ class FlickServer extends EventEmitter {
     this.version = opts.version || '1.0.0';
     this.devices = Object.assign({}, opts.devices || {}); // deviceId -> { name, token, added }
     this.settings = Object.assign({ side: 'right', anchor: 0.5, theme: 'roadster' }, opts.settings || {});
-    this.session = null;   // active phone session
+    this.session = null;   // active phone session: the one PC-initiated sends go to
+    this.sessions = new Map();  // deviceId -> session, every phone connected right now (several at once)
+    this.usedAt = new Map();    // deviceId -> when the user last used that phone (a fling from it, a click in the panel)
+    this.tidOwner = new Map();  // transfer id -> the phone that started it (its replies go there)
     this.uploads = new Map();   // tid -> { req, path }
     this.assemblies = new Map(); // tid -> a large file arriving in parallel parts (see _handlePart)
     this.partsSeen = new Map();  // "tid:att" -> { done | aborted, until }: late parts of a finished/aborted upload
@@ -90,6 +97,7 @@ class FlickServer extends EventEmitter {
     this.fp = this.tlsId ? this.tlsId.fp : null;
     this.sockByAddr = new Map(); // address -> open connections (see _onSocket)
     this.sockCount = 0;
+    this.api = new PhoneApi(this, { proto: PROTO });   // the protocol 5 endpoints and background links (phoneapi.js)
     fs.mkdirSync(this.tmpDir, { recursive: true });
   }
 
@@ -115,7 +123,18 @@ class FlickServer extends EventEmitter {
       minSdk: info.minSdk || 0, sums: info.sums || '', sig: info.sig || '',
     } : null;
     const changed = !prev !== !info || (prev && info && (prev.sha256 !== info.sha256 || prev.path !== info.path || prev.sig !== this.phoneApp.sig));
-    if (changed || always) this.pushToPhone({ t: 'app', app: this._appPublic(this.session) });
+    // news for every phone (each offered what its Android can install); an unchanged answer only for the one that asked
+    if (changed) {
+      const seen = new Set();
+      for (const x of [this.session, ...this.sessions.values()]) {
+        if (!x || seen.has(x) || !x.trusted || !x.conn || !x.conn.open) continue;
+        seen.add(x);
+        x.conn.send({ t: 'app', app: this._appPublic(x) });
+      }
+    } else if (always) {
+      const x = this.appAsker ? this._pageFor(this.appAsker) : this.session;
+      if (x && x.trusted && x.conn && x.conn.open) x.conn.send({ t: 'app', app: this._appPublic(x) });
+    }
   }
 
   // ---------- lifecycle ----------
@@ -199,6 +218,8 @@ class FlickServer extends EventEmitter {
     try { this.http && this.http.close(); } catch (e) { /* ignore */ }
     try { this.udp && this.udp.close(); } catch (e) { /* ignore */ }
     if (this.session && this.session.conn) this.session.conn.close();
+    for (const x of this.sessions.values()) { try { x.conn.close(); } catch (e) { /* ignore */ } }
+    this.api.stop();
   }
 
   _startDiscovery() {
@@ -221,11 +242,11 @@ class FlickServer extends EventEmitter {
     });
   }
 
-  setName(name) { this.name = String(name || '').slice(0, 60) || this.name; this.pushToPhone({ t: 'pc', name: this.name }); }
+  setName(name) { this.name = String(name || '').slice(0, 60) || this.name; this.broadcast({ t: 'pc', name: this.name }); }
 
   setSettings(s) {
     Object.assign(this.settings, s);
-    this.pushToPhone({ t: 'settings', side: this.settings.side, anchor: this.settings.anchor, theme: this.settings.theme });
+    this.broadcast({ t: 'settings', side: this.settings.side, anchor: this.settings.anchor, theme: this.settings.theme });
   }
 
   // ---------- trust ----------
@@ -277,8 +298,7 @@ class FlickServer extends EventEmitter {
       // fp: this PC's certificate, for a phone that paired over Bluetooth (it sees no certificate there) to pin before
       // its first Wi-Fi connection. Over TLS the phone pins the one it sees itself.
       s.conn.send({ t: 'paired', token, fp: this.fp || undefined });
-      this._takeOver(s);                          // the user just allowed this phone: it becomes the one in use
-      this._connected(s);
+      this._join(s, true);                        // the user just allowed this phone: it joins and becomes the one in use
     }
   }
 
@@ -297,9 +317,105 @@ class FlickServer extends EventEmitter {
     if (cur && cur !== s) {
       const was = cur.connected && cur.conn.open;
       if (was || quiet) { try { if (!quiet) cur.conn.send({ t: 'replaced' }); cur.conn.close(); } catch (e) { /* ignore */ } }
-      if (was) { cur.connected = false; this.emit('disconnected', this._publicSession(cur)); }
+      if (was) { cur.connected = false; this._unlist(cur); this.emit('disconnected', this._publicSession(cur)); }
     }
     this.session = s;
+  }
+
+  // ---------- several phones at once ----------
+  _unlist(s) { if (s && s.device && this.sessions.get(s.device) === s) this.sessions.delete(s.device); }
+  _live() { return [...this.sessions.values()].filter((x) => x.connected && x.conn.open); }
+
+  // s joins the phones connected right now. Past MAX_PHONES a phone takes a place only when its user asked for it
+  // (held Connect, or allowed it here): the one used longest ago is told 'replaced'. Returns false when it can't join.
+  _join(s, asked) {
+    if (!this.sessions.has(s.device) && this._live().length >= MAX_PHONES) {
+      if (!asked) return false;
+      const live = this._live().filter((x) => x !== s);
+      const old = live.reduce((a, b) => ((this.usedAt.get(b.device) || 0) < (this.usedAt.get(a.device) || 0) ? b : a), live[0]);
+      if (old) {
+        try { old.conn.send({ t: 'replaced' }); old.conn.close(); } catch (e) { /* ignore */ }
+        old.connected = false; this._unlist(old);
+        this.emit('disconnected', this._publicSession(old));
+      }
+    }
+    this._connected(s);
+    if (asked) this.use(s.device);
+    return true;
+  }
+
+  /** The user used this phone (a fling from it, a click in the panel): what the PC sends now goes to it. */
+  use(device) {
+    const s = device && this.sessions.get(device);
+    if (!s || !s.connected || !s.conn.open) return false;
+    this.usedAt.set(device, Date.now());
+    if (this.session !== s) { this.session = s; this.emit('active', this._publicSession(s)); }
+    return true;
+  }
+
+  // the phone in use left: the connected one used most recently takes its place (or the only one left)
+  _pickActive() {
+    let best = null;
+    for (const x of this._live()) if (!best || (this.usedAt.get(x.device) || 0) > (this.usedAt.get(best.device) || 0)) best = x;
+    this.session = best;
+    if (best) this.emit('active', this._publicSession(best));
+  }
+
+  /** Every phone connected right now (the panel's list): the active one is where the PC's sends go. */
+  phones() {
+    return this._live().map((x) => Object.assign(this._publicSession(x), { active: x === this.session }));
+  }
+
+  // the page of `device` if it's open and signed in: connected, or the session the PC is listening to
+  _pageFor(device) {
+    if (!device) return null;
+    const x = this.sessions.get(device);
+    if (x && x.conn.open && x.trusted) return x;
+    const c = this.session;
+    return c && c.device === device && c.trusted && c.conn && c.conn.open ? c : null;
+  }
+
+  // which phone started a transfer: replies about it ('saved', 'failed') go to that phone only
+  _own(tid, device) {
+    if (!tid || !device) return;
+    tid = String(tid).slice(0, 64);
+    this.tidOwner.delete(tid);
+    this.tidOwner.set(tid, device);
+    if (this.tidOwner.size > 2000) { let n = 500; for (const k of this.tidOwner.keys()) { this.tidOwner.delete(k); if (--n <= 0) break; } }
+  }
+  ownerOf(tid) { return (tid && this.tidOwner.get(String(tid).slice(0, 64))) || null; }
+
+  /** Something about this PC every phone shows (its name, the animation settings, the phone app it hands out). */
+  broadcast(obj) {
+    const seen = new Set();
+    for (const x of [this.session, ...this.sessions.values()]) {
+      if (!x || seen.has(x) || !x.trusted || !x.conn || !x.conn.open) continue;
+      seen.add(x);
+      x.conn.send(obj);
+    }
+    return seen.size > 0;
+  }
+
+  /**
+   * An event for one phone (protocol 5: clip, link, ring, ring-stop): over its page's WebSocket when Flick is open
+   * there, else over its background link (/api/events); false when it has neither (the PC drops it).
+   */
+  sendEvent(device, obj) {
+    const s = this._pageFor(device);
+    if (s) { s.conn.send(obj); return true; }
+    return this.api.streamSend(device, obj);
+  }
+
+  /** The phone PC-initiated events go to: the phone in use, else the background link used or opened last. */
+  eventTarget() {
+    const s = this.session;
+    if (s && s.device && s.trusted && s.conn && s.conn.open) return s.device;
+    let best = null, bestAt = -1;
+    for (const d of this.api.streamDevices()) {
+      const at = this.usedAt.get(d) || 0;
+      if (best === null || at > bestAt || (at === bestAt && this.api.streamOpenedAt(d) > this.api.streamOpenedAt(best))) { best = d; bestAt = at; }
+    }
+    return best;
   }
 
   deny(device) {
@@ -317,12 +433,19 @@ class FlickServer extends EventEmitter {
   forget(device) {
     delete this.devices[device];
     this.emit('devices-changed', this.devices);
+    const x = this.sessions.get(device);
+    if (x && x !== this.session) x.conn.close();
     if (this.session && this.session.device === device) { this.session.conn.close(); }
+    this.api.closeStream(device);                 // its background link ends with the pairing
   }
 
   // ---------- phone messaging ----------
-  pushToPhone(obj) {
-    const s = this.session;
+  // `device` names the phone; without it a reply about a transfer goes to the phone that started it, and anything
+  // else to the phone in use (the active one)
+  pushToPhone(obj, device) {
+    let s = this.session;
+    if (device) s = this._pageFor(device);
+    else if (obj && this.ownerOf(obj.tid)) s = this._pageFor(this.ownerOf(obj.tid));
     if (s && s.conn && s.conn.open && s.trusted) { s.conn.send(obj); return true; }
     return false;
   }
@@ -331,6 +454,11 @@ class FlickServer extends EventEmitter {
 
   _connected(s) {
     s.connected = true;
+    if (s.device) this.sessions.set(s.device, s);
+    // joining next to another phone: it becomes the one in use only if the user used it more recently (a phone back
+    // from a dropped link gets its place back)
+    const cur = this.session;
+    if (cur !== s && (!cur || !cur.connected || !cur.conn.open || (this.usedAt.get(s.device) || 0) > (this.usedAt.get(cur.device) || 0))) this.session = s;
     s.conn.send({ t: 'connected', pc: { id: this.id, name: this.name }, side: this.settings.side, anchor: this.settings.anchor, theme: this.settings.theme, app: this._appPublic(s) });
     this.emit('connected', this._publicSession(s));
   }
@@ -343,12 +471,20 @@ class FlickServer extends EventEmitter {
   _helloDone(s, trusted, why) {
     s.trusted = !!trusted;
     if (!s.trusted) s.token = null;
-    // Only one phone uses the PC at a time. Opening Flick on a second phone must not knock the connected one off: a new
-    // socket becomes the session when nobody is connected, or when it's the same phone (signed in) on a newer link.
-    // Switching to another phone takes an explicit "connect" from it or the user allowing it here.
+    // Opening Flick on a second phone must not knock the connected one off: a new socket becomes the session when
+    // nobody is connected, or when it's the same phone (signed in) on a newer link. Other phones join next to it when
+    // they "connect" (several at once, see _join).
     const cur = this.session;
     if (cur && cur !== s && cur.device === s.device && s.trusted) this._takeOver(s, true);   // same phone, newer link
-    else this._focus(s);                                                                        // never knocks one off
+    else {
+      const prev = s.trusted && this.sessions.get(s.device);
+      if (prev && prev !== s) {                                  // same phone, newer link (connected, not the one in use)
+        prev.connected = false; this._unlist(prev);
+        try { prev.conn.close(); } catch (e) { /* ignore */ }
+        this.emit('disconnected', this._publicSession(prev));
+      }
+      this._focus(s);                                                                           // never knocks one off
+    }
     const w = { t: 'welcome', v: PROTO, pc: { id: this.id, name: this.name }, trusted: s.trusted, side: this.settings.side, anchor: this.settings.anchor, theme: this.settings.theme };
     if (why) w.why = why;
     s.conn.send(w);
@@ -381,10 +517,14 @@ class FlickServer extends EventEmitter {
       clearTimeout(helloT);
       const n = (this.wsByAddr.get(addr) || 1) - 1;
       if (n > 0) this.wsByAddr.set(addr, n); else this.wsByAddr.delete(addr);
+      const was = s.connected;
+      s.connected = false;
+      this._unlist(s);
       if (this.session === s) {
         this.session = null;
+        this._pickActive();                       // another connected phone (if any) gets what the PC sends now
         this.emit('disconnected', this._publicSession(s));
-      }
+      } else if (was) this.emit('disconnected', this._publicSession(s));
       if (s.device && this.pending.get(s.device) === s) {
         this.pending.delete(s.device);
         this.emit('pair-cancel', s.device);
@@ -445,21 +585,19 @@ class FlickServer extends EventEmitter {
         s.screen = { w: +m.w || 400, h: +m.h || 860, dpr: +m.dpr || 2 };
         break;
       case 'hold':
-        if (this.session === s || this._focus(s)) this.emit('hold', { p: Math.max(0, Math.min(1, +m.p || 0)) });
+        // a paired phone's hold shows even while another phone is connected (it's about to join)
+        if (this.session === s || this._focus(s) || s.trusted) this.emit('hold', { p: Math.max(0, Math.min(1, +m.p || 0)) });
         break;
       case 'hold-cancel':
-        if (this.session === s) this.emit('hold', { p: 0, cancel: true });
+        if (this.session === s || s.trusted) this.emit('hold', { p: 0, cancel: true });
         break;
       case 'connect':
         if (s.trusted) {
-          if (this.session !== s && !this._focus(s)) {
-            // another phone is connected: switch only when the user asked on this phone (holding Connect). Phone apps
-            // before 1.8 only ever send "connect" when the user held it, so for them it always counts.
-            const asked = m.user === true || (s.app || 0) < 10800;
-            if (!asked) { s.conn.send({ t: 'busy' }); break; }
-            this._takeOver(s);
-          }
-          this._connected(s);
+          // asked: the user held Connect on this phone (phone apps before 1.8 only ever send "connect" when the user
+          // held it, so for them it always counts). It then becomes the phone in use.
+          const asked = m.user === true || (s.app || 0) < 10800;
+          if (this.session === s || this._focus(s)) { this._connected(s); if (asked) this.use(s.device); }
+          else if (!this._join(s, asked)) s.conn.send({ t: 'busy' });   // MAX_PHONES connected and nobody asked
         } else {
           if (!s.helloed || s.authWait) break;
           // Each request pulls the Flick window to the front, so a stranger mustn't be able to spam them: one prompt
@@ -500,7 +638,13 @@ class FlickServer extends EventEmitter {
         break;
       }
       case 'lift': case 'move': case 'drop': case 'cancel': case 'send':
-        if (this.session === s && s.trusted) this.emit(m.t, m);
+        if (s.trusted && (this.session === s || (s.connected && this.sessions.get(s.device) === s))) {
+          // a fling makes this the phone in use; its replies ('saved', 'failed') go back to it
+          if (m.t === 'lift' || m.t === 'send') this.use(s.device);
+          this._own(m.tid, s.device);
+          m.device = s.device;
+          this.emit(m.t, m);
+        }
         break;
       case 'set-side':
         if (s.trusted && (m.side === 'left' || m.side === 'right')) this.emit('set-side', m.side);
@@ -512,10 +656,14 @@ class FlickServer extends EventEmitter {
         if (s.trusted) this.emit('incoming-done', m);
         break;
       case 'app-check':
-        if (s.trusted && this.session === s) this.emit('app-check');
+        if (s.trusted && (this.session === s || s.connected)) { this.appAsker = s.device; this.emit('app-check'); }
         break;
       case 'ping':
         s.conn.send({ t: 'pong', ts: m.ts });
+        break;
+      // protocol 5 (§3): the remote, the clipboard and links from the page, and "found it" after the PC rang the phone
+      case 'media': case 'clip': case 'link': case 'ring-found':
+        if (s.trusted && s.device) this.api.fromPage(s, m);
         break;
       default:
         break;
@@ -538,6 +686,8 @@ class FlickServer extends EventEmitter {
   _onRequest(req, res) {
     let u;
     try { u = new URL(req.url, 'http://x'); } catch (e) { res.writeHead(400); res.end(); return; }
+    // browsers on the "Share with a browser" page (webshare.js): their own routes under /w/ with their own checks
+    if (this.web && this.web.handle(req, res, u)) return;
     if (req.method === 'OPTIONS') { this._cors(res); res.writeHead(204); res.end(); return; }
     if (!this._hostOk(req)) { res.writeHead(403); res.end(); return; }
     const q = u.searchParams;
@@ -545,16 +695,21 @@ class FlickServer extends EventEmitter {
       // reachable only by non-browser clients (the host/origin gate above blocks web pages); the phone needs id+name
       return this._json(res, 200, { app: 'flick', v: PROTO, id: this.id, name: this.name, port: this.port, tls: this.tlsCtx ? 1 : 0 });
     }
+    // protocol 5: /api/events, /api/clip, /api/link, /api/notify, /api/sync/* (phoneapi.js, same token checks)
+    if (this.api.handle(req, res, u)) return;
     if (req.method === 'POST' && u.pathname === '/api/upload') {
       if (!this._trustedReq(req, q.get('device'), q.get('token'))) return this._json(res, 403, { ok: false, error: 'not paired' });
+      if (q.get('quiet') !== '1') this._own(q.get('tid'), q.get('device'));
       return this._handleUpload(req, res, q);
     }
     if (req.method === 'POST' && u.pathname === '/api/part') {
       if (!this._trustedReq(req, q.get('device'), q.get('token'))) return this._json(res, 403, { ok: false, error: 'not paired' });
+      this._own(q.get('tid'), q.get('device'));
       return this._handlePart(req, res, q);
     }
     if (req.method === 'POST' && u.pathname === '/api/bundle') {
       if (!this._trustedReq(req, q.get('device'), q.get('token'))) return this._json(res, 403, { ok: false, error: 'not paired' });
+      this._own(q.get('tid'), q.get('device'));
       return this._handleBundle(req, res, q);
     }
     if (req.method === 'GET' && u.pathname.startsWith('/api/file/')) {
@@ -631,6 +786,10 @@ class FlickServer extends EventEmitter {
   _handleUpload(req, res, q) {
     const tid = (q.get('tid') || rid(6)).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) || rid(6);
     const name = q.get('name') || 'file';
+    // quiet=1 (protocol 5): sent without the fling gesture (auto-send, tile, widget). No card flies in; it's saved
+    // like any received file once it's all here (phoneapi.js quietDone), and only then answered.
+    const quiet = q.get('quiet') === '1';
+    const note = (ev, x) => { if (!quiet) this.emit(ev, x); };
     // the request's own length is exact; the phone's size hint can be stale (media index)
     const clen = parseInt(req.headers['content-length'] || '', 10);
     const total = clen >= 0 ? clen : (parseInt(q.get('size') || '0', 10) || 0);
@@ -643,7 +802,7 @@ class FlickServer extends EventEmitter {
     let lastEmit = 0;
     let finished = false;
     const t0 = Date.now();
-    this.emit('upload-start', { tid, name, total });
+    note('upload-start', { tid, name, total });
 
     const removeTmp = () => { if (out.closed) fs.unlink(tmpPath, () => {}); else out.once('close', () => fs.unlink(tmpPath, () => {})); };
     const fail = (why) => {
@@ -653,7 +812,7 @@ class FlickServer extends EventEmitter {
       req.removeListener('data', onData);
       out.destroy();
       removeTmp();
-      if (!entry.superseded) this.emit('upload-failed', { tid, why });
+      if (!entry.superseded) note('upload-failed', { tid, why });
       if (!res.headersSent) { try { this._json(res, why === 'short' ? 400 : 500, { ok: false, error: why }); } catch (e) { /* ignore */ } }
       try { req.destroy(); } catch (e) { /* ignore */ }
     };
@@ -662,7 +821,7 @@ class FlickServer extends EventEmitter {
       received += chunk.length;
       if (!out.write(chunk)) { req.pause(); out.once('drain', () => { if (!finished) req.resume(); }); }
       const now = Date.now();
-      if (now - lastEmit > 40) { lastEmit = now; this.emit('upload-progress', { tid, received, total }); }
+      if (now - lastEmit > 40) { lastEmit = now; note('upload-progress', { tid, received, total }); }
     };
     out.on('error', (e) => fail('disk ' + (e.code || e.message)));
     req.on('data', onData);
@@ -676,6 +835,7 @@ class FlickServer extends EventEmitter {
         finished = true;
         this._release(tid, entry);
         if (entry.superseded) { removeTmp(); return; }
+        if (quiet) return this.api.quietDone(res, { tid, tmpPath, name, size: received, kind: q.get('kind'), device: q.get('device') });
         this.emit('upload-progress', { tid, received, total: total || received });
         this.emit('upload-done', { tid, tmpPath, name, size: received, ms: Date.now() - t0 });
         this._json(res, 200, { ok: true, tid });
@@ -992,7 +1152,8 @@ class FlickServer extends EventEmitter {
   offerFile(filePath, mime) {
     const st = fs.statSync(filePath);
     const fid = rid(8);
-    this.outgoing.set(fid, { path: filePath, name: path.basename(filePath), size: st.size, mime: mime || 'application/octet-stream', at: Date.now() });
+    // device: the phone it's offered to (the one in use), for the history once it has fetched it
+    this.outgoing.set(fid, { path: filePath, name: path.basename(filePath), size: st.size, mime: mime || 'application/octet-stream', at: Date.now(), device: this.session ? this.session.device : null });
     setTimeout(() => this.outgoing.delete(fid), 30 * 60 * 1000);
     return { fid, name: path.basename(filePath), size: st.size };
   }

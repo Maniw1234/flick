@@ -382,4 +382,123 @@ final class Bridge {
             }
         });
     }
+
+    // ======================================================================== Flick 2.0 (protocol 5): features
+    // Spec §5. Each returns at once; long work runs on a background thread and answers with an event (§6).
+
+    /** The clipboard (Android lets Flick read it only while it is in front with focus): see Clip.read. */
+    @JavascriptInterface
+    public String clipRead() {
+        waitForFocus();
+        return Clip.read(a, false).toString();
+    }
+
+    /** The PC's clipboard ({kind:text,text} / {kind:image,png}) onto the phone's, if "Clipboard from your PC" is on. */
+    @JavascriptInterface
+    public void clipWrite(final String json) {
+        Bg.run("clipWrite", new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (!Features.clipFromPc(a)) return;
+                    Clip.write(a, new JSONObject(json), prefs.getString("p:lastPcName", ""));
+                } catch (Throwable e) { Bg.warn("clipWrite", e); }
+            }
+        });
+    }
+
+    /** Opens an http(s) address in the browser (anything else is ignored). */
+    @JavascriptInterface
+    public void openUrl(final String url) {
+        if (!Links.ok(url)) return;
+        // Android doesn't let an app in the background start the browser: then it's the "Link from <PC>" notification
+        if (!Page.inFront()) { FromPc.notifyLink(a, url, prefs.getString("p:lastPcName", "")); return; }
+        a.runOnUiThread(new Runnable() { @Override public void run() { FromPc.open(a, url); } });
+    }
+
+    @JavascriptInterface
+    public void ring(boolean on, int sec) {
+        if (on) Ringer.start(a, sec); else Ringer.stop(a, "user");
+    }
+
+    /** {"bg","notifyAccess","notifyPerm","autoSend","clipFromPc","notify","sdk"}. */
+    @JavascriptInterface
+    public String features() {
+        String j = Features.json(a);
+        Page.featuresSeen(j);
+        return j;
+    }
+
+    /** Saved at once (features() right after shows it); what it starts (a service, a job, a screen) follows. */
+    @JavascriptInterface
+    public void setFeature(String name, String value) {
+        try { Features.set(a, name, value); } catch (Throwable e) { Bg.warn("setFeature", e); }
+    }
+
+    @JavascriptInterface public String history() { return Bg.history(a).json(); }
+
+    @JavascriptInterface
+    public void historyAdd(String json) {
+        if (Bg.history(a).addJson(json) > 0) Page.historyChanged();
+    }
+
+    /** Removes one entry ("Remove from history"). Not in the spec's list: added, see the report. */
+    @JavascriptInterface
+    public void historyRemove(String id) {
+        if (Bg.history(a).remove(id)) Page.historyChanged();
+    }
+
+    @JavascriptInterface
+    public void historyClear() {
+        Bg.history(a).clear();
+        Page.historyChanged();
+    }
+
+    @JavascriptInterface public String syncPairs() { return SyncManager.listJson(a); }
+    @JavascriptInterface public void syncAdd(String phoneFolderPath) { SyncManager.add(a, phoneFolderPath); }
+    @JavascriptInterface public void syncRemove(String id) { SyncManager.remove(a, id); }
+    @JavascriptInterface public void syncNow() { SyncManager.syncAll(a, true); }
+
+    /**
+     * "Save to the Flick list" for a link that was shared to Flick (event share-link): saved as a text item, as shares
+     * of text always were; answers with the usual "added" event. Not in the spec's list: added, see the report.
+     */
+    @JavascriptInterface
+    public void saveLink(final String url, final String title) {
+        if (url == null || url.length() == 0) return;
+        Bg.run("saveLink", new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    String t = title != null && title.trim().length() > 0 ? title.trim() : "Shared link";
+                    JSONObject item = Library.get(a).importText(url, t.length() > 60 ? t.substring(0, 60) : t);
+                    JSONObject o = new JSONObject();
+                    o.put("t", "added");
+                    o.put("items", new JSONArray().put(item));
+                    a.emit(o.toString());
+                } catch (Throwable e) { Bg.warn("saveLink", e); }
+            }
+        });
+    }
+
+    /** What the "Send last photo" tile does; the outcome shows as a page toast. */
+    @JavascriptInterface
+    public void sendLatestPhoto() {
+        Transfers.hold(a, true);
+        Actions.sendLatestPhoto(a, "share", true, new Actions.Report() { @Override public void say(String msg) { a.toast(msg); } });
+    }
+
+    /** What the "Send clipboard" tile does (the user asked, so a clipboard marked private goes too). */
+    @JavascriptInterface
+    public void sendClipboard() {
+        waitForFocus();
+        Actions.sendClipboard(a, Clip.read(a, true), new Actions.Report() { @Override public void say(String msg) { a.toast(msg); } });
+    }
+
+    // just back in front, the window may not have focus yet (the clipboard reads empty without it): up to 0.6 s
+    private void waitForFocus() {
+        for (int i = 0; i < 12 && !a.hasWindowFocus(); i++) {
+            try { Thread.sleep(50); } catch (InterruptedException e) { return; }
+        }
+    }
 }

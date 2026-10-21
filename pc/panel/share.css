@@ -1,0 +1,68 @@
+/* Share with a browser (share.js): the entry on the main view, the share view with its QR code, and the prompt */
+
+.wentry { display: flex; align-items: center; gap: 12px; width: 100%; margin: 12px 0 0; padding: 12px 12px 12px 14px; border: 0; border-radius: 8px;
+  background: var(--card); text-align: left; cursor: pointer; }
+.wentry:hover { background: var(--card-hi); }
+.wqrico { width: 26px; height: 26px; flex: none; fill: var(--accent); }
+.wtxt { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.wt1 { display: flex; align-items: center; gap: 7px; font-weight: 600; font-size: 13.5px; }
+.wt2 { color: var(--sub); font-size: 12px; line-height: 1.35; }
+.wchev { width: 14px; height: 14px; flex: none; fill: none; stroke: var(--sub); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.wentry .dot, .wview .dot { background: var(--ok); }
+
+.wview { position: fixed; top: 41px; left: 1px; right: 1px; bottom: 1px; z-index: 5; display: flex; flex-direction: column; background: var(--bg); }
+.wview:focus { outline: none; }
+.whead { flex: none; display: flex; align-items: center; gap: 4px; height: 40px; padding: 0 16px 0 8px; }
+.wback { width: 32px; height: 32px; border: 0; border-radius: 4px; background: transparent; color: var(--text); cursor: pointer; display: grid; place-items: center; }
+.wback:hover { background: rgba(255,255,255,0.08); }
+.wback svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.wtitle { font-size: 15px; font-weight: 600; }
+.wbody { flex: 1; overflow-y: auto; padding: 2px 16px 18px; scrollbar-width: thin; }
+.wbody::-webkit-scrollbar { width: 6px; } .wbody::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.18); border-radius: 3px; }
+.wbody h2 { margin: 18px 2px 8px; }
+
+.wqrbox { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 6px 0 14px; }
+.wqr { width: 264px; height: 264px; border-radius: 12px; background: #fff; display: grid; place-items: center; }
+.wqr svg { display: block; shape-rendering: crispEdges; }
+.wqr path { fill: #000; }
+.wqr.blank { background: rgba(255,255,255,0.06); }
+.wscan { color: var(--sub); font-size: 12.5px; text-align: center; line-height: 1.4; max-width: 300px; }
+
+.wurl { display: flex; align-items: flex-start; gap: 10px; }
+.wurl .mono { flex: 1; min-width: 0; font-size: 12.5px; line-height: 1.5; word-break: break-all; }
+.wurl .link { flex: none; padding: 0; }
+#webNet { max-width: 230px; }
+
+.wh2 { display: flex; align-items: center; justify-content: space-between; margin: 18px 2px 8px; }
+.wh2 h2 { margin: 0; }
+.wh2 .btn { padding: 4px 12px; font-size: 12.5px; }
+
+.wrow { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); min-width: 0; }
+.card > .wrow:first-child { border-top: 0; }
+.wrow .wmain { flex: 1; min-width: 0; }
+.wrow .wname { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.wrow .wname > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wrow .d { color: var(--sub); font-size: 12px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wtag { flex: none; padding: 1px 7px; border-radius: 9px; font-size: 11px; font-weight: 600; background: rgba(255,255,255,0.08); color: var(--sub); }
+.wtag.ok { background: rgba(108,203,95,0.16); color: var(--ok); }
+.wtag.wait { background: rgba(252,225,0,0.14); color: #fce100; }
+.wtag.no { background: rgba(255,153,164,0.14); color: #ff99a4; }
+.wrow .link { flex: none; padding: 2px 0; font-size: 12.5px; }
+.wx { flex: none; width: 28px; height: 28px; border: 0; border-radius: 4px; background: transparent; color: var(--sub); cursor: pointer; display: grid; place-items: center; }
+.wx:hover { background: rgba(255,255,255,0.08); color: var(--text); }
+.wx svg { width: 10px; height: 10px; }
+.wempty { padding: 12px 0; color: var(--sub); font-size: 12.5px; line-height: 1.45; }
+.wnote { white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; line-height: 1.4; max-height: 7em; overflow: hidden; }
+.wrow.wtext { align-items: flex-start; }
+.wrow.flash { animation: wflash 2s ease; }
+@keyframes wflash { from { background: rgba(76,194,255,0.16); } to { background: transparent; } }
+.wtextbtns { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+
+.wstop { display: block; width: 100%; margin: 20px 0 0; padding: 9px 16px; background: rgba(255,153,164,0.12); color: #ff99a4; font-weight: 600; }
+.wstop:hover { filter: none; background: rgba(255,153,164,0.2); }
+.wsmall { margin: 10px 2px 0; color: var(--sub); font-size: 11.5px; line-height: 1.45; }
+.wfw { margin: 6px 2px 0; font-size: 12px; }
+
+.woff { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 70px 18px 0; }
+.woff .psub { line-height: 1.45; max-width: 300px; }
+.woff .btn { margin-top: 18px; padding: 8px 22px; }

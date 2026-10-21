@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+<meta name="format-detection" content="telephone=no">
+<title>Flick</title>
+<link rel="icon" href="__BASE__icon.png">
+<link rel="apple-touch-icon" href="__BASE__icon.png">
+<link rel="stylesheet" href="__BASE__web.css">
+<script src="__BASE__web.js" defer></script>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <img class="logo" src="__BASE__icon.png" alt="">
+    <div class="ttl">
+      <div class="t1">Flick</div>
+      <div class="t2"><span class="dot" id="dot"></span><span id="sub">Connecting…</span></div>
+    </div>
+  </header>
+
+  <div class="banner" id="banner" role="status" hidden></div>
+
+  <section class="msg" id="msg" aria-live="polite">
+    <div class="art" id="art" aria-hidden="true">
+      <svg class="dev" viewBox="0 0 30 52"><rect x="1.5" y="1.5" width="27" height="49" rx="6"/><path d="M12 6.5h6"/></svg>
+      <span class="dots"><i></i><i></i><i></i></span>
+      <svg class="pc" viewBox="0 0 64 52"><rect x="1.5" y="1.5" width="61" height="38" rx="4"/><path d="M24 50h16M32 40v10"/></svg>
+    </div>
+    <h1 id="msgTitle">Connecting…</h1>
+    <div class="code" id="msgCode" hidden></div>
+    <p id="msgText"></p>
+    <button class="btn" id="msgBtn" type="button" hidden></button>
+  </section>
+
+  <main class="main" id="main" hidden>
+    <section class="card send" id="sendCard">
+      <h2>Send to <span class="pcname"></span></h2>
+      <label class="btn big" for="pick" id="pickBtn">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4M7 9l5-5 5 5M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg>
+        <span>Choose files</span>
+      </label>
+      <input type="file" id="pick" class="vh" multiple tabindex="-1">
+      <p class="hint fine">Or drop files anywhere on this page.</p>
+      <ul class="list" id="ups"></ul>
+      <p class="where" id="where" hidden></p>
+    </section>
+
+    <section class="card get" id="getCard">
+      <h2>From <span class="pcname"></span></h2>
+      <ul class="list" id="downs"></ul>
+      <p class="empty" id="downsEmpty">Nothing here yet. Files added for browsers in Flick on <span class="pcname"></span> show up here.</p>
+    </section>
+
+    <section class="card note" id="noteCard">
+      <h2>Send a note or link</h2>
+      <div class="noterow">
+        <textarea id="note" rows="1" maxlength="5000" placeholder="Type or paste here" aria-label="Note or link"></textarea>
+        <button class="btn" id="noteSend" type="button">Send</button>
+      </div>
+      <p class="hint" id="noteState" aria-live="polite"></p>
+    </section>
+
+    <p class="foot">This connection isn’t encrypted. Use it only on networks you trust.</p>
+  </main>
+</div>
+<div class="drop" id="drop" hidden><div>Drop to send to <span class="pcname"></span></div></div>
+</body>
+</html>

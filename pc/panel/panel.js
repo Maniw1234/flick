@@ -3,7 +3,7 @@
   const api = window.flick;
   const $ = (id) => document.getElementById(id);
   let S = null;
-  let pairDevice = null;
+  let pairDevice = null, pairShownAt = 0;
   const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   function set(key, value) { api.send('panel:set', { key, value }); }
@@ -125,7 +125,10 @@
       sub.textContent = 'Allow it to send files to this PC?';
     }
     $('pair').hidden = false;
-    $('allow').focus();
+    pairShownAt = Date.now();
+    // focus starts on "Don't allow" (and Allow ignores clicks for a moment): a keystroke or click meant for something
+    // else mustn't pair a stranger's phone
+    $('deny').focus();
   });
   api.on('panel:pair-cancel', (d) => { if (d && d.device === pairDevice) { $('pair').hidden = true; pairDevice = null; } });
 
@@ -154,7 +157,7 @@
   $('qsAllow').onclick = () => { if (qsId) api.send('panel:qs-answer', { id: qsId, accept: true }); $('qs').hidden = true; qsId = null; };
   $('qsDeny').onclick = () => { if (qsId) api.send('panel:qs-answer', { id: qsId, accept: false }); $('qs').hidden = true; qsId = null; };
 
-  $('allow').onclick = () => { if (pairDevice) api.send('panel:pair-answer', { device: pairDevice, allow: true }); $('pair').hidden = true; pairDevice = null; };
+  $('allow').onclick = () => { if (Date.now() - pairShownAt < 1000) return; if (pairDevice) api.send('panel:pair-answer', { device: pairDevice, allow: true }); $('pair').hidden = true; pairDevice = null; };
   $('deny').onclick = () => { if (pairDevice) api.send('panel:pair-answer', { device: pairDevice, allow: false }); $('pair').hidden = true; pairDevice = null; };
   $('close').onclick = () => act('hide');
   $('quit').onclick = () => act('quit');
