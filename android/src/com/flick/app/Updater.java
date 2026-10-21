@@ -176,12 +176,14 @@ final class Updater {
         long v = versionCode(arc);
         if (v != expectCode) return "unexpected version";
         PackageInfo me;
-        try { me = pm.getPackageInfo(app.getPackageName(), flags); } catch (Throwable e) { return null; }
+        // what can't be checked is refused (with a reason), never waved through
+        try { me = pm.getPackageInfo(app.getPackageName(), flags); } catch (Throwable e) { return "can't read this app's signature"; }
         if (v <= versionCode(me)) return "not newer";
         // Android refuses an update from another developer anyway; checking first gives a clear message instead
         if (Build.VERSION.SDK_INT >= 28) return Api28.sameDeveloper(me, arc);
         Set<String> mine = certs(me.signatures), theirs = certs(arc.signatures);
-        if (!mine.isEmpty() && !theirs.isEmpty() && !mine.equals(theirs)) return "different signature";
+        if (mine.isEmpty() || theirs.isEmpty()) return "missing signature";
+        if (!mine.equals(theirs)) return "different signature";
         return null;
     }
 
@@ -279,14 +281,15 @@ final class Updater {
     static final class Api28 {
         /**
          * The update must be signed by the key the installed app uses now, or prove (key rotation) that this key
-         * handed over to its own. Unknown → null: Android still enforces it when installing.
+         * handed over to its own. Signers that can't be read → refused.
          */
         static String sameDeveloper(PackageInfo me, PackageInfo arc) {
             SigningInfo a = me.signingInfo, b = arc.signingInfo;
-            if (a == null || b == null) return null;
+            if (a == null || b == null) return "missing signature";
             Set<String> mine = certs(a.getApkContentsSigners());
             Set<String> theirs = certs(b.getApkContentsSigners());
-            if (mine.isEmpty() || theirs.isEmpty() || mine.equals(theirs)) return null;
+            if (mine.isEmpty() || theirs.isEmpty()) return "missing signature";
+            if (mine.equals(theirs)) return null;
             if (!b.hasMultipleSigners() && certs(b.getSigningCertificateHistory()).containsAll(mine)) return null;
             return "different signature";
         }

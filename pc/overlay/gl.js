@@ -357,6 +357,12 @@ void main() {
     canvas = cv;
     gl = canvas.getContext('webgl2', { alpha: true, premultipliedAlpha: true, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false, powerPreference: 'high-performance' });
     if (!gl) return false;
+    // A GPU reset (driver update, docking, some sleep/resume) loses every texture and program. Tell Flick, which
+    // reloads this page so the effects come back, instead of drawing nothing until the next restart.
+    canvas.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault();
+      try { (window.flick || { send() {} }).send('fx:lost'); } catch (x) { /* ignore */ }
+    }, { once: true });
     R.gl = gl;
     floatTargets = !!gl.getExtension('EXT_color_buffer_float');
     gl.getExtension('OES_texture_float_linear');

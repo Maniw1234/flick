@@ -108,6 +108,12 @@ function lanIPv4() {
   return out;
 }
 const ip4 = (s) => s.split('.').reduce((n, x) => ((n << 8) | (+x & 255)) >>> 0, 0);
+/** true when src is this machine or on one of its networks */
+function onLink(src) {
+  if (!src || /^127\./.test(src)) return true;
+  const s = ip4(src);
+  return lanIPv4().some((a) => ((ip4(a.address) & ip4(a.netmask)) >>> 0) === ((s & ip4(a.netmask)) >>> 0));
+}
 /** The addresses a querier at `src` can reach: the one on its subnet, or all of them. */
 function addressesFor(src) {
   const all = lanIPv4();
@@ -189,6 +195,8 @@ class MdnsService extends EventEmitter {
       if (!this.bound && this.sock === sock) { this.sock = null; try { sock.close(); } catch (x) { /* ignore */ } this.emit('unavailable', e); }
     });
     sock.on('message', (msg, rinfo) => {
+      // only answer this network (RFC 6762 §11): a query from elsewhere would turn us into a traffic reflector
+      if (!onLink(rinfo.address)) return;
       const legacy = rinfo.port !== PORT;
       const a = this.answer(msg, rinfo.address, legacy);
       if (!a) return;

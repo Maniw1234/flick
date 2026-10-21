@@ -37,7 +37,8 @@ class BtBridge extends EventEmitter {
   }
 
   _spawn() {
-    if (this.stopped) return;
+    this.respawnT = null;
+    if (this.stopped || this.child || !this.relay || !this.relay.address()) return;   // never two helpers at once
     const port = this.relay.address().port;
     const args = process.env.FLICK_BT_TCP ? ['--tcp', process.env.FLICK_BT_TCP, String(port)] : [String(port)];
     let child;
@@ -53,12 +54,14 @@ class BtBridge extends EventEmitter {
     child.stderr.on('data', (d) => this.log('bt helper:', d.toString('utf8').trim().slice(0, 200)));
     child.on('error', (e) => { this.log('bt helper', e.message); this._set('error'); });
     child.on('exit', (code) => {
-      if (this.child === child) this.child = null;
+      if (this.child !== child) return;                 // an older helper (stopped and restarted since): ignore it
+      this.child = null;
       if (this.stopped) return;
       // the radio may come back (Bluetooth turned on, a dongle plugged in): try again in a while
       this.log('bt helper exited', code);
       if (this.state !== 'no-radio') this._set('error');
-      setTimeout(() => this._spawn(), code === 3 ? 15000 : 5000);
+      clearTimeout(this.respawnT);
+      this.respawnT = setTimeout(() => this._spawn(), code === 3 ? 15000 : 5000);
     });
   }
 
@@ -81,6 +84,7 @@ class BtBridge extends EventEmitter {
 
   stop() {
     this.stopped = true;
+    clearTimeout(this.respawnT); this.respawnT = null;
     if (this.child) { try { this.child.kill(); } catch (e) { /* ignore */ } this.child = null; }
     for (const l of this.links) l.close();
     this.links.clear();

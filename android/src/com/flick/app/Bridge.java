@@ -10,9 +10,12 @@ import android.view.HapticFeedbackConstants;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.util.ArrayList;
+import java.util.concurrent.ExecutorService;
 
 /** Methods the web UI calls as window.FlickNative.* (run on the JavaBridge thread). */
 final class Bridge {
@@ -176,6 +179,17 @@ final class Bridge {
     @JavascriptInterface public String thumb(String id) { return Library.get(a).thumbBase64(id); }
     @JavascriptInterface public void remove(String id) { Library.get(a).remove(id); }
 
+    /** Removes several shelf items at once (a JSON array of ids), writing the list once. Returns how many went. */
+    @JavascriptInterface
+    public int removeMany(String idsJson) {
+        try {
+            JSONArray arr = new JSONArray(idsJson);
+            ArrayList<String> ids = new ArrayList<String>();
+            for (int i = 0; i < arr.length(); i++) ids.add(arr.optString(i));
+            return Library.get(a).removeAll(ids);
+        } catch (Throwable e) { return 0; }
+    }
+
     @JavascriptInterface
     public void pick(final String kind) {
         a.runOnUiThread(new Runnable() { @Override public void run() { a.launchPicker(kind); } });
@@ -252,12 +266,37 @@ final class Bridge {
         });
     }
 
+    // one copy at a time, off the page's bridge thread (a big video takes a while)
+    private static final ExecutorService SAVER = Transfers.pool("flick-save", 1);
+
+    /**
+     * Copies a shelf item into the phone's Pictures / Movies / Music / Download folder (…/Flick). Returns at once; the
+     * result arrives as an event: {"t":"saved","id":id,"ok":true,"where":"Pictures/Flick"} or
+     * {"t":"saved","id":id,"ok":false,"why":"…"} ("unsupported" before Android 10, "missing" when the item is gone).
+     */
     @JavascriptInterface
-    public String saveCopy(String id) {
-        if (Build.VERSION.SDK_INT < 29) return "";
-        JSONObject o = Library.get(a).find(id);
-        if (o == null) return "";
-        File f = Library.get(a).fileOf(o);
-        try { return Transfers.PublicSave.save(a, f, o.optString("name"), o.optString("mime")); } catch (Throwable e) { return ""; }
+    public void saveCopy(final String id) {
+        SAVER.execute(new Runnable() {
+            @Override
+            public void run() {
+                JSONObject ev = new JSONObject();
+                try {
+                    ev.put("t", "saved");
+                    ev.put("id", id);
+                    try {
+                        if (Build.VERSION.SDK_INT < 29) throw new java.io.IOException("unsupported");
+                        JSONObject o = Library.get(a).find(id);
+                        if (o == null) throw new java.io.IOException("missing");
+                        File f = Library.get(a).fileOf(o);
+                        ev.put("where", Transfers.PublicSave.save(a, f, o.optString("name"), o.optString("mime")));
+                        ev.put("ok", true);
+                    } catch (Throwable e) {
+                        ev.put("ok", false);
+                        ev.put("why", String.valueOf(e.getMessage()));
+                    }
+                } catch (Throwable e) { return; }
+                a.emit(ev.toString());
+            }
+        });
     }
 }

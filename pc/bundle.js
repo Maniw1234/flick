@@ -71,7 +71,7 @@ class BundleReceiver {
     const segs = safeRelative(h.p);
     if (!segs) throw new Error('bad path');
     const full = this._resolve(segs);
-    this._top(segs[0]);
+    if (h.d || segs.length > 1) this._top(segs[0]);   // a top-level file is recorded under the name it's actually staged as
     if (h.d) {
       await fs.promises.mkdir(full, { recursive: true });
       this.stage = 'hlen'; this.need = 4;
@@ -83,6 +83,7 @@ class BundleReceiver {
     let dest = full, i = 2;
     while (this.taken.has(this._key(dest)) || fs.existsSync(dest)) dest = base + ' (' + i++ + ')' + ext;
     this.taken.set(this._key(dest), true);
+    if (segs.length === 1) this._top(path.basename(dest));
     this.fd = await fs.promises.open(dest, 'w');
     this.cur = { path: dest, mtime: +h.m || 0 };
     this.left = size;

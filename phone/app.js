@@ -24,14 +24,16 @@
   function njson(name) { const r = nc.apply(null, arguments); if (!r || r === true) return null; try { return JSON.parse(r); } catch (e) { return null; } }
   const pendingReq = new Map();
   let reqSeq = 0;
-  function nreq(method) {
-    const args = Array.prototype.slice.call(arguments, 1);
+  function nreq(method) { return nreqT.apply(null, [25000].concat(Array.prototype.slice.call(arguments))); }
+  // the same with its own time limit: listing a huge folder (or a slow SD card) can take far longer than 25 s
+  function nreqT(ms, method) {
+    const args = Array.prototype.slice.call(arguments, 2);
     return new Promise((resolve) => {
       const id = 'r' + (++reqSeq);
       pendingReq.set(id, resolve);
       const r = nc.apply(null, [method, id].concat(args));
       if (r === null) { pendingReq.delete(id); resolve(null); return; }
-      setTimeout(() => { if (pendingReq.has(id)) { pendingReq.delete(id); resolve(null); } }, 25000);
+      setTimeout(() => { if (pendingReq.has(id)) { pendingReq.delete(id); resolve(null); } }, ms);
     });
   }
   const pref = {
@@ -277,7 +279,7 @@
   // faster links first: USB cable, Ethernet, a hotspot or direct link, Wi-Fi, then Bluetooth
   const LINK_RANK = { usb: 5, ethernet: 4, hotspot: 3, direct: 3, wifi: 2, bluetooth: 1 };
   const rankOf = (p) => LINK_RANK[(p && p.via) || 'wifi'] || 2;
-  const busyMoving = () => [...st.pending.values()].some((p) => p.phase === 'sent' && !p.uploaded) || V.items.some((x) => x.incoming);
+  const busyMoving = () => [...st.pending.values()].some((p) => p.phase === 'sent' && !p.uploaded) || (st.incoming && st.incoming.size > 0) || V.items.some((x) => x.incoming);
   function onPcs() {
     // Bluetooth reports the PC it reached through the same list
     st.pcs = (st.lanList || []).filter((p) => p && p.ip && p.port).concat(st.btPc ? [st.btPc] : []);
@@ -295,7 +297,7 @@
         st.pc = Object.assign({}, st.pc, same);
         if (same.via !== 'bluetooth') pref.set('lastPcAddr', same.ip + ':' + same.port);
         if (moved && st.connected) { toast('Connected over ' + (LINK_NAMES[same.via] || same.via), 2000); openLink(true); }
-        else if (moved) openLink();
+        else if (moved) openLink(st.wantResume);
       }
     }
     setPcName();
@@ -307,6 +309,7 @@
     pref.set('lastPc', pc.id);
     if (pc.via !== 'bluetooth') pref.set('lastPcAddr', pc.ip + ':' + pc.port);
     pref.set('lastPcName', pc.name);
+    st.replaced = false;
     setPcName();
     pairHint('');
     openLink();
@@ -389,36 +392,46 @@
     st.ws = ws; st.connecting = true; st.wsOpen = false;
     ws.onopen = () => {
       if (gen !== wsGen) return;
-      st.wsOpen = true; st.connecting = false;
+      st.wsOpen = true; st.connecting = false; st.lastRx = Date.now();
       ws.send(JSON.stringify({ t: 'hello', device: DEVICE, name: phoneName(), token: pref.get(tokenKey(st.pc.id), null), w: innerWidth, h: innerHeight, dpr: devicePixelRatio, resume: !!resume, v: 1, app: MY_CODE, appName: INFO.version || '', via: st.pc.via || 'wifi' }));
       clearInterval(pingT);
-      pingT = setInterval(() => wsSend({ t: 'ping', ts: Date.now() }), 10000);
+      pingT = setInterval(() => {
+        if (gen !== wsGen) return;
+        // a link that went silent (PC asleep, laptop changed network) can take many minutes to report closing by itself:
+        // the PC answers every ping, so 25 s of nothing means it's gone — give up on this socket and reconnect
+        if (Date.now() - (st.lastRx || 0) > 25000) { wsGen++; try { ws.close(); } catch (x) { /* ignore */ } linkLost(); return; }
+        wsSend({ t: 'ping', ts: Date.now() });
+      }, 10000);
     };
-    ws.onmessage = (e) => { if (gen !== wsGen) return; let m; try { m = JSON.parse(e.data); } catch (x) { return; } onMsg(m); };
-    ws.onclose = () => {
-      if (gen !== wsGen) return;
-      const was = st.connected;
-      st.wsOpen = false; st.connected = false; st.connecting = false;
-      clearInterval(pingT);
-      updateConn();
-      for (const [tid, p] of st.pending) {
-        if (p.phase === 'lifted') st.pending.delete(tid);
-        // the file already reached the PC; the "saved" note just can't arrive now
-        else if (p.phase === 'sent' && p.uploaded) { st.pending.delete(tid); for (const it of itemsOf(p)) if (it.path || st.keep) restoreItem(it); }
-      }
-      if (was) { st.wantResume = true; if (!document.hidden) toast('Reconnecting to ' + st.pc.name + '…', 1800); }
-      scheduleReconnect();
-    };
+    ws.onmessage = (e) => { if (gen !== wsGen) return; st.lastRx = Date.now(); let m; try { m = JSON.parse(e.data); } catch (x) { return; } onMsg(m); };
+    ws.onclose = () => { if (gen !== wsGen) return; linkLost(); };
     ws.onerror = () => { /* onclose follows */ };
+  }
+
+  function linkLost() {
+    const was = st.connected;
+    st.wsOpen = false; st.connected = false; st.connecting = false;
+    clearInterval(pingT);
+    updateConn();
+    for (const [tid, p] of st.pending) {
+      if (p.phase === 'lifted') st.pending.delete(tid);
+      // the file already reached the PC; the "saved" note just can't arrive now
+      else if (p.phase === 'sent' && p.uploaded) { st.pending.delete(tid); for (const it of itemsOf(p)) if (it.path || st.keep) restoreItem(it); }
+    }
+    st.pairAsked = false; st.awaitingApproval = false;
+    // another phone took over this PC: wait for the user rather than fighting over it
+    if (st.replaced) { st.wantResume = false; return; }
+    if (was) { st.wantResume = true; if (!document.hidden) toast('Reconnecting to ' + st.pc.name + '…', 1800); }
+    scheduleReconnect();
   }
 
   let lostSince = 0;
   function scheduleReconnect() {
     clearTimeout(reconnectT);
     if (!lostSince) lostSince = Date.now();
-    if (st.wantResume && Date.now() - lostSince > 12000 && st.screen === 'main') {
-      st.wantResume = false;
-      toast('Lost connection to your PC', 2600);
+    if (st.wantResume && Date.now() - lostSince > 12000 && st.screen === 'main' && !st.lostToast) {
+      st.lostToast = true;
+      toast('Lost connection to your PC. Flick will reconnect when it’s back.', 2800);
     }
     reconnectT = setTimeout(() => openLink(st.wantResume), document.hidden ? 4000 : (st.connectWanted ? 500 : 1200));
   }
@@ -431,7 +444,8 @@
 
   // The hold finished: connect now, or as soon as the link to the PC is up (never fail just because it's still linking).
   function requestConnect() {
-    if (st.wsOpen && wsSend({ t: 'connect' })) return;
+    st.replaced = false; st.pairAsked = true;
+    if (st.wsOpen && wsSend({ t: 'connect', user: true })) return;
     st.connectWanted = Date.now();
     pairHint('Connecting to <b>' + esc(st.pc ? st.pc.name : 'your PC') + '</b>…');
     G.hold = Math.max(G.hold, 0.5);
@@ -446,9 +460,16 @@
     }, 10000);
   }
 
+  // The phone's own view of trust: it holds a token for this PC id, given by that PC when the user allowed pairing.
+  // Only such a PC can say "connected", send files, or offer an update; anything else on the network is ignored.
+  const hasToken = () => !!(st.pc && pref.get(tokenKey(st.pc.id), ''));
+  const linkTrusted = () => st.connected && hasToken();
+
   function onMsg(m) {
     switch (m.t) {
       case 'welcome':
+        // a different PC answered at this address (its IP went to another computer): leave every pairing alone
+        if (m.pc && m.pc.id && st.pc && m.pc.id !== st.pc.id) { closeLink(); break; }
         lostSince = 0;
         st.trusted = !!m.trusted;
         st.pcProto = +m.v || 1;                 // 2+: large files travel in several parts at once
@@ -456,27 +477,32 @@
         if (m.theme) applyTheme(m.theme);
         if (m.pc && m.pc.name && st.pc) { st.pc.name = m.pc.name; pref.set('lastPcName', m.pc.name); setPcName(); }
         if (!m.trusted) pref.set(tokenKey(st.pc.id), '');
-        if (st.connectWanted && Date.now() - st.connectWanted < 10000) { st.connectWanted = 0; clearTimeout(connectT); wsSend({ t: 'connect' }); }
+        if (st.connectWanted && Date.now() - st.connectWanted < 10000) { st.connectWanted = 0; st.pairAsked = true; clearTimeout(connectT); wsSend({ t: 'connect', user: true }); }
+        else if (st.wantResume && m.trusted && !st.connected && !st.replaced) wsSend({ t: 'connect' });   // pick the session back up
         else if (st.screen === 'pair') pairHint('');
         break;
       case 'pairing':
+        if (!st.pairAsked) break;                // only after this phone asked to connect
         st.awaitingApproval = true;
         setPcName();
         pairHint('Look at your PC — click <b>Allow</b> in the Flick window.');
         G.hold = 0.35;
         break;
       case 'paired':
+        if (!st.pairAsked || typeof m.token !== 'string' || !m.token) break;   // never a pairing this phone didn't ask for
         pref.set(tokenKey(st.pc.id), m.token);
-        st.trusted = true; st.awaitingApproval = false;
+        st.trusted = true; st.awaitingApproval = false; st.pairAsked = false;
         break;
       case 'denied':
+        st.pairAsked = false;
         st.awaitingApproval = false; setPcName();
         pairHint('The PC said no. Try again and click <b>Allow</b> on the PC.');
         G.hold = 0;
         haptic('reject');
         break;
       case 'connected':
-        lostSince = 0;
+        if (!hasToken()) break;
+        lostSince = 0; st.lostToast = false;
         st.connected = true; st.trusted = true; st.awaitingApproval = false; st.connectWanted = 0;
         clearTimeout(connectT);
         if (m.side) st.side = m.side;
@@ -502,14 +528,21 @@
       case 'pc':
         if (m.name && st.pc) { st.pc.name = m.name; setPcName(); }
         break;
-      case 'replaced':
-        st.wantResume = false;
+      case 'busy':
+        // another phone has the PC; this one picked its session back up on its own, so don't push it off — wait for the user
+        st.wantResume = false; st.replaced = true; st.connectWanted = 0; st.pairAsked = false;
+        if (st.screen === 'pair') { G.hold = 0; pairHint('Another phone is connected to <b>' + esc(st.pc ? st.pc.name : 'your PC') + '</b>. Hold to switch to this one.'); }
+        else toast('Another phone is using ' + (st.pc ? st.pc.name : 'your PC') + '. Hold Connect to switch.', 3000);
         break;
-      case 'saved': onSaved(m); break;
-      case 'failed': onFailed(m); break;
-      case 'incoming': onIncoming(m); break;
-      case 'edge': onEdge(m); break;
-      case 'app': UPD.pcKnows = true; onAppInfo(m.app, true); break;
+      case 'replaced':
+        st.wantResume = false; st.replaced = true;
+        toast('Another phone is using ' + (st.pc ? st.pc.name : 'your PC') + ' now. Hold Connect to switch back.', 3200);
+        break;
+      case 'saved': if (linkTrusted()) onSaved(m); break;
+      case 'failed': if (linkTrusted()) onFailed(m); break;
+      case 'incoming': if (linkTrusted()) onIncoming(m); break;
+      case 'edge': if (linkTrusted()) onEdge(m); break;
+      case 'app': if (linkTrusted()) { UPD.pcKnows = true; onAppInfo(m.app, true); } break;
       default: break;
     }
   }
@@ -589,7 +622,7 @@
   // a newer version is out: fetch it in the background, so installing takes one tap
   function autoFetch() {
     const a = UPD.app;
-    if (!isNewer(a) || !canFetch(a)) return;
+    if (!isNewer(a) || !canFetch(a) || settings.autoUpdate === false) return;
     const ns = njson('updateState');
     if (!ns) return;                                    // this phone app can't update itself
     if (ns.ready === a.code && ns.readySha === a.sha256.slice(0, 16).toLowerCase()) { UPD.state = 'fetched'; renderUpd(); return; }
@@ -873,10 +906,10 @@
     if (needsPermission()) { afterLoad(); return; }
     const gen = V.gen;
     V.loading = true; renderHeader();
-    const data = await nreq('listDirAsync', path || '');
+    const data = await nreqT(120000, 'listDirAsync', path || '');
     if (gen !== V.gen) return;
     V.loading = false;
-    if (!data || data.error) { V.items = []; afterLoad(); if (data && data.error) toast('Can’t open this folder', 2000); return; }
+    if (!data || data.error) { V.items = []; afterLoad(); toast(data ? 'Can’t open this folder' : 'This folder took too long to open', 2400); return; }
     V.items = data.items || [];
     V.total = V.items.length;
     if (data.name && V.stack.length === 0 && V.rootCat === 'storage') V.title = data.name;
@@ -889,7 +922,7 @@
     if (V.loading) return;
     const gen = V.gen;
     V.loading = true; renderHeader();
-    const data = await nreq('queryAsync', V.cat, V.offset, PAGE);
+    const data = await nreqT(120000, 'queryAsync', V.cat, V.offset, PAGE);
     if (gen !== V.gen) return;
     V.loading = false;
     if (!data) { afterLoad(); return; }
@@ -1370,8 +1403,11 @@
     const lan = !!(st.pc && (st.lanList || []).some((p) => p.id === st.pc.id));
     const onBtNow = !!(st.connected && st.pc && st.pc.via === 'bluetooth');
     const quiet = Date.now() - (st.lanSeenAt || 0) > 6000;
-    const want = !!settings.bluetooth && !document.hidden && known &&
-      (onBtNow ? (busyMoving() || !lan) : (!lan && quiet && !(st.connected && st.pc.via !== 'bluetooth')));
+    // Connected over Bluetooth: keep the link until the session has moved to a faster one (onPcs moves it once nothing
+    // is in flight) — dropping it first would cut the session. In the background it stays only while files move.
+    if (onBtNow && lan && !busyMoving()) onPcs();
+    const want = !!settings.bluetooth && known &&
+      (onBtNow ? (!document.hidden || busyMoving()) : (!document.hidden && !lan && quiet && !(st.connected && st.pc.via !== 'bluetooth')));
     if (want !== btWanted) { btWanted = want; nc('btWant', want); }
   }
   setInterval(btTick, 3000);
@@ -2046,8 +2082,11 @@
     const aspect = clamp(m.aspect || 1.33, 0.5, 2);
     const it = {
       id: 'in-' + m.fid, fid: m.fid, name: m.name, size: m.size, mime: m.mime, kind: m.kind === 'image' || m.kind === 'video' ? m.kind : (m.ext === 'pdf' ? 'pdf' : 'doc'),
-      ext: m.ext, added: Date.now(), mtime: Date.now(), thumb: m.thumb || null, w: m.kind === 'image' || m.kind === 'video' ? Math.round(aspect * 1000) : 0, h: 1000, incoming: true,
+      // the PC's thumbnail is only ever a small inline picture; anything else (a URL) would make the phone fetch it
+      ext: m.ext, added: Date.now(), mtime: Date.now(), thumb: typeof m.thumb === 'string' && /^data:image\/(jpeg|png|webp|gif);base64,/.test(m.thumb) ? m.thumb : null,
+      w: m.kind === 'image' || m.kind === 'video' ? Math.round(aspect * 1000) : 0, h: 1000, incoming: true,
     };
+    (st.incoming = st.incoming || new Map()).set(m.fid, String(m.name || 'file'));
     V.items.unshift(it);
     V.total++;
     if (scroller.scrollTop > 40) scroller.scrollTo({ top: 0, behavior: 'smooth' });
@@ -2087,12 +2126,15 @@
   }
   function onDownDone(e) {
     const idx = V.items.findIndex((x) => x.fid === e.fid);
+    const name = (st.incoming && st.incoming.get(e.fid)) || (idx >= 0 ? V.items[idx].name : 'a file');
+    if (st.incoming) st.incoming.delete(e.fid);
     if (!e.ok || !e.item) {
-      if (idx >= 0) { const g = V.items[idx]; V.items.splice(idx, 1); V.total--; layout(true); toast('Couldn’t receive ' + midName(g.name), 2600); }
+      if (idx >= 0) { V.items.splice(idx, 1); V.total--; layout(true); }
+      toast('Couldn’t receive ' + midName(name), 2600);          // even when the user has moved to another view
       haptic('reject');
       return;
     }
-    if (idx < 0) return;
+    if (idx < 0) { wsSend({ t: 'incoming-done', fid: e.fid }); return; }
     const real = e.item;
     const el = cards.get(V.items[idx].id);
     cards.delete(V.items[idx].id);

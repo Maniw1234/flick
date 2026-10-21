@@ -26,6 +26,19 @@ import java.util.concurrent.atomic.AtomicLong;
 final class Parallel {
     interface Progress { void onBytes(long done); }
 
+    // Retry budgets per part. Only attempts that moved no bytes (or that the PC answered with an error) count against
+    // them: on a weak link connections drop every few MB, and an attempt that got data through is worth repeating.
+    // An upload part starts over each time (the PC can't resume one), so its overall cap is small; a download range
+    // carries on from the bytes already written.
+    static final int UP_FAILS = 3, UP_CAP = 10;
+    static final int DOWN_FAILS = 4, DOWN_CAP = 100;
+
+    /** The PC answered, with an error status. */
+    static final class Refused extends IOException {
+        private static final long serialVersionUID = 1L;
+        Refused(String m) { super(m); }
+    }
+
     private static final ExecutorService POOL = Executors.newCachedThreadPool(new ThreadFactory() {
         @Override
         public Thread newThread(Runnable r) { Thread t = new Thread(r, "flick-part"); t.setDaemon(true); return t; }
@@ -48,7 +61,8 @@ final class Parallel {
                 @Override
                 public Void call() throws Exception {
                     IOException lastErr = null;
-                    for (int attempt = 0; attempt < 3; attempt++) {
+                    int fails = 0;
+                    for (int attempt = 0; attempt < UP_CAP; attempt++) {
                         if (abort.get()) throw new IOException("aborted");
                         long[] mine = {0};
                         try {
@@ -58,7 +72,8 @@ final class Parallel {
                             sent.addAndGet(-mine[0]);
                             lastErr = e;
                             if (abort.get()) throw e;
-                            try { Thread.sleep(400L * (attempt + 1)); } catch (InterruptedException x) { throw e; }
+                            if ((mine[0] == 0 || e instanceof Refused) && ++fails >= UP_FAILS) throw e;
+                            try { Thread.sleep(400L * (fails + 1)); } catch (InterruptedException x) { throw e; }
                         }
                     }
                     throw lastErr != null ? lastErr : new IOException("part failed");
@@ -71,9 +86,11 @@ final class Parallel {
 
     private static void sendPart(String url, File f, long off, long len, AtomicBoolean abort, AtomicLong sent, long[] mine, Progress p) throws IOException {
         HttpURLConnection c = null;
+        Watchdog.Guard g = null;
         RandomAccessFile raf = null;
         try {
             c = (HttpURLConnection) new URL(url).openConnection();
+            g = Watchdog.guard(abort, c);
             c.setConnectTimeout(5000);
             c.setReadTimeout(60000);
             c.setDoOutput(true);
@@ -81,7 +98,7 @@ final class Parallel {
             c.setRequestMethod("POST");
             c.setRequestProperty("Content-Type", "application/octet-stream");
             c.setFixedLengthStreamingMode(len);
-            OutputStream out = c.getOutputStream();
+            OutputStream out = g.watch(c.getOutputStream());
             raf = new RandomAccessFile(f, "r");
             raf.seek(off);
             byte[] buf = new byte[256 * 1024];
@@ -98,10 +115,14 @@ final class Parallel {
             }
             out.flush();
             out.close();
+            g.idle();
             int code = c.getResponseCode();
             drain(code == 200 ? c.getInputStream() : c.getErrorStream());
-            if (code != 200) throw new IOException("http " + code);
+            if (code != 200) throw new Refused("http " + code);
+        } catch (IOException e) {
+            throw g != null && g.ended() != null ? new IOException(g.ended(), e) : e;
         } finally {
+            if (g != null) g.close();
             try { if (raf != null) raf.close(); } catch (Throwable e) { /* ignore */ }
             if (c != null) c.disconnect();
         }
@@ -122,21 +143,26 @@ final class Parallel {
                 @Override
                 public Void call() throws Exception {
                     long done = 0;
+                    int fails = 0;
                     IOException lastErr = null;
-                    for (int attempt = 0; attempt < 4 && done < len; attempt++) {
+                    for (int attempt = 0; attempt < DOWN_CAP && done < len; attempt++) {
                         if (stop.get()) throw new IOException("aborted");
+                        long before = done;
                         HttpURLConnection c = null;
+                        Watchdog.Guard w = null;
                         RandomAccessFile raf = null;
                         try {
                             c = (HttpURLConnection) new URL(url).openConnection();
+                            w = Watchdog.guard(stop, c);
                             c.setConnectTimeout(5000);
                             c.setReadTimeout(60000);
                             c.setUseCaches(false);
+                            // carries on from the bytes already written
                             c.setRequestProperty("Range", "bytes=" + (off + done) + "-" + (off + len - 1));
                             int code = c.getResponseCode();
                             String cr = c.getHeaderField("Content-Range");
-                            if (code != 206 || cr == null || !cr.endsWith("/" + total)) throw new IOException("http " + code);
-                            InputStream in = c.getInputStream();
+                            if (code != 206 || cr == null || !cr.endsWith("/" + total)) throw new Refused("http " + code);
+                            InputStream in = w.watch(c.getInputStream());
                             raf = new RandomAccessFile(part, "rw");
                             raf.seek(off + done);
                             byte[] buf = new byte[256 * 1024];
@@ -150,11 +176,14 @@ final class Parallel {
                                     if (p != null) p.onBytes(g);
                                 }
                             } finally { try { in.close(); } catch (Throwable e) { /* ignore */ } }
+                            if (done < len) throw new IOException("connection closed early");
                         } catch (IOException e) {
-                            lastErr = e;
-                            if (stop.get()) throw e;
-                            try { Thread.sleep(300L * (attempt + 1)); } catch (InterruptedException x) { throw e; }
+                            lastErr = w != null && w.ended() != null ? new IOException(w.ended(), e) : e;
+                            if (stop.get()) throw lastErr;
+                            if ((done == before || e instanceof Refused) && ++fails >= DOWN_FAILS) break;
+                            try { Thread.sleep(300L * (fails + 1)); } catch (InterruptedException x) { throw lastErr; }
                         } finally {
+                            if (w != null) w.close();
                             try { if (raf != null) raf.close(); } catch (Throwable e) { /* ignore */ }
                             if (c != null) c.disconnect();
                         }
@@ -173,7 +202,8 @@ final class Parallel {
         for (Future<?> f : fs) {
             try { f.get(); }
             catch (ExecutionException e) {
-                if (failed == null) { failed = e.getCause() instanceof Exception ? (Exception) e.getCause() : e; stop.set(true); }
+                // one part failed for good: the others stop now (their connections are cut, not left to finish)
+                if (failed == null) { failed = e.getCause() instanceof Exception ? (Exception) e.getCause() : e; Watchdog.abort(stop); }
             }
         }
         if (failed != null) throw failed;

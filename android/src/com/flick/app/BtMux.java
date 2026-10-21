@@ -4,11 +4,14 @@ import java.io.Closeable;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
 import java.io.OutputStream;
 import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.ArrayDeque;
 import java.util.Arrays;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -42,6 +45,12 @@ final class BtMux {
     private int nextId = 1;
     private volatile boolean closed;
     private volatile long lastRx = System.currentTimeMillis();
+    // Frames leave through one writer thread. Control frames (OPEN, FIN, RST, PING) queue ahead of data and queuing one
+    // never waits; data waits for room. So a link that stops draining stalls only the streams sending data: never the
+    // pings and the silence check, new streams, or the reader. Guarded by q.
+    private final Object q = new Object();
+    private final ArrayDeque<byte[]> control = new ArrayDeque<byte[]>(), data = new ArrayDeque<byte[]>();
+    private static final int QUEUED = 8;            // data frames waiting at most (8 × 32 KB)
 
     BtMux(InputStream in, OutputStream out, Closeable link, Listener l) {
         this.in = in; this.out = out; this.link = link; this.listener = l;
@@ -54,7 +63,11 @@ final class BtMux {
         byte[] m = new byte[MAGIC.length];
         readFully(in, m, MAGIC.length);
         if (!Arrays.equals(m, MAGIC)) throw new IOException("not Flick");
-        server = new ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"));
+        synchronized (this) {
+            if (closed) throw new IOException("closed");   // close() came during the greeting: no port left open
+            server = new ServerSocket(0, 16, InetAddress.getByName("127.0.0.1"));
+        }
+        thread("flick-bt-tx", new Runnable() { @Override public void run() { writeLoop(); } });
         thread("flick-bt-rx", new Runnable() { @Override public void run() { readLoop(); } });
         thread("flick-bt-accept", new Runnable() { @Override public void run() { acceptLoop(); } });
         thread("flick-bt-ping", new Runnable() { @Override public void run() { pingLoop(); } });
@@ -70,15 +83,60 @@ final class BtMux {
         while (off < n) { int r = in.read(b, off, n - off); if (r < 0) throw new EOFException(); off += r; }
     }
 
+    /** Queues a frame for the writer. Only DATA can wait (for room); the rest never blocks. */
     private void send(int type, int id, byte[] b, int off, int len) throws IOException {
-        byte[] h = new byte[9];
-        h[0] = (byte) type;
-        h[1] = (byte) (id >>> 24); h[2] = (byte) (id >>> 16); h[3] = (byte) (id >>> 8); h[4] = (byte) id;
-        h[5] = (byte) (len >>> 24); h[6] = (byte) (len >>> 16); h[7] = (byte) (len >>> 8); h[8] = (byte) len;
-        synchronized (out) {
-            out.write(h);
-            if (len > 0) out.write(b, off, len);
-            out.flush();
+        byte[] f = new byte[9 + len];
+        f[0] = (byte) type;
+        f[1] = (byte) (id >>> 24); f[2] = (byte) (id >>> 16); f[3] = (byte) (id >>> 8); f[4] = (byte) id;
+        f[5] = (byte) (len >>> 24); f[6] = (byte) (len >>> 16); f[7] = (byte) (len >>> 8); f[8] = (byte) len;
+        if (len > 0) System.arraycopy(b, off, f, 9, len);
+        synchronized (q) {
+            if (type == DATA) {
+                while (!closed && data.size() >= QUEUED) {
+                    try { q.wait(); } catch (InterruptedException e) { throw new InterruptedIOException(); }
+                }
+            }
+            if (closed) throw new IOException("link closed");
+            if (type == DATA) data.add(f);
+            else if (type == FIN && queued(id)) data.add(f);  // a stream's FIN never overtakes its own data
+            else {
+                if (type == RST) unqueue(id);                  // its waiting data and FIN are moot now
+                control.add(f);
+            }
+            q.notifyAll();
+        }
+    }
+
+    private static int idOf(byte[] f) { return ((f[1] & 0xff) << 24) | ((f[2] & 0xff) << 16) | ((f[3] & 0xff) << 8) | (f[4] & 0xff); }
+
+    private boolean queued(int id) {
+        for (byte[] f : data) if (idOf(f) == id) return true;
+        return false;
+    }
+
+    private void unqueue(int id) {
+        for (Iterator<byte[]> it = data.iterator(); it.hasNext(); ) if (idOf(it.next()) == id) it.remove();
+    }
+
+    // queue → link
+    private void writeLoop() {
+        try {
+            while (true) {
+                byte[] f;
+                synchronized (q) {
+                    if (closed) return;
+                    f = control.poll();
+                    if (f == null) f = data.poll();
+                    if (f != null) q.notifyAll();               // room for data
+                }
+                if (f != null) { out.write(f); continue; }
+                out.flush();                                     // the queue ran dry: push out what was written
+                synchronized (q) { while (!closed && control.isEmpty() && data.isEmpty()) q.wait(); }
+            }
+        } catch (InterruptedException e) {
+            close("link: interrupted");
+        } catch (IOException e) {
+            close("link: " + e.getMessage());
         }
     }
 
@@ -159,6 +217,7 @@ final class BtMux {
 
     void close(String why) {
         synchronized (this) { if (closed) return; closed = true; }
+        synchronized (q) { control.clear(); data.clear(); q.notifyAll(); }   // the writer and waiting senders see it
         try { if (server != null) server.close(); } catch (IOException e) { /* ignore */ }
         try { link.close(); } catch (IOException e) { /* ignore */ }
         for (Stream st : streams.values()) { try { st.s.close(); } catch (IOException e) { /* ignore */ } }

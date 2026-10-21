@@ -167,7 +167,7 @@ class Inbound extends EventEmitter {
     this.remote = { name: 'Android phone' };
     this.accepted = false;
     this.closed = false;
-    this.bytes = 0; this.total = 0;
+    this.bytes = 0; this.total = 0; this.buffered = 0;
     sock.setNoDelay(true);
     sock.on('data', (d) => this._data(d));
     sock.on('close', () => this._close('closed'));
@@ -229,6 +229,7 @@ class Inbound extends EventEmitter {
         if (!f.v1 || f.v1.type !== V1.CONNECTION_REQUEST || !f.v1.connection_request) throw new Error('expected a connection request');
         const cr = f.v1.connection_request;
         this.remote = parseEndpointInfo(cr.endpoint_info);
+        this.remote.name = String(this.remote.name || '').replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '') || 'Android phone';
         if (cr.keep_alive_interval_millis > 0 && cr.keep_alive_timeout_millis > cr.keep_alive_interval_millis) {
           this.kaInterval = Math.min(60000, cr.keep_alive_interval_millis); this.kaTimeout = Math.min(300000, cr.keep_alive_timeout_millis);
         }
@@ -328,11 +329,20 @@ class Inbound extends EventEmitter {
     const key = String(h.id);
     if (h.type === PAYLOAD.BYTES) {
       let p = this.payloads.get(key);
-      if (!p) { p = { chunks: [], size: 0 }; this.payloads.set(key, p); }
+      if (!p) {
+        // a hostile sender could open endless control payloads and never finish them; keep the lid on before accept
+        if (this.payloads.size >= 32) throw new Error('too many payloads');
+        p = { chunks: [], size: 0 }; this.payloads.set(key, p);
+      }
       if (BigInt(c.offset || 0n) !== BigInt(p.size)) throw new Error('payload chunk out of order');
-      if (c.body && c.body.length) { p.size += c.body.length; if (p.size > 5 * 1024 * 1024) throw new Error('payload too big'); p.chunks.push(c.body); }
+      if (c.body && c.body.length) {
+        p.size += c.body.length; this.buffered += c.body.length;
+        if (p.size > 5 * 1024 * 1024 || this.buffered > 16 * 1024 * 1024) throw new Error('payload too big');
+        p.chunks.push(c.body);
+      }
       if (c.flags & LAST_CHUNK) {
         this.payloads.delete(key);
+        this.buffered -= p.size;
         const data = Buffer.concat(p.chunks);
         const text = this.texts.find((t) => String(t.payload_id) === key);
         if (text) { text.value = data.toString('utf8'); text.done = true; this._finishIfDone(); return; }
@@ -373,8 +383,9 @@ class Inbound extends EventEmitter {
         return;
       case SHARE.INTRODUCTION: {
         const intro = v1.introduction || {};
+        const BIDI = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;      // direction tricks: "x\u202Egpj.exe" shows as "xexe.jpg"
         const files = (intro.file_metadata || []).map((m) => ({
-          name: path.basename(String(m.name || 'file').replace(/\\/g, '/')) || 'file',
+          name: path.basename(String(m.name || 'file').replace(/\\/g, '/')).replace(BIDI, '') || 'file',
           size: Number(m.size || 0n), payload_id: m.payload_id, mime: m.mime_type || 'application/octet-stream',
         }));
         this.texts = (intro.text_metadata || []).map((t) => ({ title: t.text_title || '', type: t.type || 0, payload_id: t.payload_id, size: Number(t.size || 0n) }));
@@ -402,6 +413,16 @@ class Inbound extends EventEmitter {
       return;
     }
     fs.mkdirSync(this.srv.tmpDir, { recursive: true });
+    // not enough room for what the phone offers: tell it so (Quick Share shows "not enough space") instead of failing midway
+    try {
+      const st = fs.statfsSync(this.srv.tmpDir);
+      if (st.bavail * st.bsize < this.total + 256 * 1024 * 1024) {
+        this._sendSharing({ type: SHARE.RESPONSE, connection_response: { status: 3 } });
+        this.emit('failed', { id: this.id, why: 'no space', accepted: false });
+        setTimeout(() => { this._bye(); this._close('no space'); }, 1000);
+        return;
+      }
+    } catch (e) { /* can't tell: go ahead */ }
     for (const f of this.offer.files) {
       const tmp = path.join(this.srv.tmpDir, 'qs-' + this.id + '-' + crypto.randomBytes(3).toString('hex') + '.part');
       this.files.set(String(f.payload_id), { meta: f, tmp, fd: fs.openSync(tmp, 'w'), got: 0, size: f.size, done: false });
@@ -504,6 +525,9 @@ class QuickShare extends EventEmitter {
   }
 
   _conn(sock) {
+    // a flood of half-open handshakes shouldn't pile up; hold only a handful at once
+    const live = [...this.conns.values()].filter((x) => !x.accepted).length;
+    if (this.conns.size >= 24 || live >= 8) { try { sock.destroy(); } catch (e) { /* ignore */ } return; }
     const c = new Inbound(sock, this);
     this.conns.set(c.id, c);
     for (const ev of ['request', 'accepted', 'progress', 'done', 'failed']) c.on(ev, (m) => this.emit(ev, m));

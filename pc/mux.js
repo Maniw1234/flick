@@ -12,6 +12,9 @@ const { EventEmitter } = require('events');
 const MAGIC = Buffer.from('FLKMUX1\n');
 const T = { OPEN: 1, DATA: 2, FIN: 3, RST: 4, PING: 5, PONG: 6 };
 const MAX = 64 * 1024;
+// One stream whose reader is briefly slow (a disk or antivirus stall) mustn't freeze the others: each stream may run
+// ahead by this much before the shared link stops reading. Bluetooth moves ~0.1-0.3 MB/s, so this is many seconds.
+const STREAM_CAP = 8 * 1024 * 1024;
 
 function frame(type, id, payload) {
   const p = payload || Buffer.alloc(0);
@@ -71,7 +74,11 @@ class MuxLink extends EventEmitter {
     if (this.sock.write(b)) cb && process.nextTick(cb);
     else this.sock.once('drain', () => cb && cb());
   }
-  _resume() { if (this.paused) { this.paused = false; this.sock.resume(); } }
+  _resume() {
+    if (!this.paused) return;
+    for (const s of this.streams.values()) if (s.readableLength > STREAM_CAP) return;   // still one too far behind
+    this.paused = false; this.sock.resume();
+  }
   _data(d) {
     this.buf = this.buf.length ? Buffer.concat([this.buf, d]) : d;
     if (!this.ready) {
@@ -97,7 +104,7 @@ class MuxLink extends EventEmitter {
         if (!s && id) { const ns = new MuxStream(this, id); this.streams.set(id, ns); this.emit('stream', ns); }
         break;
       case T.DATA:
-        if (s && !s.remoteDone && !s.push(p)) { this.paused = true; this.sock.pause(); }
+        if (s && !s.remoteDone) { s.push(p); if (s.readableLength > STREAM_CAP && !this.paused) { this.paused = true; this.sock.pause(); } }
         break;
       case T.FIN:
         if (s && !s.remoteDone) { s.remoteDone = true; s.push(null); }

@@ -1,10 +1,11 @@
 {
   "name": "flick",
   "productName": "Flick",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "Flick - throw files from your phone onto your PC screen",
   "main": "boot.js",
   "author": "Flick",
   "license": "UNLICENSED",
-  "electronVersion": "44.9.1"
+  "electronVersion": "44.9.1",
+  "electronSha256": "41bd7900bd42d0f49110a81617876137041fbbf473466920248ddb076349ef91"
 }

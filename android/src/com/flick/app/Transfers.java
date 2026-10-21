@@ -8,6 +8,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
 import android.net.wifi.WifiManager;
+import android.os.PowerManager;
 import android.os.SystemClock;
 import android.provider.MediaStore;
 
@@ -23,11 +24,14 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Moves bytes between the phone and the PC over plain HTTP on the local network. */
@@ -38,12 +42,33 @@ final class Transfers {
     private final Library lib;
     private final Emitter em;
     private final ConcurrentHashMap<String, AtomicBoolean> aborts = new ConcurrentHashMap<String, AtomicBoolean>();
-    private final ExecutorService pool = Executors.newFixedThreadPool(4);
+    // uploads and downloads queue apart: files arriving from the PC never hold up the phone's own sends
+    private final ExecutorService ups = pool("flick-up", 3), downs = pool("flick-down", 3);
 
     Transfers(Context ctx, Library lib, Emitter em) {
         this.ctx = ctx.getApplicationContext();
         this.lib = lib;
         this.em = em;
+    }
+
+    /** Up to n threads; idle ones end, so a pool costs nothing between transfers. */
+    static ExecutorService pool(final String name, int n) {
+        ThreadPoolExecutor p = new ThreadPoolExecutor(n, n, 30, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>(), new ThreadFactory() {
+            @Override public Thread newThread(Runnable r) { Thread t = new Thread(r, name); t.setDaemon(true); return t; }
+        });
+        p.allowCoreThreadTimeOut(true);
+        return p;
+    }
+
+    /** The activity that owns this is gone: transfers already handed over still finish, no new ones start. */
+    void shutdown() {
+        ups.shutdown();
+        downs.shutdown();
+    }
+
+    /** Hands r to p; false when p no longer takes work (its activity was destroyed). */
+    private static boolean submit(ExecutorService p, Runnable r) {
+        try { p.execute(r); return true; } catch (RejectedExecutionException e) { return false; }
     }
 
     private void event(String t, String key, String id, Object a, Object b, Object c) {
@@ -66,32 +91,46 @@ final class Transfers {
         uploadFile(tid, path, null, url);
     }
 
-    // ------------------------------------------------------------ speed
+    // ------------------------------------------------------------ speed, and keeping at it
     // Large files go as several parts at once, each over its own connection (Wi-Fi carries more that way), when the
-    // PC understands it (the page adds "parallel=N" to the URL). Wi-Fi power saving is held off while bytes move.
+    // PC understands it (the page adds "parallel=N" to the URL). While any transfer runs, Wi-Fi power saving is held
+    // off, the CPU is kept awake, and a foreground service (with its notification) keeps Flick running with the screen
+    // off or another app in front. One count for the whole app, under one lock: an activity can be recreated while its
+    // transfers carry on.
     static final long PARALLEL_MIN = 24L * 1024 * 1024;
-    private final AtomicInteger active = new AtomicInteger();
-    private WifiManager.WifiLock wifiLock;
+    private static final Object BUSY = new Object();
+    private static int active;                         // guarded by BUSY, like the locks
+    private static WifiManager.WifiLock wifiLock;
+    private static PowerManager.WakeLock wakeLock;
 
     private void busy(boolean on) {
-        try {
+        synchronized (BUSY) {
             if (on) {
-                if (active.incrementAndGet() == 1) {
+                if (++active != 1) return;
+                try {
                     if (wifiLock == null) {
                         WifiManager wm = (WifiManager) ctx.getSystemService(Context.WIFI_SERVICE);
-                        if (wm == null) return;
                         @SuppressWarnings("deprecation")
                         int mode = Build.VERSION.SDK_INT >= 29 ? WifiManager.WIFI_MODE_FULL_LOW_LATENCY : WifiManager.WIFI_MODE_FULL_HIGH_PERF;
-                        wifiLock = wm.createWifiLock(mode, "flick-transfer");
-                        wifiLock.setReferenceCounted(false);
+                        if (wm != null) { wifiLock = wm.createWifiLock(mode, "flick-transfer"); wifiLock.setReferenceCounted(false); }
                     }
-                    wifiLock.acquire();
-                }
-            } else if (active.decrementAndGet() <= 0) {
-                active.set(0);
-                if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
+                    if (wifiLock != null) wifiLock.acquire();
+                } catch (Throwable e) { /* speed only */ }
+                try {
+                    if (wakeLock == null) {
+                        PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
+                        if (pm != null) { wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "flick:transfer"); wakeLock.setReferenceCounted(false); }
+                    }
+                    if (wakeLock != null) wakeLock.acquire();
+                } catch (Throwable e) { /* the transfer still runs while the phone is awake */ }
+                TransferService.want(ctx, true);
+            } else {
+                if (active == 0 || --active != 0) return;
+                try { if (wifiLock != null && wifiLock.isHeld()) wifiLock.release(); } catch (Throwable e) { /* ignore */ }
+                try { if (wakeLock != null && wakeLock.isHeld()) wakeLock.release(); } catch (Throwable e) { /* ignore */ }
+                TransferService.want(ctx, false);
             }
-        } catch (Throwable e) { /* speed only */ }
+        }
     }
 
     static int parallelOf(String url) {
@@ -104,14 +143,15 @@ final class Transfers {
     private void uploadFile(final String tid, final String path, final String id, final String url) {
         final AtomicBoolean abort = new AtomicBoolean(false);
         AtomicBoolean prev = aborts.put(tid, abort);
-        if (prev != null) prev.set(true);
-        pool.execute(new Runnable() {
+        if (prev != null) Watchdog.abort(prev);
+        boolean queued = submit(ups, new Runnable() {
             @Override
             public void run() {
                 boolean ok = false;
                 int code = 0;
                 String why = null;
                 HttpURLConnection c = null;
+                Watchdog.Guard g = null;
                 InputStream in = null;
                 busy(true);
                 try {
@@ -134,6 +174,7 @@ final class Transfers {
                         ok = true;
                     } else {
                     c = (HttpURLConnection) new URL(withoutParallel(url)).openConnection();
+                    g = Watchdog.guard(abort, c);
                     c.setConnectTimeout(5000);
                     c.setReadTimeout(60000);
                     c.setDoOutput(true);
@@ -141,7 +182,7 @@ final class Transfers {
                     c.setRequestMethod("POST");
                     c.setRequestProperty("Content-Type", "application/octet-stream");
                     c.setFixedLengthStreamingMode(total);
-                    OutputStream out = c.getOutputStream();
+                    OutputStream out = g.watch(c.getOutputStream());
                     in = new FileInputStream(f);
                     byte[] buf = new byte[256 * 1024];
                     long sent = 0, last = 0;
@@ -155,13 +196,15 @@ final class Transfers {
                     }
                     out.flush();
                     out.close();
+                    g.idle();
                     code = c.getResponseCode();
                     ok = code == 200;
                     try { InputStream r = ok ? c.getInputStream() : c.getErrorStream(); if (r != null) Library.readAll(r, 64 * 1024); } catch (Throwable e) { /* ignore */ }
                     }
                 } catch (Throwable e) {
-                    why = e.getMessage();
+                    why = g != null && g.ended() != null ? g.ended() : e.getMessage();
                 } finally {
+                    if (g != null) g.close();
                     try { if (in != null) in.close(); } catch (Throwable e) { /* ignore */ }
                     if (c != null) c.disconnect();
                     aborts.remove(tid, abort);
@@ -170,20 +213,22 @@ final class Transfers {
                 event("up-done", "tid", tid, ok, code, why);
             }
         });
+        if (!queued) { aborts.remove(tid, abort); event("up-done", "tid", tid, false, 0, "closed"); }
     }
 
     /** Several items and/or folders in one streamed request (see Bundle). */
     void uploadBundle(final String tid, final String itemsJson, final String url) {
         final AtomicBoolean abort = new AtomicBoolean(false);
         AtomicBoolean prev = aborts.put(tid, abort);
-        if (prev != null) prev.set(true);
-        pool.execute(new Runnable() {
+        if (prev != null) Watchdog.abort(prev);
+        boolean queued = submit(ups, new Runnable() {
             @Override
             public void run() {
                 boolean ok = false;
                 int code = 0;
                 String why = null;
                 HttpURLConnection c = null;
+                Watchdog.Guard g = null;
                 busy(true);
                 try {
                     JSONArray arr = new JSONArray(itemsJson);
@@ -202,6 +247,7 @@ final class Transfers {
                         b.add(f, name, abort);
                     }
                     c = (HttpURLConnection) new URL(url + "&files=" + b.files + "&bytes=" + b.bytes).openConnection();
+                    g = Watchdog.guard(abort, c);
                     c.setConnectTimeout(5000);
                     c.setReadTimeout(120000);
                     c.setDoOutput(true);
@@ -209,7 +255,7 @@ final class Transfers {
                     c.setRequestMethod("POST");
                     c.setRequestProperty("Content-Type", "application/x-flick-bundle");
                     c.setChunkedStreamingMode(256 * 1024);
-                    OutputStream out = new BufferedOutputStream(c.getOutputStream(), 256 * 1024);
+                    OutputStream out = new BufferedOutputStream(g.watch(c.getOutputStream()), 256 * 1024);
                     final long[] last = {0};
                     b.write(out, abort, new Bundle.Progress() {
                         @Override
@@ -219,12 +265,14 @@ final class Transfers {
                         }
                     });
                     out.close();
+                    g.idle();
                     code = c.getResponseCode();
                     ok = code == 200;
                     try { InputStream r = ok ? c.getInputStream() : c.getErrorStream(); if (r != null) Library.readAll(r, 64 * 1024); } catch (Throwable e) { /* ignore */ }
                 } catch (Throwable e) {
-                    why = e.getMessage();
+                    why = g != null && g.ended() != null ? g.ended() : e.getMessage();
                 } finally {
+                    if (g != null) g.close();
                     if (c != null) c.disconnect();
                     aborts.remove(tid, abort);
                     busy(false);
@@ -232,20 +280,23 @@ final class Transfers {
                 event("up-done", "tid", tid, ok, code, why);
             }
         });
+        if (!queued) { aborts.remove(tid, abort); event("up-done", "tid", tid, false, 0, "closed"); }
     }
 
+    /** Stops an upload now: its connections are cut, so even a write the PC stopped reading ends at once. */
     void abort(String tid) {
         AtomicBoolean a = aborts.get(tid);
-        if (a != null) a.set(true);
+        if (a != null) Watchdog.abort(a);
     }
 
     void download(final String fid, final String rawUrl, final String name, final String sizeHint, final String mime) {
-        pool.execute(new Runnable() {
+        boolean queued = submit(downs, new Runnable() {
             @Override
             public void run() {
                 boolean ok = false;
                 JSONObject item = null;
                 HttpURLConnection c = null;
+                Watchdog.Guard g = null;
                 String why = null;
                 final String url = withoutParallel(rawUrl);
                 busy(true);
@@ -254,12 +305,11 @@ final class Transfers {
                     try { hint = Long.parseLong(sizeHint); } catch (Throwable e) { /* unknown */ }
                     int ways = parallelOf(rawUrl);
                     if (ways > 1 && hint >= PARALLEL_MIN && Files.granted(ctx)) {
-                        File dest = Files.uniqueIn(Files.inbox(), name);
-                        File part = new File(dest.getPath() + ".flickpart");
+                        Files.Incoming dest = Files.reserve(Files.inbox(), name);
                         final long[] last = {0};
                         final long tot = hint;
                         try {
-                            Parallel.download(url, part, hint, ways, new Parallel.Progress() {
+                            Parallel.download(url, dest.part, hint, ways, new Parallel.Progress() {
                                 @Override
                                 public void onBytes(long done) {
                                     long now = SystemClock.uptimeMillis();
@@ -267,20 +317,21 @@ final class Transfers {
                                 }
                             });
                         }
-                        catch (Exception e) { part.delete(); throw e; }
-                        if (!part.renameTo(dest)) { part.delete(); throw new IOException("rename failed"); }
-                        android.media.MediaScannerConnection.scanFile(ctx, new String[]{dest.getPath()}, null, null);
-                        item = Files.fileJson(dest, null);
+                        catch (Throwable e) { dest.cancel(); throw e; }
+                        File saved = dest.finish();
+                        android.media.MediaScannerConnection.scanFile(ctx, new String[]{saved.getPath()}, null, null);
+                        item = Files.fileJson(saved, null);
                         ok = true;
                     } else {
                     c = (HttpURLConnection) new URL(url).openConnection();
+                    g = Watchdog.guard(null, c);                 // no abort for downloads; it still ends one that stalls
                     c.setConnectTimeout(5000);
                     c.setReadTimeout(60000);
                     c.setUseCaches(false);
                     int code = c.getResponseCode();
                     if (code != 200) throw new IOException("http " + code);
                     final long total = c.getContentLengthLong();
-                    InputStream in = c.getInputStream();
+                    InputStream in = g.watch(c.getInputStream());
                     Library.Progress prog = new Library.Progress() {
                         long last = 0;
                         @Override
@@ -293,21 +344,24 @@ final class Transfers {
                     try {
                         if (Files.granted(ctx)) {
                             // Flick can see shared storage: save straight into Download/Flick like a normal download
-                            File dest = Files.uniqueIn(Files.inbox(), name);
-                            File part = new File(dest.getPath() + ".flickpart");
-                            OutputStream out = new java.io.FileOutputStream(part);
+                            Files.Incoming dest = Files.reserve(Files.inbox(), name);
+                            File saved = null;
                             try {
-                                byte[] buf = new byte[256 * 1024];
-                                long got = 0;
-                                int n;
-                                while ((n = in.read(buf)) > 0) { out.write(buf, 0, n); got += n; prog.onBytes(got); }
-                            } catch (IOException e) { out.close(); part.delete(); throw e; }
-                            out.close();
-                            if (!part.renameTo(dest)) { part.delete(); throw new IOException("rename failed"); }
-                            android.media.MediaScannerConnection.scanFile(ctx, new String[]{dest.getPath()}, null, null);
-                            item = Files.fileJson(dest, null);
+                                OutputStream out = new java.io.FileOutputStream(dest.part);
+                                try {
+                                    byte[] buf = new byte[256 * 1024];
+                                    long got = 0;
+                                    int n;
+                                    while ((n = in.read(buf)) > 0) { out.write(buf, 0, n); got += n; prog.onBytes(got); }
+                                } finally { out.close(); }
+                                g.idle();
+                                saved = dest.finish();
+                            } finally { if (saved == null) dest.cancel(); }
+                            android.media.MediaScannerConnection.scanFile(ctx, new String[]{saved.getPath()}, null, null);
+                            item = Files.fileJson(saved, null);
                         } else {
                             item = lib.importStream(in, name, mime, prog);
+                            g.idle();
                             if (Build.VERSION.SDK_INT >= 29) {
                                 try {
                                     File f = lib.file(item.optString("id"));
@@ -319,14 +373,16 @@ final class Transfers {
                     ok = true;
                     }
                 } catch (Throwable e) {
-                    why = e.getMessage();
+                    why = g != null && g.ended() != null ? g.ended() : e.getMessage();
                 } finally {
+                    if (g != null) g.close();
                     if (c != null) c.disconnect();
                     busy(false);
                 }
                 event("down-done", "fid", fid, ok, item, why);
             }
         });
+        if (!queued) event("down-done", "fid", fid, false, null, "closed");
     }
 
     /** Copy a file into the phone's public Pictures / Movies / Music / Download folders. */

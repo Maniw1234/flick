@@ -33,7 +33,8 @@ function newer(a, b) {
 function readCurrent(root) {
   try {
     const c = JSON.parse(fs.readFileSync(path.join(root, 'current.json'), 'utf8'));
-    if (!c || !parseVersion(c.version) || typeof c.dir !== 'string' || !/^[\w.-]+$/.test(c.dir)) return null;
+    // dir is always a version folder; requiring it to parse as a version rejects "..", ".", and anything path-like
+    if (!c || !parseVersion(c.version) || typeof c.dir !== 'string' || !parseVersion(c.dir)) return null;
     c.tries = Math.max(0, +c.tries || 0);
     return c;
   } catch (e) { return null; }

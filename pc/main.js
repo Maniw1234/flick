@@ -11,12 +11,33 @@ const { Updater } = require('./updater');
 const VERSION = require('./package.json').version;
 const IS_WIN = process.platform === 'win32';
 const HIDDEN_START = process.argv.includes('--hidden');
-const TEST_MODE = process.env.FLICK_TEST === '1';
+// The test control server runs arbitrary JS in a window, so it must never be reachable in a shipped build, even if
+// someone sets the env var: a packaged app refuses it outright.
+const TEST_MODE = process.env.FLICK_TEST === '1' && !app.isPackaged;
 
 if (process.env.FLICK_USERDATA) app.setPath('userData', process.env.FLICK_USERDATA);
-if (!app.requestSingleInstanceLock()) { app.quit(); process.exit(0); }
+if (!app.requestSingleInstanceLock()) {
+  // boot.js counted this start against a downloaded version; it isn't one (Flick is already running), so give it back
+  try {
+    const b = global.FLICK_BOOT;
+    if (b && b.dir) {
+      const core = require('./updatecore');
+      const cur = core.readCurrent(b.root);
+      if (cur && cur.dir === b.dir && cur.tries > 0) { cur.tries -= 1; core.writeCurrent(b.root, cur); }
+    }
+  } catch (e) { /* ignore */ }
+  app.quit(); process.exit(0);
+}
 app.setAppUserModelId('com.flick.pc');
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+
+// Flick's windows only ever show their own local pages. Never let one navigate elsewhere or spawn a new window, so a
+// bug that put attacker text into a page can't turn into "load a remote origin into a window that has the preload".
+app.on('web-contents-created', (_e, contents) => {
+  contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  contents.on('will-navigate', (ev, url) => { if (url !== contents.getURL()) ev.preventDefault(); });
+  contents.on('will-attach-webview', (ev) => ev.preventDefault());
+});
 
 // ------------------------------------------------------------ settings
 const userDir = app.getPath('userData');
@@ -48,15 +69,26 @@ const DEFAULTS = {
   startup: true, edgeSend: true, devices: {}, firstRun: true, displayId: null, theme: 'roadster',
   openAfter: false, showSpeed: true, sendTo: true, autoUpdate: true, bluetooth: false, quickShare: false,
 };
-let store = Object.assign({}, DEFAULTS);
-try { store = Object.assign({}, DEFAULTS, JSON.parse(fs.readFileSync(SETTINGS, 'utf8'))); } catch (e) { /* first run */ }
+const readJson = (f) => { try { const o = JSON.parse(fs.readFileSync(f, 'utf8')); return o && typeof o === 'object' ? o : null; } catch (e) { return null; } };
+// settings.json, or its last good copy if it was damaged (a crash or power cut mid-save must not lose the pairings)
+let store = Object.assign({}, DEFAULTS, readJson(SETTINGS) || readJson(SETTINGS + '.bak') || {});
 if (!store.id) store.id = rid(8);
 let saveTimer = null;
+function writeStoreNow() {
+  saveTimer = null;
+  try {
+    fs.mkdirSync(userDir, { recursive: true });
+    const tmp = SETTINGS + '.tmp';
+    const fd = fs.openSync(tmp, 'w');
+    try { fs.writeSync(fd, JSON.stringify(store, null, 2)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    if (readJson(SETTINGS)) { try { fs.copyFileSync(SETTINGS, SETTINGS + '.bak'); } catch (e) { /* ignore */ } }
+    try { fs.renameSync(tmp, SETTINGS); }
+    catch (e) { fs.copyFileSync(tmp, SETTINGS); fs.unlinkSync(tmp); }     // briefly locked (antivirus): copy instead
+  } catch (e) { log('save failed', e.message); }
+}
 function saveStore() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    try { fs.mkdirSync(userDir, { recursive: true }); fs.writeFileSync(SETTINGS, JSON.stringify(store, null, 2)); } catch (e) { log('save failed', e.message); }
-  }, 150);
+  saveTimer = setTimeout(writeStoreNow, 150);
 }
 
 function defaultName() {
@@ -82,11 +114,32 @@ function defaultName() {
   });
 }
 
+// A chosen folder can be on a network drive that's offline, where even checking it can hang: that check runs in the
+// background, and labels use its last answer. Saving checks it again (with a time limit) right before using it.
+let customDir = { dir: null, ok: null };
+function checkCustomDir() {
+  const d = store.saveDir;
+  if (!d || d === 'desktop' || d === 'downloads') return;
+  if (customDir.dir !== d) customDir = { dir: d, ok: null };
+  fs.stat(d, (e, st) => { if (customDir.dir === d) { const ok = !e && st.isDirectory(); if (ok !== customDir.ok) { customDir.ok = ok; pushPanelState(); } } });
+}
+setInterval(checkCustomDir, 30000).unref();
 function saveDirPath() {
   if (store.saveDir === 'desktop') return app.getPath('desktop');
   if (store.saveDir === 'downloads') return app.getPath('downloads');
-  try { if (store.saveDir && fs.statSync(store.saveDir).isDirectory()) return store.saveDir; } catch (e) { /* fallthrough */ }
+  if (store.saveDir && customDir.dir === store.saveDir && customDir.ok === true) return store.saveDir;
+  if (store.saveDir && (customDir.dir !== store.saveDir || customDir.ok === null)) checkCustomDir();
   return app.getPath('desktop');
+}
+async function saveDirNow() {
+  const d = store.saveDir;
+  if (!d || d === 'desktop' || d === 'downloads') return saveDirPath();
+  const ok = await Promise.race([
+    fs.promises.stat(d).then((st) => st.isDirectory(), () => false),
+    new Promise((r) => setTimeout(() => r(false), 5000)),
+  ]);
+  customDir = { dir: d, ok };
+  return ok ? d : app.getPath('desktop');
 }
 function saveDirLabel() {
   if (store.saveDir === 'desktop') return 'Desktop';
@@ -143,7 +196,25 @@ function createOverlay() {
   overlay.setMenu(null);
   overlay.loadFile(path.join(__dirname, 'overlay', 'overlay.html'));
   overlay.on('closed', () => { overlay = null; overlayShown = false; overlayReady = false; });
+  // the overlay's renderer died (GPU process crash, out of memory): start a fresh one
+  overlay.webContents.on('render-process-gone', (_e, d) => {
+    log('overlay renderer gone:', d && d.reason);
+    const o = overlay; overlay = null; overlayShown = false; overlayReady = false;
+    try { o.destroy(); } catch (e) { /* ignore */ }
+    setTimeout(() => { if (!overlay && !app.isQuitting) createOverlay(); }, 1000);
+  });
 }
+
+// the GPU was reset: reload the overlay page so its effects work again
+let lostAt = 0;
+ipcMain.on('fx:lost', () => {
+  if (!overlay || Date.now() - lostAt < 10000) return;      // at most once per 10 s, in case the GPU keeps failing
+  lostAt = Date.now();
+  log('overlay graphics reset: reloading it');
+  overlayReady = false;
+  if (overlayShown) { overlay.hide(); overlayShown = false; }
+  setTimeout(() => { if (overlay) overlay.webContents.reload(); }, 500);
+});
 
 function placeOverlay() {
   if (!overlay) return;
@@ -157,7 +228,9 @@ function themeName() { return THEMES.includes(store.theme) ? store.theme : 'road
 
 // Moments that start from a quiet screen take a fresh photo of the desktop first (used for blur, refraction and
 // night grading), while the overlay is still hidden so it can never photograph itself.
-const SHOT_FIRST = { lift: true, hold: true, outgoing: true, demo: true, 'edge-hover': true, preview: true };
+const SHOT_FIRST = { lift: true, hold: true, outgoing: true, demo: true, 'edge-hover': true, preview: true, connect: true };
+// once the overlay hides, its desktop photo is out of date: drop it so no later effect paints an old screen
+function dropShot() { lastShot = 0; if (overlay) overlay.webContents.send('fx:noshot'); }
 let revealT = null;
 function reveal() {
   clearTimeout(revealT); revealT = null;
@@ -200,6 +273,8 @@ function watchdog() {
       if (server) server.abortUpload(t.tid);
       clearTimeout(t.failT);
       discard(t);
+    } else if (t.state !== 'lifted' && t.state !== 'dropped' && quiet > 10 * 60000) {
+      discard(t);                                        // a leftover (should not happen): don't let it block updates
     } else if (t.state === 'dropped' && t.upload !== 'done' && quiet > 45000) {
       log('transfer', t.tid, 'stalled for', Math.round(quiet / 1000) + 's: fail');
       if (t.qs && qs) { qs.cancel(t.tid.slice(3), 'stalled'); if (!transfers.has(t.tid)) continue; }   // its failure path cleans up
@@ -215,13 +290,14 @@ function watchdog() {
     overlay.webContents.send('fx:reset');
     overlay.hide();
     overlayShown = false;
+    dropShot();
   }
 }
 setInterval(watchdog, 5000).unref();
 
 ipcMain.on('fx:ready', () => { overlayReady = true; if (overlay) overlay.webContents.send('fx:config', overlayConfig()); });
 ipcMain.on('fx:idle', () => {
-  if (overlay && overlayShown) { overlay.hide(); overlayShown = false; }
+  if (overlay && overlayShown) { overlay.hide(); overlayShown = false; dropShot(); }
 });
 
 // full-resolution photo of the desktop (raw BGRA pixels, so it lines up pixel-for-pixel with the real screen)
@@ -377,13 +453,13 @@ function queueForPhone(paths) {
   sendQueue.at = Date.now();
   log('queued', files.length, 'file(s) for the phone');
   showPanel();
-  if (panel) panel.webContents.send('panel:note', { text: 'Connect your phone and ' + (files.length === 1 ? path.basename(files[0]) : files.length + ' files') + ' will be sent.' });
+  if (panel) panelSend('panel:note', { text: 'Connect your phone and ' + (files.length === 1 ? path.basename(files[0]) : files.length + ' files') + ' will be sent.' });
 }
 function flushSendQueue() {
   if (!sendQueue.length || !server || !server.connected) return;
   const fresh = Date.now() - (sendQueue.at || 0) < 10 * 60 * 1000;
   const q = sendQueue; sendQueue = [];
-  if (panel) panel.webContents.send('panel:note', { text: '' });
+  if (panel) panelSend('panel:note', { text: '' });
   if (fresh) setTimeout(() => sendPathsToPhone(q), 1200);
 }
 
@@ -468,7 +544,7 @@ function onQsRequest(m) {
   if (panel) {
     panel.setAlwaysOnTop(true, 'floating');
     panel.show(); panel.focus(); panel.flashFrame(true);
-    panel.webContents.send('panel:qs', m);
+    panelSend('panel:qs', m);
   }
   // nobody answered: decline, so the phone doesn't wait forever
   clearTimeout(onQsRequest.t);
@@ -478,7 +554,7 @@ function answerQs(id, accept, why) {
   if (!qs) return;
   if (qsAsking && qsAsking.id === id) {
     qsAsking = null;
-    if (panel) { panel.setAlwaysOnTop(false); panel.flashFrame(false); panel.webContents.send('panel:qs-done', { id }); }
+    if (panel) { panel.setAlwaysOnTop(false); panel.flashFrame(false); panelSend('panel:qs-done', { id }); }
   }
   if (!accept) qsOffers.delete(id);
   qs.answer(id, accept, why);
@@ -513,23 +589,24 @@ async function onQsDone(m) {
   const tid = qsTransfers.get(m.id);
   qsTransfers.delete(m.id);
   const t = tid && transfers.get(tid);
-  const dir = saveDirPath();
+  const dir = await saveDirNow();
   fs.mkdirSync(dir, { recursive: true });
   const placed = [];
   for (const f of m.files) {
     const dest = uniquePath(dir, sanitizeName(f.name));
-    await placeItem(f.tmpPath, dest);
+    try { await placeItem(f.tmpPath, dest); } finally { release(dest); }
     const now = new Date(); fs.utimes(dest, now, now, () => {});
+    markOfWeb(dest);
     placed.push(dest);
   }
   for (const x of m.texts) {
     if (!x.value) continue;
     // links and text are put on the clipboard (never opened by themselves)
     require('electron').clipboard.writeText(x.value);
-    if (panel) panel.webContents.send('panel:note', { text: (m.from || 'Your phone') + ' sent ' + (x.type === 2 ? 'a link' : 'some text') + ', now on your clipboard: ' + x.value.slice(0, 200) });
+    if (panel) panelSend('panel:note', { text: (m.from || 'Your phone') + ' sent ' + (x.type === 2 ? 'a link' : 'some text') + ', now on your clipboard: ' + x.value.slice(0, 200) });
   }
   log('quick share saved', placed.length, 'file(s) from', m.from);
-  if (store.openAfter && placed.length === 1) setTimeout(() => shell.openPath(placed[0]), 900);
+  if (store.openAfter && placed.length === 1) setTimeout(() => openAfterArrival(placed[0]), 900);
   if (t) {
     t.done = true;
     const name = placed.length === 1 ? path.basename(placed[0]) : placed.length ? placed.length + ' items' : 'Link copied';
@@ -539,8 +616,9 @@ async function onQsDone(m) {
 }
 function onQsFailed(m) {
   log('quick share failed', m.why);
+  if (m.why === 'no space') panelSend('panel:note', { text: 'Not enough free space on this PC to receive that.' });
   qsOffers.delete(m.id);
-  if (qsAsking && qsAsking.id === m.id) { qsAsking = null; if (panel) { panel.setAlwaysOnTop(false); panel.webContents.send('panel:qs-done', { id: m.id }); } }
+  if (qsAsking && qsAsking.id === m.id) { qsAsking = null; if (panel) { panel.setAlwaysOnTop(false); panelSend('panel:qs-done', { id: m.id }); } }
   const tid = qsTransfers.get(m.id);
   qsTransfers.delete(m.id);
   if (tid && transfers.get(tid)) { fx('failed', { tid }); transfers.delete(tid); }
@@ -566,6 +644,7 @@ function sendArgs(argv) {
   const self = [path.resolve(app.getAppPath()), path.resolve(process.execPath), path.resolve(argv[0] || '')].map((p) => p.toLowerCase());
   return argv.slice(1).filter((a) => {
     if (!a || a.startsWith('-') || !path.isAbsolute(a)) return false;
+    if (/^\\\\/.test(a) || /^\/\//.test(a)) return false;         // no UNC paths: statting one leaks Windows credentials to a remote host
     if (self.includes(path.resolve(a).toLowerCase())) return false;
     try { fs.statSync(a); return true; } catch (e) { return false; }
   });
@@ -585,7 +664,20 @@ function createPanel() {
   panel.loadFile(path.join(__dirname, 'panel', 'panel.html'));
   panel.on('close', (e) => { if (!app.isQuitting) { e.preventDefault(); panel.hide(); sendPreview(false); } });
   panel.on('closed', () => { panel = null; });
-  panel.webContents.on('did-finish-load', () => pushPanelState());
+  panelLoaded = false;
+  panel.webContents.on('did-finish-load', () => {
+    panelLoaded = true;
+    pushPanelState();
+    const q = panelQueue; panelQueue = [];
+    for (const [ch, data] of q) panelSend(ch, data);
+  });
+}
+
+let panelLoaded = false, panelQueue = [];
+function panelSend(ch, data) {
+  if (!panel || panel.isDestroyed()) return;
+  if (!panelLoaded || panel.webContents.isLoading()) { panelQueue.push([ch, data]); return; }
+  panel.webContents.send(ch, data);
 }
 
 function showPanel() {
@@ -715,15 +807,19 @@ ipcMain.on('panel:preview', (_e, d) => sendPreview(!!(d && d.on)));
 function fixFirewall() {
   if (!IS_WIN) return;
   const exe = process.execPath;
-  const cmdFile = path.join(os.tmpdir(), 'flick-firewall.cmd');
+  // All profiles on purpose: Windows calls a phone hotspot, USB tethering and many home networks "Public", and those are
+  // exactly where the phone has to reach this PC. Write the elevated script to our own per-user folder under a random
+  // name (not a shared, predictable temp path someone could pre-create or swap before it runs elevated).
+  const cmdFile = path.join(app.getPath('userData'), 'flick-fw-' + rid(6) + '.cmd');
   const body = [
     '@echo off',
     'netsh advfirewall firewall delete rule name="Flick" >nul 2>&1',
     `netsh advfirewall firewall add rule name="Flick" dir=in action=allow program="${exe}" enable=yes profile=any`,
   ].join('\r\n');
-  try { fs.writeFileSync(cmdFile, body); } catch (e) { return; }
+  try { fs.writeFileSync(cmdFile, body, { mode: 0o600 }); } catch (e) { return; }
   const ps = `Start-Process -FilePath '${cmdFile.replace(/'/g, "''")}' -Verb RunAs -WindowStyle Hidden`;
   spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true, detached: true, stdio: 'ignore' }).unref();
+  setTimeout(() => fs.unlink(cmdFile, () => {}), 20000);
 }
 
 function applyStartup() {
@@ -805,7 +901,7 @@ setInterval(() => { if (server && server.connected) refreshPhoneApp(); }, 20000)
 
 // ------------------------------------------------------------ updates from GitHub (this PC app; the phone follows)
 const BOOT = global.FLICK_BOOT || null;     // set by boot.js: which copy of the app is running
-let updater = null, updateBusy = false, restartT = null;
+let updater = null, updateBusy = false, restartT = null, healthy = false;
 let updateInfo = { state: 'idle' };
 
 async function runUpdateCheck(manual) {
@@ -826,10 +922,13 @@ function scheduleRestart(ver) {
   if (restartT) return;
   const tryNow = () => {
     restartT = null;
-    const busy = transfers.size > 0 || overlayShown || (panel && panel.isVisible() && panel.isFocused());
+    const moving = [...transfers.values()].some((t) => !t.done && (t.state === 'lifted' || t.state === 'dropped'));
+    const queued = sendQueue.length > 0 && Date.now() - (sendQueue.at || 0) < 10 * 60000;   // a queue goes stale after 10 min
+    const busy = moving || queued || (server && server.outgoingBusy()) || overlayShown || (panel && panel.isVisible() && panel.isFocused());
     if (busy) { restartT = setTimeout(tryNow, 30000); return; }
     log('restarting into', ver);
-    const args = process.argv.slice(1).filter((a) => a !== '--hidden').concat('--hidden');
+    // only --hidden: the original command line may hold "--send <files>" from Explorer, which must not be sent again
+    const args = ['--hidden'];
     app.relaunch({ args });
     app.isQuitting = true;
     app.quit();
@@ -844,26 +943,81 @@ function startUpdater() {
   });
   if (BOOT && BOOT.failed) log('downloaded version failed to load, using the installed one:', BOOT.failed);
   log('running', VERSION, BOOT && BOOT.dir ? 'from ' + BOOT.root + '\\' + BOOT.dir : '(installed copy)');
-  setTimeout(() => updater.markHealthy(BOOT), TEST_MODE ? 4000 : 15000);
+  setTimeout(() => { healthy = true; updater.markHealthy(BOOT); }, TEST_MODE ? 4000 : 6000);
   setTimeout(runUpdateCheck, TEST_MODE ? 6000 : 20000);
   setInterval(runUpdateCheck, 30 * 60 * 1000);
 }
 
 // ------------------------------------------------------------ transfers (phone -> PC)
 const transfers = new Map(); // tid -> state
+const gone = new Map();      // tid -> when it was canceled: late events for it are ignored
+function isGone(tid) {
+  const now = Date.now();
+  for (const [k, at] of gone) if (now - at > 5 * 60000) gone.delete(k);
+  return gone.has(tid);
+}
 
 function sanitizeName(n) {
-  let s = String(n || 'file').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/, '').trim();
+  // also drop invisible direction-control characters, which can make "photo\u202Egnp.exe" read as "photoexe.png"
+  let s = String(n || 'file').replace(/[<>:"/\\|?*\u0000-\u001f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '_').replace(/[. ]+$/, '').trim();
   if (!s) s = 'file';
   if (/^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i.test(s)) s = '_' + s;
-  if (s.length > 180) { const e = path.extname(s); s = s.slice(0, 180 - e.length) + e; }
+  if (s.length > 180) {
+    let e = path.extname(s);
+    if (e.length > 16) e = '';                         // a "dot near the start" isn't an extension worth keeping
+    s = s.slice(0, 180 - e.length) + e;
+  }
   return s;
 }
+// Names picked for saves still in progress, so two files with the same name saved at the same moment can't both
+// take it (Windows names are case-insensitive, so are the keys). Released once the file is in place.
+const reserved = new Set();
+const taken = (p) => reserved.has(p.toLowerCase()) || fs.existsSync(p);
+function release(p) { if (p) reserved.delete(p.toLowerCase()); }
 function uniquePath(dir, name) {
   const ext = path.extname(name), base = name.slice(0, name.length - ext.length);
   let p = path.join(dir, name), i = 2;
-  while (fs.existsSync(p)) p = path.join(dir, `${base} (${i++})${ext}`);
+  while (taken(p)) p = path.join(dir, `${base} (${i++})${ext}`);
+  reserved.add(p.toLowerCase());
   return p;
+}
+
+// Programs, scripts and shortcuts that run code when opened. Flick never auto-launches these, and marks everything it
+// receives as downloaded so Windows SmartScreen / Office Protected View still warn if the user opens one by hand.
+const RISKY_EXT = new Set(['.exe', '.msi', '.msp', '.bat', '.cmd', '.com', '.scr', '.pif', '.cpl', '.ps1', '.psm1',
+  '.vbs', '.vbe', '.js', '.jse', '.wsf', '.wsh', '.hta', '.lnk', '.url', '.reg', '.jar', '.msc', '.inf', '.scf',
+  '.application', '.gadget', '.ws', '.vb', '.jnlp', '.chm', '.sct', '.appref-ms']);
+const riskyExt = (p) => RISKY_EXT.has(path.extname(p).toLowerCase());
+
+function markOfWeb(dest) {
+  if (!IS_WIN) return;
+  fs.writeFile(dest + ':Zone.Identifier', '[ZoneTransfer]\r\nZoneId=3\r\n', () => {});
+}
+
+// mark a received file, or every file inside a received folder (bounded, best-effort)
+function markTree(dest) {
+  if (!IS_WIN) return;
+  fs.stat(dest, (e, st) => {
+    if (e) return;
+    if (st.isFile()) return markOfWeb(dest);
+    if (!st.isDirectory()) return;
+    let budget = 5000;
+    const walk = (d) => fs.readdir(d, { withFileTypes: true }, (er, ents) => {
+      if (er) return;
+      for (const ent of ents) {
+        if (budget-- <= 0) return;
+        const full = path.join(d, ent.name);
+        if (ent.isDirectory()) walk(full); else if (ent.isFile()) markOfWeb(full);
+      }
+    });
+    walk(dest);
+  });
+}
+
+// "open after it arrives": fine for a document or photo, but never launch a program/script/shortcut — reveal it instead
+function openAfterArrival(dest) {
+  if (riskyExt(dest)) { try { shell.showItemInFolder(dest); } catch (e) { /* ignore */ } return; }
+  shell.openPath(dest);
 }
 
 // what the overlay needs to draw the card: a photo, a document, a folder, or a stack of several items
@@ -879,7 +1033,8 @@ function liftInfo(m, t) {
 
 function uniqueDirPath(dir, name) {
   let p = path.join(dir, name), i = 2;
-  while (fs.existsSync(p)) p = path.join(dir, `${name} (${i++})`);
+  while (taken(p)) p = path.join(dir, `${name} (${i++})`);
+  reserved.add(p.toLowerCase());
   return p;
 }
 
@@ -891,22 +1046,32 @@ async function placeItem(src, dest) {
   await fs.promises.rm(src, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {});
 }
 
-async function finalizeBundle(t) {
-  const dir = saveDirPath();
+async function finalizeBundle(t, dir) {
   fs.mkdirSync(dir, { recursive: true });
   const placed = [];
-  for (const top of t.bundle.tops) {
-    const src = path.join(t.tmpPath, top);
-    let st;
-    try { st = await fs.promises.stat(src); } catch (e) { continue; }
-    const dest = st.isDirectory() ? uniqueDirPath(dir, top) : uniquePath(dir, top);
-    await placeItem(src, dest);
-    const now = new Date(); fs.utimes(dest, now, now, () => {});
-    placed.push(path.basename(dest));
+  let lost = 0;
+  try {
+    // everything that's in the staging folder goes out (not just the names the manifest listed)
+    let tops = t.bundle.tops.slice();
+    try { const have = await fs.promises.readdir(t.tmpPath); tops = tops.filter((x) => have.includes(x)).concat(have.filter((x) => !tops.includes(x))); } catch (e) { /* keep the list */ }
+    for (const top of tops) {
+      const src = path.join(t.tmpPath, top);
+      let st;
+      try { st = await fs.promises.stat(src); } catch (e) { continue; }
+      const dest = st.isDirectory() ? uniqueDirPath(dir, top) : uniquePath(dir, top);
+      try {
+        await placeItem(src, dest);
+        const now = new Date(); fs.utimes(dest, now, now, () => {});
+        markTree(dest);
+        placed.push(path.basename(dest));
+      } catch (e) { lost++; log('could not save', top, e.message); }
+      finally { release(dest); }
+    }
+  } finally {
+    fs.rm(t.tmpPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }, () => {});
   }
-  fs.rm(t.tmpPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }, () => {});
   if (!placed.length) throw new Error('nothing received');
-  log('saved', placed.length, 'item(s) in', dir, t.bundle.files, 'files');
+  log('saved', placed.length, 'item(s) in', dir, t.bundle.files, 'files', lost ? '(' + lost + ' could not be saved)' : '');
   return placed.length === 1 ? placed[0] : placed.length + ' items';
 }
 
@@ -919,29 +1084,34 @@ function tState(tid) {
 async function finalize(t) {
   if (t.done) return;
   t.done = true;
-  const dir = saveDirPath();
+  let dest = null;
   try {
+    const dir = await saveDirNow();
     if (t.bundle) {
-      const name = await finalizeBundle(t);
+      const name = await finalizeBundle(t, dir);
       fx('saved', { tid: t.tid, name, where: saveDirLabel() });
       if (server) server.pushToPhone({ t: 'saved', tid: t.tid, name, where: saveDirLabel() });
       setTimeout(() => transfers.delete(t.tid), 5000);
       return;
     }
     fs.mkdirSync(dir, { recursive: true });
-    const dest = uniquePath(dir, sanitizeName(t.name));
+    dest = uniquePath(dir, sanitizeName(t.name));
     try { await fs.promises.rename(t.tmpPath, dest); }
     catch (e) {
       if (e.code === 'EXDEV' || e.code === 'EPERM') { await fs.promises.copyFile(t.tmpPath, dest); await fs.promises.unlink(t.tmpPath).catch(() => {}); }
       else throw e;
     }
+    release(dest);
     const now = new Date(); fs.utimes(dest, now, now, () => {});
+    markOfWeb(dest);
     log('saved', dest);
-    if (store.openAfter) setTimeout(() => shell.openPath(dest), 900);
+    if (store.openAfter) setTimeout(() => openAfterArrival(dest), 900);
     fx('saved', { tid: t.tid, name: path.basename(dest), where: saveDirLabel() });
     if (server) server.pushToPhone({ t: 'saved', tid: t.tid, name: path.basename(dest), where: saveDirLabel() });
   } catch (e) {
     log('finalize failed', e.message);
+    release(dest);
+    if (t.tmpPath) fs.rm(t.tmpPath, { recursive: true, force: true }, () => {});   // don't leave the received copy in temp
     fx('failed', { tid: t.tid });
     if (server) server.pushToPhone({ t: 'failed', tid: t.tid, why: 'save' });
   }
@@ -985,14 +1155,14 @@ function wireServer() {
       panel.show();
       panel.focus();
       panel.flashFrame(true);
-      panel.webContents.send('panel:pair', s);
+      panelSend('panel:pair', s);
     }
   });
   server.on('pair-cancel', (device) => {
     if (panel) {
       panel.setAlwaysOnTop(false);
       panel.flashFrame(false);
-      panel.webContents.send('panel:pair-cancel', { device });
+      panelSend('panel:pair-cancel', { device });
     }
   });
   server.on('devices-changed', (devs) => { store.devices = devs; saveStore(); pushPanelState(); });
@@ -1011,7 +1181,6 @@ function wireServer() {
     t.seen = Date.now();
     fx('drop', m);
     if (t.upload === 'done') finalize(t);
-    else if (t.upload === 'failed') { fx('failed', { tid: t.tid }); }
     clearTimeout(t.timer);   // a dropped transfer now lives as long as bytes keep arriving (see watchdog)
   });
   server.on('send', (m) => { // programmatic send (from the phone menu): fly in from the phone edge
@@ -1026,13 +1195,18 @@ function wireServer() {
     if (t.upload === 'done') finalize(t);
   });
   server.on('cancel', (m) => {
-    const t = tState(m.tid);
+    const t = transfers.get(m.tid);
+    if (!t) { gone.set(m.tid, Date.now()); return; }          // never seen (its upload never started): nothing to undo
     const wasDropped = t.state === 'dropped';
     t.state = 'canceled';
     fx(m.failed && wasDropped ? 'failed' : 'cancel', { tid: m.tid });
-    if (t.upload === 'done') discard(t);
+    clearTimeout(t.failT); clearTimeout(t.timer);
+    if (t.upload === 'uploading') server.abortUpload(m.tid);
+    discard(t);
+    gone.set(m.tid, Date.now());
   });
   server.on('upload-start', ({ tid, name }) => {
+    if (isGone(tid)) { server.abortUpload(tid); return; }
     const t = tState(tid);
     t.upload = 'uploading'; t.seen = Date.now();
     clearTimeout(t.failT);
@@ -1051,6 +1225,7 @@ function wireServer() {
     fx('info', { tid, size: bytes, files });
   });
   server.on('upload-done', ({ tid, tmpPath, name, bundle, size, ms }) => {
+    if (isGone(tid)) { fs.rm(tmpPath, { recursive: true, force: true }, () => {}); return; }   // canceled meanwhile
     const t = tState(tid);
     if (size && ms) log('received', size, 'bytes in', (ms / 1000).toFixed(1) + 's', (size / Math.max(1, ms) / 1000).toFixed(1) + ' MB/s');
     t.upload = 'done'; t.tmpPath = tmpPath; t.seen = Date.now(); if (name) t.name = name;
@@ -1090,6 +1265,8 @@ function wireServer() {
 
 // ------------------------------------------------------------ app
 app.on('second-instance', (_e, argv) => {
+  // a second start counted against this version's start attempts; it's clearly running, so clear them again
+  if (healthy && updater) updater.markHealthy(BOOT);
   const files = sendArgs(argv || []);
   if (files.length) queueForPhone(files);
   else showPanel();
@@ -1097,18 +1274,39 @@ app.on('second-instance', (_e, argv) => {
 app.on('window-all-closed', (e) => { /* keep running in tray */ });
 app.on('before-quit', () => {
   app.isQuitting = true;
+  if (saveTimer) { clearTimeout(saveTimer); writeStoreNow(); }      // don't lose a setting changed just before quitting
   try { if (bt) bt.stop(); } catch (e) { /* ignore */ }
   try { if (qs) qs.stop(); } catch (e) { /* ignore */ }
   try { server && server.stop(); } catch (e) { /* ignore */ }
 });
 
+// Leftovers from a crash or power cut (half-received files, staging folders) in Flick's own temp folders.
+// Nothing can be in flight at startup, so anything older than a few minutes goes.
+function sweepTemp() {
+  const now = Date.now();
+  for (const dir of [path.join(app.getPath('temp'), 'flick-incoming'), path.join(app.getPath('temp'), 'flick-quickshare')]) {
+    fs.readdir(dir, (e, names) => {
+      if (e) return;
+      for (const n of names) {
+        const full = path.join(dir, n);
+        fs.stat(full, (er, st) => { if (!er && now - st.mtimeMs > 10 * 60000) fs.rm(full, { recursive: true, force: true }, () => {}); });
+      }
+    });
+  }
+  fs.readdir(app.getPath('userData'), (e, names) => {
+    if (!e) for (const n of names) if (/^flick-fw-.*\.cmd$/.test(n)) fs.unlink(path.join(app.getPath('userData'), n), () => {});
+  });
+}
+
 app.whenReady().then(async () => {
+  sweepTemp();
   // 1.0.0 could name the PC "Comment's PC" (Windows account without a full name): fix it automatically
   if (!store.name || store.name === "Comment's PC") { store.name = await defaultName(); saveStore(); }
   server = new FlickServer({
     id: store.id, name: store.name, port: 47860, discoveryPort: 47870, version: VERSION,
     tmpDir: path.join(app.getPath('temp'), 'flick-incoming'), devices: store.devices,
     settings: { side: store.side, anchor: store.anchor, theme: themeName() },
+    allowOrigin: TEST_MODE ? /^http:\/\/127\.0\.0\.1:\d+$/ : null,   // test harnesses serve the phone page over http
   });
   wireServer();
   try { const port = await server.start(); log('listening', port, lanAddresses().map((a) => a.address).join(',')); }

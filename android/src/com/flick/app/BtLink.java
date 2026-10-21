@@ -34,9 +34,13 @@ final class BtLink implements Runnable {
 
     private final Context ctx;
     private final Listener listener;
+    // Guarded by this (setWanted and the link-up thread): whether Bluetooth is wanted, and what turning it off has to
+    // close. Every state the thread reports is checked against wanted under the same lock, so nothing ("on" least of
+    // all) reaches the page after "off".
     private volatile boolean wanted;
     private Thread thread;
-    private volatile BtMux mux;
+    private BluetoothSocket connecting;         // an RFCOMM connect() in progress
+    private BtMux mux;                          // the link, from its greeting on
     volatile String state = "off";
 
     BtLink(Context c, Listener l) { this.ctx = c.getApplicationContext(); this.listener = l; }
@@ -53,8 +57,8 @@ final class BtLink implements Runnable {
             thread.start();
         }
         if (!on) {
-            BtMux m = mux;
-            if (m != null) m.close("not needed");
+            close(connecting);                  // ends a connect() still running
+            if (mux != null) mux.close("not needed");
             report("off", null);
         }
     }
@@ -63,6 +67,11 @@ final class BtLink implements Runnable {
         state = s;
         try { listener.onBt(s, pc); } catch (Throwable e) { /* ignore */ }
     }
+
+    /** From the link-up thread: only while Bluetooth is still wanted (the page has heard "off" otherwise). */
+    private synchronized void reportIfWanted(String s, JSONObject pc) { if (wanted) report(s, pc); }
+
+    private static void close(BluetoothSocket s) { try { if (s != null) s.close(); } catch (Throwable e) { /* ignore */ } }
 
     private static void nap(long ms) { try { Thread.sleep(ms); } catch (InterruptedException e) { /* ignore */ } }
 
@@ -92,39 +101,64 @@ final class BtLink implements Runnable {
     @Override
     @SuppressLint("MissingPermission")
     public void run() {
-        while (wanted) {
+        while (true) {
+            synchronized (this) {
+                // decided under the lock, so a setWanted(true) right now either keeps this thread or starts a new one
+                if (!wanted) { if (thread == Thread.currentThread()) thread = null; return; }
+            }
             try {
                 BluetoothAdapter ad = adapter();
-                if (ad == null) { report("unsupported", null); nap(30000); continue; }
-                if (!permitted(ctx)) { report("denied", null); nap(4000); continue; }
-                if (!ad.isEnabled()) { report("radio-off", null); nap(4000); continue; }
-                report("searching", null);
+                if (ad == null) { reportIfWanted("unsupported", null); nap(30000); continue; }
+                if (!permitted(ctx)) { reportIfWanted("denied", null); nap(4000); continue; }
+                if (!ad.isEnabled()) { reportIfWanted("radio-off", null); nap(4000); continue; }
+                reportIfWanted("searching", null);
                 boolean linked = false;
                 for (BluetoothDevice d : candidates(ad)) {
                     if (!wanted) break;
-                    BluetoothSocket s = null;
-                    try {
-                        try { ad.cancelDiscovery(); } catch (Throwable e) { /* needs another permission on new Android; harmless */ }
-                        s = d.createRfcommSocketToServiceRecord(SERVICE);
-                        s.connect();
-                    } catch (Throwable e) {
-                        try { if (s != null) s.close(); } catch (Throwable x) { /* ignore */ }
-                        continue;
+                    try { ad.cancelDiscovery(); } catch (Throwable e) { /* needs another permission on new Android; harmless */ }
+                    BluetoothSocket s;
+                    try { s = d.createRfcommSocketToServiceRecord(SERVICE); } catch (Throwable e) { continue; }
+                    synchronized (this) {
+                        if (!wanted) { close(s); break; }
+                        connecting = s;
                     }
+                    boolean up = false;
+                    try { s.connect(); up = true; } catch (Throwable e) { /* not there, or setWanted(false) closed it */ }
                     final Object lock = new Object();
-                    BtMux m = new BtMux(s.getInputStream(), s.getOutputStream(), s, new BtMux.Listener() {
-                        @Override public void onClosed(String why) { synchronized (lock) { lock.notifyAll(); } }
-                    });
-                    int port;
-                    try { port = m.start(); } catch (Throwable e) { m.close("start"); continue; }
-                    JSONObject pc = hello(port, d);
-                    if (pc == null) { m.close("hello"); continue; }
-                    mux = m;
+                    BtMux m = null;
+                    synchronized (this) {
+                        connecting = null;
+                        if (up && wanted) {
+                            try {
+                                m = new BtMux(s.getInputStream(), s.getOutputStream(), s, new BtMux.Listener() {
+                                    @Override public void onClosed(String why) { synchronized (lock) { lock.notifyAll(); } }
+                                });
+                                mux = m;            // from here on setWanted(false) closes it, also mid-greeting
+                            } catch (Throwable e) { m = null; }
+                        }
+                    }
+                    if (m == null) { close(s); if (!wanted) break; continue; }
+                    JSONObject pc = null;
+                    try { pc = hello(m.start(), d); } catch (Throwable e) { /* not Flick, or closed meanwhile */ }
+                    synchronized (this) {
+                        if (pc == null || !wanted || m.isClosed()) {
+                            if (mux == m) mux = null;
+                            m.close(pc == null ? "hello" : "not needed");
+                            if (!wanted) break;
+                            continue;
+                        }
+                        report("on", pc);
+                    }
                     linked = true;
-                    report("on", pc);
-                    synchronized (lock) { while (!m.isClosed() && wanted) lock.wait(5000); }
-                    mux = null;
-                    if (wanted) report("searching", null);
+                    try {
+                        synchronized (lock) { while (!m.isClosed() && wanted) lock.wait(5000); }
+                    } finally {
+                        m.close("not needed");      // leaving the wait always ends the link (no-op if it dropped)
+                        synchronized (this) {
+                            if (mux == m) mux = null;
+                            if (wanted) report("searching", null);
+                        }
+                    }
                     break;
                 }
                 if (!linked && wanted) nap(8000);

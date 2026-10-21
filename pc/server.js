@@ -45,9 +45,13 @@ class FlickServer extends EventEmitter {
     this.session = null;   // active phone session
     this.uploads = new Map();   // tid -> { req, path }
     this.assemblies = new Map(); // tid -> a large file arriving in parallel parts (see _handlePart)
+    this.partsSeen = new Map();  // "tid:att" -> { done | aborted, until }: late parts of a finished/aborted upload
     this.outgoing = new Map();  // fid -> { path, name, size, mime }
     this.pending = new Map();   // deviceId -> session awaiting approval
+    this.pairTimes = [];        // when recent pairing prompts were shown (rate limit)
+    this.cool = new Map();      // address -> time until which its pairing requests are refused (after a "Don't allow")
     this.phoneApp = null;       // newest phone app this PC can hand out: { path, code, name, size, sha256 }
+    this.allowOrigin = opts.allowOrigin || null;   // tests only (a RegExp); never set by a normal start
     fs.mkdirSync(this.tmpDir, { recursive: true });
   }
 
@@ -92,6 +96,7 @@ class FlickServer extends EventEmitter {
   }
 
   stop() {
+    clearInterval(this.sweepT); this.sweepT = null;
     try { this.http && this.http.close(); } catch (e) { /* ignore */ }
     try { this.udp && this.udp.close(); } catch (e) { /* ignore */ }
     if (this.session && this.session.conn) this.session.conn.close();
@@ -127,7 +132,24 @@ class FlickServer extends EventEmitter {
   // ---------- trust ----------
   _trusted(device, token) {
     const d = device && this.devices[device];
-    return !!(d && token && d.token === token);
+    if (!d || typeof d.token !== 'string' || typeof token !== 'string' || !token) return false;
+    const a = Buffer.from(token), b = Buffer.from(d.token);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);             // constant-time comparison
+  }
+
+  // A real phone reaches us at a LAN IP and its page is local (file://), so it sends no web Origin and a Host that is
+  // a bare IP:port. Reject anything with a real browser Origin (a web page trying to drive us) or a DNS-name Host
+  // (so a rebinding page can't pose as the phone). Loopback/absent is fine — that's how the phone and tests connect.
+  _hostOk(req) {
+    // a Bluetooth stream comes from a paired device through the mux, never from a browser: nothing to check
+    if (req.socket && req.socket.remoteFamily === 'bluetooth') return true;
+    const origin = req.headers.origin;
+    // the phone's page is a local file: Android WebView reports that as "null" or as a file: origin (a web page can
+    // produce neither from the network). allowOrigin lets tests serve the phone page over http.
+    if (origin && origin !== 'null' && !/^file:/i.test(origin) && !(this.allowOrigin && this.allowOrigin.test(origin))) return false;
+    const host = (req.headers.host || '').replace(/^\[(.*)\]/, '$1').replace(/:\d+$/, '').trim();
+    if (!host) return true;
+    return /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(':') || host === 'localhost';
   }
 
   approve(device) {
@@ -141,13 +163,39 @@ class FlickServer extends EventEmitter {
       s.trusted = true;
       s.token = token;
       s.conn.send({ t: 'paired', token });
+      this._takeOver(s);                          // the user just allowed this phone: it becomes the one in use
       this._connected(s);
     }
+  }
+
+  // the phone the PC listens to becomes s, unless a different phone is connected right now (nothing is closed)
+  _focus(s) {
+    const cur = this.session;
+    if (cur && cur !== s && cur.connected && cur.conn.open) return false;
+    this.session = s;
+    return true;
+  }
+
+  // make s the phone in use even though another one is connected (the user asked for it): that one is told why it
+  // lost the PC and closed. quiet: it's the same phone's older link, so there's nobody to tell.
+  _takeOver(s, quiet) {
+    const cur = this.session;
+    if (cur && cur !== s) {
+      const was = cur.connected && cur.conn.open;
+      if (was || quiet) { try { if (!quiet) cur.conn.send({ t: 'replaced' }); cur.conn.close(); } catch (e) { /* ignore */ } }
+      if (was) { cur.connected = false; this.emit('disconnected', this._publicSession(cur)); }
+    }
+    this.session = s;
   }
 
   deny(device) {
     const s = this.pending.get(device);
     this.pending.delete(device);
+    if (s) {
+      const now = Date.now();
+      for (const [a, until] of this.cool) if (until < now) this.cool.delete(a);
+      this.cool.set(s.address, now + 20000);
+    }
     this.emit('pair-cancel', device);
     if (s && s.conn && s.conn.open) s.conn.send({ t: 'denied' });
   }
@@ -181,15 +229,26 @@ class FlickServer extends EventEmitter {
     let u;
     try { u = new URL(req.url, 'http://x'); } catch (e) { socket.destroy(); return; }
     if (u.pathname !== '/ws') { socket.destroy(); return; }
+    if (!this._hostOk(req)) { try { socket.end('HTTP/1.1 403 Forbidden\r\n\r\n'); } catch (e) { socket.destroy(); } return; }
+    // a phone needs one socket (two while it moves to a faster link); a flood from one address is refused
+    const addr = socket.remoteAddress || '';
+    this.wsByAddr = this.wsByAddr || new Map();
+    if ((this.wsByAddr.get(addr) || 0) >= 8) { socket.destroy(); return; }
     const conn = acceptUpgrade(req, socket, head);
     if (!conn) return;
+    this.wsByAddr.set(addr, (this.wsByAddr.get(addr) || 0) + 1);
     const s = { conn, device: null, name: 'Phone', trusted: false, connected: false, screen: null, address: socket.remoteAddress };
+    // a phone says hello right away; a socket that doesn't is closed
+    const helloT = setTimeout(() => { if (!s.device) conn.close(); }, 10000);
     conn.on('message', (txt) => {
       let m;
       try { m = JSON.parse(txt); } catch (e) { return; }
       this._onPhoneMessage(s, m);
     });
     conn.on('close', () => {
+      clearTimeout(helloT);
+      const n = (this.wsByAddr.get(addr) || 1) - 1;
+      if (n > 0) this.wsByAddr.set(addr, n); else this.wsByAddr.delete(addr);
       if (this.session === s) {
         this.session = null;
         this.emit('disconnected', this._publicSession(s));
@@ -212,29 +271,48 @@ class FlickServer extends EventEmitter {
         s.via = /^(wifi|usb|hotspot|direct|ethernet|bluetooth)$/.test(m.via) ? m.via : (s.via || '');
         s.trusted = this._trusted(s.device, m.token);
         s.token = s.trusted ? m.token : null;
-        // Newest phone session wins.
-        if (this.session && this.session !== s) {
-          try { this.session.conn.send({ t: 'replaced' }); this.session.conn.close(); } catch (e) { /* ignore */ }
+        // Only one phone uses the PC at a time. Opening Flick on a second phone must not knock the connected one off:
+        // a new socket becomes the session when nobody is connected, or when it's the same phone on a newer link.
+        // Switching to another phone takes an explicit "connect" from it (see below) or the user allowing it here.
+        {
+          const cur = this.session;
+          if (cur && cur !== s && cur.device === s.device) this._takeOver(s, true);   // the same phone on a newer link
+          else this._focus(s);                                                          // never knocks off a connected phone
         }
-        this.session = s;
         s.conn.send({ t: 'welcome', v: PROTO, pc: { id: this.id, name: this.name }, trusted: s.trusted, side: this.settings.side, anchor: this.settings.anchor, theme: this.settings.theme });
         this.emit('phone-hello', this._publicSession(s));
-        if (m.resume && s.trusted) this._connected(s);
+        if (m.resume && s.trusted && this.session === s) this._connected(s);
         break;
       }
       case 'screen':
         s.screen = { w: +m.w || 400, h: +m.h || 860, dpr: +m.dpr || 2 };
         break;
       case 'hold':
-        if (this.session === s) this.emit('hold', { p: Math.max(0, Math.min(1, +m.p || 0)) });
+        if (this.session === s || this._focus(s)) this.emit('hold', { p: Math.max(0, Math.min(1, +m.p || 0)) });
         break;
       case 'hold-cancel':
         if (this.session === s) this.emit('hold', { p: 0, cancel: true });
         break;
       case 'connect':
-        if (this.session !== s) return;
-        if (s.trusted) this._connected(s);
-        else {
+        if (s.trusted) {
+          if (this.session !== s && !this._focus(s)) {
+            // another phone is connected: switch only when the user asked on this phone (holding Connect). Phone apps
+            // before 1.8 only ever send "connect" when the user held it, so for them it always counts.
+            const asked = m.user === true || (s.app || 0) < 10800;
+            if (!asked) { s.conn.send({ t: 'busy' }); break; }
+            this._takeOver(s);
+          }
+          this._connected(s);
+        } else {
+          // Each request pulls the Flick window to the front, so a stranger mustn't be able to spam them: one prompt
+          // at a time, a short pause for an address the user just declined, and a cap per minute.
+          const now = Date.now();
+          if ((this.cool.get(s.address) || 0) > now) { s.conn.send({ t: 'denied' }); break; }
+          for (const [dev, p] of this.pending) if (!p.conn || !p.conn.open) this.pending.delete(dev);
+          if ([...this.pending.values()].some((p) => p !== s)) { s.conn.send({ t: 'denied' }); break; }
+          this.pairTimes = this.pairTimes.filter((t) => now - t < 60000);
+          if (this.pairTimes.length >= 6) { s.conn.send({ t: 'denied' }); break; }
+          this.pairTimes.push(now);
           this.pending.set(s.device, s);
           s.conn.send({ t: 'pairing' });
           this.emit('pair-request', this._publicSession(s));
@@ -280,8 +358,10 @@ class FlickServer extends EventEmitter {
     let u;
     try { u = new URL(req.url, 'http://x'); } catch (e) { res.writeHead(400); res.end(); return; }
     if (req.method === 'OPTIONS') { this._cors(res); res.writeHead(204); res.end(); return; }
+    if (!this._hostOk(req)) { res.writeHead(403); res.end(); return; }
     const q = u.searchParams;
     if (req.method === 'GET' && u.pathname === '/api/hello') {
+      // reachable only by non-browser clients (the host/origin gate above blocks web pages); the phone needs id+name
       return this._json(res, 200, { app: 'flick', v: PROTO, id: this.id, name: this.name, port: this.port });
     }
     if (req.method === 'POST' && u.pathname === '/api/upload') {
@@ -328,12 +408,36 @@ class FlickServer extends EventEmitter {
     });
   }
 
+  // Is there room for `bytes` more (plus a margin) where incoming files land? A phone mustn't fill the disk.
+  _roomFor(bytes) {
+    try {
+      const st = fs.statfsSync(this.tmpDir);
+      return st.bavail * st.bsize >= (+bytes || 0) + 256 * 1024 * 1024;
+    } catch (e) { return true; }                      // can't tell: don't block transfers over it
+  }
+
   // A new attempt for a transfer the phone is retrying replaces the earlier one, which may still be running or
   // failing: each attempt writes its own file, and a replaced attempt never reports anything.
   _claim(tid, entry) {
     const old = this.uploads.get(tid);
     if (old && old !== entry) { old.superseded = true; try { old.req.destroy(); } catch (e) { /* ignore */ } }
+    const asm = this.assemblies.get(tid);
+    if (asm) this._dropAssembly(asm, true);
     this.uploads.set(tid, entry);
+  }
+
+  _remember(tid, att, what) {
+    const now = Date.now();
+    for (const [k, v] of this.partsSeen) if (v.until < now) this.partsSeen.delete(k);
+    this.partsSeen.set(tid + ':' + att, { what, until: now + 5 * 60000 });
+  }
+
+  // a parallel upload with no part arriving for a minute was given up by the phone: free its file and say so
+  _sweepAssemblies() {
+    const now = Date.now();
+    for (const a of [...this.assemblies.values()]) {
+      if (a.reqs.size === 0 && now - a.active > 60000) { this._dropAssembly(a, false); this.emit('upload-failed', { tid: a.tid, why: 'abandoned' }); }
+    }
   }
   _release(tid, entry) { if (this.uploads.get(tid) === entry) this.uploads.delete(tid); }
 
@@ -343,6 +447,7 @@ class FlickServer extends EventEmitter {
     // the request's own length is exact; the phone's size hint can be stale (media index)
     const clen = parseInt(req.headers['content-length'] || '', 10);
     const total = clen >= 0 ? clen : (parseInt(q.get('size') || '0', 10) || 0);
+    if (!this._roomFor(total)) { req.resume(); return this._json(res, 507, { ok: false, error: 'no space' }); }
     const tmpPath = path.join(this.tmpDir, tid + '-' + rid(4) + '.part');
     const entry = { req, path: tmpPath, superseded: false };
     this._claim(tid, entry);
@@ -406,6 +511,7 @@ class FlickServer extends EventEmitter {
       onManifest: (m) => this.emit('bundle-manifest', { tid, files: +m.files || 0, bytes: +m.bytes || 0, roots: Array.isArray(m.roots) ? m.roots.slice(0, 500).map(String) : [] }),
       onProgress: (got, total) => { const now = Date.now(); if (now - lastEmit > 40) { lastEmit = now; this.emit('upload-progress', { tid, received: got, total }); } },
     });
+    if (!this._roomFor(+q.get('bytes') || 0)) { this._release(tid, entry); fs.rm(root, { recursive: true, force: true }, () => {}); req.resume(); return this._json(res, 507, { ok: false, error: 'no space' }); }
     this.emit('upload-start', { tid, name: 'bundle', total: +q.get('bytes') || 0 });
 
     const fail = (why, code) => {
@@ -462,22 +568,38 @@ class FlickServer extends EventEmitter {
       req.resume();
       return this._json(res, 400, { ok: false, error: 'bad part' });
     }
+    const seen = this.partsSeen.get(tid + ':' + att);
+    if (seen && seen.until > Date.now()) {
+      req.resume();
+      // already complete (its 200 got lost, say): the part is in. Aborted: stop sending.
+      return seen.what === 'done' ? this._json(res, 200, { ok: true, index, done: true }) : this._json(res, 410, { ok: false, error: 'aborted' });
+    }
     let asm = this.assemblies.get(tid);
-    if (asm && (asm.att !== att || asm.total !== total || asm.parts !== parts)) { this._dropAssembly(asm, true); asm = null; }
+    if (asm && (asm.att !== att || asm.total !== total || asm.parts !== parts)) {
+      // a new attempt replaces this one; parts of the old attempt that still turn up are turned away, not let back in
+      if (asm.att !== att) this._remember(tid, asm.att, 'aborted');
+      this._dropAssembly(asm, true); asm = null;
+    }
+    if (!asm && !this._roomFor(total)) { req.resume(); return this._json(res, 507, { ok: false, error: 'no space' }); }
     if (!asm) {
       const old = this.uploads.get(tid);
       if (old) { old.superseded = true; try { old.req.destroy(); } catch (e) { /* ignore */ } }
       const p = path.join(this.tmpDir, tid + '-' + att + '-' + rid(3) + '.part');
       asm = { tid, att, total, parts, path: p, name: q.get('name') || 'file', got: new Array(parts).fill(0), done: new Array(parts).fill(false),
-        reqs: new Set(), finished: false, superseded: false, t0: Date.now(), lastEmit: 0 };
-      asm.fdP = fs.promises.open(p, 'w').then(async (fd) => { if (total) await fd.truncate(total); return fd; });
+        reqs: new Set(), finished: false, superseded: false, t0: Date.now(), lastEmit: 0, active: Date.now() };
+      // pre-size the file; if that fails (disk full) close it again rather than leaking the handle
+      asm.fdP = fs.promises.open(p, 'w').then(async (fd) => {
+        try { if (total) await fd.truncate(total); } catch (e) { await fd.close().catch(() => {}); throw e; }
+        return fd;
+      });
       asm.fdP.catch(() => {});
       this.assemblies.set(tid, asm);
       this.emit('upload-start', { tid, name: asm.name, total, parts });
     }
     if (asm.finished) { req.resume(); return this._json(res, 409, { ok: false, error: 'finished' }); }
     const A = asm;
-    A.reqs.add(req);
+    A.reqs.add(req); A.active = Date.now();
+    if (!this.sweepT) { this.sweepT = setInterval(() => this._sweepAssemblies(), 15000); if (this.sweepT.unref) this.sweepT.unref(); }
     A.got[index] = 0; A.done[index] = false;      // a part sent again starts over
     let pos = offset, got = 0, queued = 0, writing = false, ended = false, over = false;
     const queue = [];
@@ -490,7 +612,7 @@ class FlickServer extends EventEmitter {
     const partFail = (why) => {
       if (over) return;
       over = true;
-      A.reqs.delete(req);
+      A.reqs.delete(req); A.active = Date.now();
       A.got[index] = 0;
       if (!res.headersSent) { try { this._json(res, 500, { ok: false, error: why }); } catch (e) { /* ignore */ } }
       try { req.destroy(); } catch (e) { /* ignore */ }
@@ -505,7 +627,8 @@ class FlickServer extends EventEmitter {
       if (A.finished || A.superseded || !A.done.every(Boolean)) return progress();
       A.finished = true;
       this.assemblies.delete(tid);
-      try { await (await A.fdP).close(); } catch (e) { this.emit('upload-failed', { tid, why: 'disk' }); return; }
+      this._remember(tid, A.att, 'done');
+      try { await (await A.fdP).close(); } catch (e) { fs.unlink(A.path, () => {}); this.emit('upload-failed', { tid, why: 'disk' }); return; }
       this.emit('upload-progress', { tid, received: total, total });
       this.emit('upload-done', { tid, tmpPath: A.path, name: A.name, size: total, ms: Date.now() - A.t0, parts });
     };
@@ -531,7 +654,7 @@ class FlickServer extends EventEmitter {
       if (over || A.superseded) return;
       got += chunk.length;
       if (got > len) return partFail('too long');
-      A.got[index] = got;
+      A.got[index] = got; A.active = Date.now();
       queue.push(chunk); queued += chunk.length;
       if (queued > 8 * 1024 * 1024) req.pause();
       if (!writing) pump();
@@ -555,13 +678,22 @@ class FlickServer extends EventEmitter {
     const e = this.uploads.get(tid);
     if (e) { try { e.req.destroy(); } catch (x) { /* ignore */ } }
     const a = this.assemblies.get(tid);
-    if (a) { this._dropAssembly(a, false); this.emit('upload-failed', { tid, why: 'aborted' }); }
+    if (a) { this._remember(tid, a.att, 'aborted'); this._dropAssembly(a, false); this.emit('upload-failed', { tid, why: 'aborted' }); }
+  }
+
+  /** files are on their way to the phone, or were just offered and not fetched yet: don't restart now */
+  outgoingBusy() {
+    if (this.streaming > 0) return true;
+    if (!this.connected) return false;                // offered to a phone that's gone: it can't fetch them now
+    const now = Date.now();
+    for (const f of this.outgoing.values()) if (!f.doneSent && now - f.at < 2 * 60000) return true;
+    return false;
   }
 
   offerFile(filePath, mime) {
     const st = fs.statSync(filePath);
     const fid = rid(8);
-    this.outgoing.set(fid, { path: filePath, name: path.basename(filePath), size: st.size, mime: mime || 'application/octet-stream' });
+    this.outgoing.set(fid, { path: filePath, name: path.basename(filePath), size: st.size, mime: mime || 'application/octet-stream', at: Date.now() });
     setTimeout(() => this.outgoing.delete(fid), 30 * 60 * 1000);
     return { fid, name: path.basename(filePath), size: st.size };
   }
@@ -590,7 +722,8 @@ class FlickServer extends EventEmitter {
     res.writeHead(partial ? 206 : 200, headers);
     if (!st.size) { res.end(); this.emit('download-done', { fid, total: 0 }); return; }
     const rs = fs.createReadStream(f.path, { highWaterMark: 1024 * 1024, start, end });
-    res.on('close', () => rs.destroy());
+    this.streaming = (this.streaming || 0) + 1;
+    res.on('close', () => { rs.destroy(); this.streaming = Math.max(0, (this.streaming || 0) - 1); });
     f.sent = f.sent || 0;
     let last = 0;
     rs.on('data', (c) => {

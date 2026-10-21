@@ -1,5 +1,31 @@
 # Changes
 
+## 1.8.0
+
+A full review of Flick for bugs, security and speed.
+
+**Security**
+- Files received from the phone or Quick Share are marked as downloaded, so Windows warns before running a program,
+  and "Open files when they arrive" never launches programs, scripts or shortcuts (it shows them in their folder).
+- A web page can no longer reach Flick on your PC to ask for pairing, and pairing requests can't be used to spam
+  the Flick window.
+- The phone only accepts files, connection status and app updates from a PC it's paired with.
+- Malformed or oversized network traffic can no longer make Flick on the PC use unlimited memory or disk.
+- Bluetooth only accepts paired devices over an encrypted link.
+
+**Fixes**
+- A downloaded update could be undone by opening Flick a few times (or using Send to), and an update could wait
+  forever to restart after a canceled transfer. Both are fixed; the restart also no longer re-sends files.
+- Two files with the same name arriving at once no longer overwrite each other (on the PC and on the phone).
+- Transfers keep going when the phone's screen turns off or you switch apps.
+- The phone reconnects by itself after Wi-Fi changes, a cable is plugged in, or the PC restarts, and notices a
+  dead connection within seconds instead of minutes.
+- Opening Flick on a second phone no longer disconnects the first one.
+- Settings and pairings survive a crash or power cut during a save.
+- The first pairing or Quick Share prompt after Windows starts is no longer lost.
+- The overlay recovers after a graphics driver reset and never flashes an old screenshot.
+- Leftover temporary files are cleaned up, and a full disk is reported instead of failing midway.
+
 ## 1.7.0
 
 - Fixed: after a transfer, part of the animation could stay on the PC screen for minutes. Anything left on screen
