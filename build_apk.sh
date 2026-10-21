@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds Flick.apk without Gradle: javac -> dx/d8 -> aapt2 -> zip -> zipalign+sign (uber-apk-signer)
+# Builds Flick.apk without Gradle: javac -> dx/d8 -> aapt2 -> zip -> zipalign+sign (signing/FlickSign.java)
 # usage: ./build_apk.sh <versionCode> <versionName>   (versionCode = major*10000 + minor*100 + patch)
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")" && pwd)
@@ -32,21 +32,18 @@ test -f "$OUT/classes.dex"
 echo "== aapt2"
 "$A2" compile --dir "$AND/res" -o "$OUT/res.zip"
 "$A2" link -o "$OUT/base.apk" -I "$AJ" --manifest "$AND/AndroidManifest.xml" \
-  --min-sdk-version 24 --target-sdk-version 34 --version-code "$VERSION_CODE" --version-name "$VERSION_NAME" \
+  --min-sdk-version 28 --target-sdk-version 34 --version-code "$VERSION_CODE" --version-name "$VERSION_NAME" \
   -A "$OUT/assets" "$OUT/res.zip"
 (cd "$OUT" && zip -q -j base.apk classes.dex)
 
 echo "== sign"
-# Flick's private release key (kept outside the project). Builds up to 1.3 used the public debug key that ships inside
-# uber-apk-signer; the v3 lineage proves that key handed over to the private one, so phones update in place and
-# Android refuses any "update" signed only with the old, public key.
+# Flick's private release key (kept outside the project), APK Signature Scheme v3 only (Android 9+). Builds up to 1.3
+# used the public debug key that ships inside uber-apk-signer; the v3 lineage proves that key handed over to the private
+# one, so phones update in place and Android refuses any "update" signed only with the old, public key.
+# FlickSign also zip-aligns; SIGNER is only its classpath (apksig).
 KEYS=${FLICK_KEYS:-/home/claude/tools/keys}
-PW=$(cat "$KEYS/password.txt")
-java -jar "$SIGNER" -a "$OUT/base.apk" -o "$OUT/signed" --allowResign \
-  --ks 1="$KEYS/olddebug/debug.keystore" 2="$KEYS/flick-release.p12" --ksAlias 1=androiddebugkey 2=flick \
-  --ksPass 1=android 2="$PW" --ksKeyPass 1=android 2="$PW" -l "$KEYS/flick.lineage" \
-  2>&1 | grep -v "JAVA_TOOL_OPTIONS" | grep -E "verified|Successfully|ERROR|error" || true
-cp "$OUT"/signed/*.apk "$ROOT/build/Flick.apk"
+java -cp "$SIGNER" "$ROOT/signing/FlickSign.java" "$KEYS" "$OUT/base.apk" "$OUT/Flick.apk" 2>&1 | { grep -v "JAVA_TOOL_OPTIONS" || true; }
+cp "$OUT/Flick.apk" "$ROOT/build/Flick.apk"
 # the signed phone app ships inside the PC app (pc/phone-app); it is committed, because the signing key never
 # leaves this machine (GitHub builds the PC app around it, see .github/workflows/release.yml)
 mkdir -p "$ROOT/pc/phone-app" && cp "$ROOT/build/Flick.apk" "$ROOT/pc/phone-app/Flick.apk"

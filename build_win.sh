@@ -26,7 +26,9 @@ rm -f "$APP/resources/default_app.asar"
 
 echo "== copy app"
 mkdir -p "$APP/resources/app"
-cp -r "$PC"/{boot.js,main.js,server.js,ws.js,bundle.js,apkinfo.js,updater.js,updatecore.js,mux.js,bt.js,pb.js,mdns.js,quickshare.js,preload.js,package.json,overlay,panel,catcher,assets,phone-app} "$APP/resources/app/"
+# every module at the top of pc/ ships (a new one can't be forgotten here), plus the folders the windows load
+cp "$PC"/*.js "$PC/package.json" "$APP/resources/app/"
+for d in overlay panel catcher assets phone-app web; do if [ -d "$PC/$d" ]; then cp -r "$PC/$d" "$APP/resources/app/"; fi; done
 # the Bluetooth bridge (a small native helper, see native/flick-bt.c)
 mkdir -p "$APP/resources/app/bin"
 "$MINGW_CC" -O2 -s -Wall -o "$APP/resources/app/bin/flick-bt.exe" "$ROOT/native/flick-bt.c" -lws2_32

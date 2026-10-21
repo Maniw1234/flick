@@ -1,7 +1,7 @@
 {
   "name": "flick",
   "productName": "Flick",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "description": "Flick - throw files from your phone onto your PC screen",
   "main": "boot.js",
   "author": "Flick",

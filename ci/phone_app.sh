@@ -53,8 +53,6 @@ if [ -z "$how" ]; then
   [ -s "$K/flick-release.p12" ] && [ -s "$K/flick.lineage" ] && [ -s "$K/password.txt" ] \
     || fail "FLICK_SIGNING_KEY is missing flick-release.p12, flick.lineage or the password. See signing/README.md."
   [ "${GITHUB_ACTIONS:-}" = true ] && echo "::add-mask::$(cat "$K/password.txt")"
-  mkdir -p "$K/olddebug"
-  unzip -p "$SIGNER" debug.keystore > "$K/olddebug/debug.keystore"
 
   if [ -z "${AJ:-}" ] && [ -n "${ANDROID_HOME:-}" ]; then
     if [ ! -f "$ANDROID_HOME/platforms/android-34/android.jar" ] || [ ! -x "$ANDROID_HOME/build-tools/34.0.0/d8" ]; then

@@ -13,13 +13,15 @@ Phone and PC talk directly (Wi-Fi, a USB cable, the phone's hotspot or Bluetooth
 | `native/` | `flick-bt.c`: the small Windows helper that offers Flick's Bluetooth service (built with MinGW) |
 | `ci/` | The release workflow's phone-app step (`phone_app.sh`) |
 | `installer/` | NSIS script for `Flick-Setup.exe` |
-| `signing/` | How the phone app is signed, plus helper tools (no keys) |
+| `signing/` | How the phone app and releases are signed, plus helper tools (no keys) |
 | `art/` | Icons |
 
 ## Releasing a new version
 
 1. Raise `"version"` in `pc/package.json` and add a `## <version>` section to `CHANGES.md`.
 2. Push to `main`.
+3. When the release is out, sign it on the computer that keeps the release key: `node signing/sign_release.js <version>`
+   (`signing/README.md`). Installed copies don't take a release before that.
 
 GitHub Actions (`.github/workflows/release.yml`) then builds the Windows app and its installer and publishes the
 release with `Flick-Setup.exe`, `flick-app-<version>.zip` (the update bundle), the phone app and `SHA256SUMS`.
@@ -30,13 +32,16 @@ To try the whole build without publishing: Actions > Release > Run workflow, tic
 
 ## How updates reach your devices
 
-- **PC:** Flick checks the latest GitHub release when it starts and every 30 minutes. It downloads
-  `flick-app-<version>.zip`, checks its SHA-256 against GitHub's, unpacks it into `%LOCALAPPDATA%\Flick\app`, and
-  restarts into it once no transfer is running (`pc/updater.js`, `pc/boot.js`). No installer and no admin prompt is
-  involved. If a new version fails to start three times, Flick goes back to the installed copy and skips that version.
+- **PC:** Flick checks the latest GitHub release when it starts and every 30 minutes. Once the release's `SHA256SUMS`
+  carries a valid `SHA256SUMS.sig` (Flick's release key), it downloads `flick-app-<version>.zip`, checks its SHA-256
+  against that signed list, unpacks it into `%LOCALAPPDATA%\Flick\app`, and restarts into it once no transfer is
+  running (`pc/updater.js`, `pc/boot.js`). No installer and no admin prompt is involved. If a new version fails to
+  start three times, Flick goes back to the installed copy and skips that version.
 - **Phone:** the phone app checks the latest GitHub release when it opens (and every few hours while open) and
-  downloads the new `Flick-<version>.apk` from it; a paired PC also offers it over Wi-Fi. Either way the phone checks
-  the size, SHA-256, version and signing key, and shows **Install**. Android then asks for one more tap to confirm.
+  downloads the new `Flick-<version>.apk` from it; a paired PC also offers it over Wi-Fi, with its release's signed
+  `SHA256SUMS`. Either way the phone checks that the signed `SHA256SUMS` lists that exact file, and its size, version
+  and signing key, and shows **Install**. Android then asks for one more tap to confirm. From 1.9 the phone app needs
+  Android 9 or newer; phones on Android 7 or 8 stay on 1.8 (the PC doesn't offer them newer).
 
 ## Connections
 
@@ -54,27 +59,42 @@ To try the whole build without publishing: Actions > Release > Run workflow, tic
 
 ## Security
 
-- **Pairing.** A phone gets a random token only after the user clicks Allow on the PC. Every upload, download and
-  update fetch needs it, and the phone in turn only accepts files, status and updates from a PC it holds a token for.
-  Pairing prompts are rate-limited, and browsers are refused (a web page can't reach the PC's server: requests with a
-  web `Origin` or a DNS-name `Host` get 403).
+- **Encrypted links.** Everything between phone and PC travels over TLS on the PC's port 47860 (the same port also
+  answers plain HTTP, for phone apps before 1.9 and the browser page). Each PC makes its own certificate once
+  (`tls-cert.pem` in its settings folder); a phone pins its SHA-256 when it pairs and from then on connects to no
+  other. The phone app reaches the PC through a local port inside the phone (`TlsProxy`); its network security config
+  allows unencrypted connections only to the phone itself. Bluetooth links are encrypted by Bluetooth.
+- **Pairing.** The PC asks before a new phone can connect, and both screens show the same 6-digit code: the phone
+  commits to its half of the code before the PC sends its half, so nobody in between can make the codes match. The
+  user clicks Allow on the PC and taps Same code on the phone: the PC gives the phone a random token only after Allow,
+  and the phone keeps it (and pins the certificate) only after Same code, so a stranger answering in the PC's place
+  gets nowhere either.
+- **Signing in.** The token never crosses the network: on every connection the PC proves it holds the phone's token
+  (an HMAC over both sides' random numbers and the certificate the phone sees), then the phone proves the same. A
+  relay in the middle (with its own certificate) can neither read nor pass on these proofs. A phone paired with an
+  older Flick sent its token in the clear, so that token signs nothing in: the phone is confirmed once more with the
+  pairing code, and plain connections stop working for it.
+- **Requests.** Every upload, download and update fetch needs the token, and once a phone has signed in securely, its
+  token works only over an encrypted link. The phone only accepts files, status and updates from the PC it signed in
+  to. Pairing prompts are rate-limited, and browsers can't reach the phone API (a web `Origin` or a DNS-name `Host`
+  gets 403).
 - **Received files** are marked as downloaded from the internet (`Zone.Identifier`), so Windows SmartScreen and
   Office Protected View apply. "Open files when they arrive" never launches programs, scripts or shortcuts.
-- **Limits.** WebSocket messages, pre-accept Quick Share data, sockets per address and Bluetooth stream buffers are
-  capped; uploads and Quick Shares that won't fit on the disk are refused up front.
+- **Limits.** WebSocket messages, pre-accept Quick Share data, open connections (64 per address, 512 in all) and
+  Bluetooth stream buffers are capped; uploads and Quick Shares that won't fit on the disk are refused up front.
 - **Bluetooth** accepts only paired devices over an encrypted link.
-- **Updates.** The PC verifies each update bundle's SHA-256 (from GitHub, over HTTPS) before installing it; Android
-  checks the phone app's signature. CI pins every downloaded tool by checksum and the checkout action by commit.
-- **Not yet:** traffic between phone and PC is plain HTTP on the local network (pairing tokens included), so someone
-  sniffing the same Wi-Fi could read it. Encrypting it (TLS with a key pinned at pairing) is the next step.
+- **Updates.** Every release's `SHA256SUMS` is signed with an offline release key that GitHub never sees; the PC and the
+  phone install nothing that signed list doesn't vouch for, so a hijacked GitHub account can't ship an update. The
+  phone app is signed only with Flick's own key (Android 9 and newer), which Android checks too. CI pins every
+  downloaded tool by checksum and the checkout action by commit.
 
 ## Building by hand
 
 Both builds run on Linux.
 
-- `./build_apk.sh <versionCode> <versionName>` builds the phone app (javac, dx or d8, aapt2, uber-apk-signer). It needs
-  the private signing key described in `signing/README.md`. `pc/phone-app/Flick.apk` isn't committed: build it, or take
-  it from the latest release, before running `./build_win.sh`.
+- `./build_apk.sh <versionCode> <versionName>` builds the phone app (javac, dx or d8, aapt2, and `FlickSign.java`
+  with uber-apk-signer's apksig). It needs the private signing key described in `signing/README.md`.
+  `pc/phone-app/Flick.apk` isn't committed: build it, or take it from the latest release, before `./build_win.sh`.
 - `./build_win.sh` builds `build/win/Flick-Setup.exe` and the update bundle (Electron for Windows, rcedit through Wine,
   NSIS, and a MinGW C compiler for the Bluetooth helper). Tool paths can be set with environment variables; the
   workflow shows how.

@@ -1,6 +1,7 @@
 #!/bin/bash
-# Checks that an APK is signed the way Flick's phone app must be (see README.md here): the old public key for
-# Android 7-12, handing over through the v3 rotation lineage to Flick's private key, which Android 13+ requires.
+# Checks that an APK is signed the way Flick's phone app must be (see README.md here): APK Signature Scheme v3 only,
+# with Flick's private key and the rotation lineage from the old public key, and minSdk 28 (Android 9), the oldest
+# Android that checks v3. expected-signature.txt holds the exact layout, minSdk included.
 # usage: signing/verify_apk.sh <apk> [uber-apk-signer.jar]
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -12,4 +13,4 @@ if [ "$got" != "$(cat "$HERE/expected-signature.txt")" ]; then
   echo "$got"
   exit 1
 fi
-echo "signature ok: Flick's key (49:DE:70:47...FD:2A), rotated from the old key (1E:08:A9:03...59:53)"
+echo "signature ok: Flick's key (49:DE:70:47...FD:2A), rotated from the old key (1E:08:A9:03...59:53); Android 9+ (minSdk 28)"

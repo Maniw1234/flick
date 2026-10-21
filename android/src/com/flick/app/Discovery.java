@@ -180,6 +180,7 @@ final class Discovery implements Runnable {
             pc.put("port", m.optInt("port", 47860));
             pc.put("known", m.optBoolean("known", false));
             pc.put("v", m.optInt("v", 1));
+            pc.put("tls", m.optInt("tls", 0));      // 1: the PC takes encrypted links (protocol 4)
             pc.put("via", linkFor(p.getAddress()));
             pc.put("seen", SystemClock.elapsedRealtime());
             // one entry per PC and address: the same PC can be reachable over a cable and Wi-Fi at once
@@ -214,6 +215,7 @@ final class Discovery implements Runnable {
                 o.put("port", pc.optInt("port"));
                 o.put("known", pc.optBoolean("known"));
                 o.put("v", pc.optInt("v", 1));
+                o.put("tls", pc.optInt("tls", 0));
                 o.put("via", pc.optString("via", "wifi"));
                 o.put("links", links.get(pc.optString("id")));
                 a.put(o);

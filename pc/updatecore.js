@@ -10,6 +10,11 @@ const MAX_BUNDLE = 80 * 1024 * 1024;       // a whole app bundle, zipped
 const MAX_ENTRY = 120 * 1024 * 1024;       // one unpacked file
 const MAX_FILES = 2000;
 
+// Flick's offline release keys (ECDSA P-256, SubjectPublicKeyInfo DER in base64). Every release's SHA256SUMS is signed
+// with one of them (signing/sign_release.js) and GitHub never sees the private key, so whoever controls the GitHub
+// account still can't ship an update. A list, so a new key can be added here before the old one is retired.
+const RELEASE_KEYS = ['MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEUGJiEHyLcmPkuREqLXb7MLtKMKoRBQUNuKb8Gjcw7tIMuDVr0cRSM2Xjpu3SWDM4vdpGOJXnYjVG5Tin5P1DZA=='];
+
 /** Where downloaded app updates live: %LOCALAPPDATA%\Flick\app on Windows (no admin rights needed). */
 function updatesRoot() {
   if (process.env.FLICK_UPDATES_DIR) return process.env.FLICK_UPDATES_DIR;
@@ -48,6 +53,53 @@ function writeCurrent(root, c) {
 }
 
 function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
+
+/** What a release signature covers: this header naming the version (like "1.9.0"), then SHA256SUMS byte for byte. */
+function releaseMessage(version, sums) {
+  return Buffer.concat([Buffer.from('flick-release-v1\nversion ' + version + '\n', 'utf8'), Buffer.from(sums)]);
+}
+
+/** true when sig (the SHA256SUMS.sig asset: base64 DER ECDSA/SHA-256) signs this version's SHA256SUMS with a trusted key. */
+function verifyRelease(version, sums, sig, keys) {
+  if (!parseVersion(version) || String(version).startsWith('v') || sums == null || typeof sig !== 'string') return false;
+  const der = Buffer.from(sig.trim(), 'base64');
+  const msg = releaseMessage(version, sums);
+  for (const k of keys || RELEASE_KEYS) {
+    try {
+      const key = crypto.createPublicKey({ key: Buffer.from(k, 'base64'), format: 'der', type: 'spki' });
+      if (key.asymmetricKeyType === 'ec' && crypto.verify('sha256', msg, { key, dsaEncoding: 'der' }, der)) return true;
+    } catch (e) { /* not a usable key or signature: try the next key */ }
+  }
+  return false;
+}
+
+/** SHA256SUMS (sha256sum's format) as a Map name -> lowercase hex; null when a line doesn't parse or a name repeats. */
+function parseSums(text) {
+  const out = new Map();
+  for (const line of String(text).split('\n')) {
+    if (!line.trim()) continue;
+    const m = /^([0-9a-fA-F]{64}) [ *](\S.*?)\r?$/.exec(line);
+    if (!m || out.has(m[2])) return null;
+    out.set(m[2], m[1].toLowerCase());
+  }
+  return out;
+}
+
+/** The signed SHA256SUMS kept in dir, when it is valid for this version: { sums (Buffer), sig, list } or null. */
+function readProof(dir, version, keys) {
+  try {
+    const sums = fs.readFileSync(path.join(dir, 'SHA256SUMS'));
+    const sig = fs.readFileSync(path.join(dir, 'SHA256SUMS.sig'), 'utf8');
+    const list = verifyRelease(version, sums, sig, keys) ? parseSums(sums.toString('utf8')) : null;
+    return list ? { sums, sig, list } : null;
+  } catch (e) { return null; }
+}
+
+function writeProof(dir, p) {
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'SHA256SUMS'), p.sums);
+  fs.writeFileSync(path.join(dir, 'SHA256SUMS.sig'), p.sig);
+}
 
 /** Every file in a zip, as [{ name, data }]; refuses anything that could land outside the target folder. */
 function unzipAll(buf) {
@@ -122,4 +174,7 @@ function pruneUpdates(root, keep) {
   }
 }
 
-module.exports = { updatesRoot, parseVersion, newer, readCurrent, writeCurrent, sha256, unzipAll, installBundle, pruneUpdates };
+module.exports = {
+  updatesRoot, parseVersion, newer, readCurrent, writeCurrent, sha256, unzipAll, installBundle, pruneUpdates,
+  RELEASE_KEYS, releaseMessage, verifyRelease, parseSums, readProof, writeProof,
+};

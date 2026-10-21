@@ -70,6 +70,10 @@ img { -webkit-user-drag: none; user-select: none; pointer-events: none; }
 .pfoot { position: absolute; left: 0; right: 0; bottom: calc(var(--bottom) + 22px); text-align: center; padding: 0 24px; }
 .phint { color: #8e8e93; font-size: 13px; line-height: 1.45; min-height: 19px; margin-bottom: 14px; }
 .phint b { color: #e5e5ea; }
+.phint b.pcode { display: inline-block; font-size: 22px; font-weight: 700; letter-spacing: .06em; font-variant-numeric: tabular-nums; color: #fff; margin: 0 2px; vertical-align: -2px; }
+.phint a { color: #e5e5ea; text-decoration: underline; }
+.phint button.pok { margin-top: 10px; padding: 10px 26px; border-radius: 20px; background: #fff; color: #1c1c1e; font-size: 15px; font-weight: 650; }
+.phint button.pok:active { background: #d1d1d6; }
 .plinks { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
 .plink { padding: 9px 14px; border-radius: 18px; background: rgba(255,255,255,0.08); color: #d1d1d6; font-size: 13px; font-weight: 550; }
 .plink:active { background: rgba(255,255,255,0.16); }

@@ -58,13 +58,17 @@ final class Bridge {
         } catch (Throwable e) { return "{}"; }
     }
 
+    /** sums + sig: the SHA256SUMS and SHA256SUMS.sig of the Flick release the update comes from (refused without). */
     @JavascriptInterface
-    public void updateDownload(String url, String code, String size, String sha256) {
-        try { a.updater().download(url, Long.parseLong(code), Long.parseLong(size), sha256); }
+    public void updateDownload(String url, String code, String size, String sha256, String sums, String sig) {
+        try { a.updater().download(url, Long.parseLong(code), Long.parseLong(size), sha256, sums, sig); }
         catch (Throwable e) { a.updater().fail("bad request"); }
     }
 
-    /** Asks GitHub for the latest Flick release; answers with a "gh" event carrying GitHub's JSON (the page picks the APK). */
+    /**
+     * Asks GitHub for the latest Flick release; answers with a "gh" event carrying GitHub's JSON (the page picks the
+     * APK) and, when the release has them, its SHA256SUMS and SHA256SUMS.sig ("sums", "sig").
+     */
     @JavascriptInterface
     public void updateCheckGitHub() {
         new Thread(new Runnable() {
@@ -74,9 +78,13 @@ final class Bridge {
                 try {
                     o.put("t", "gh");
                     try {
-                        o.put("body", UpdateFetch.getText(GITHUB_LATEST, 2 * 1024 * 1024));
+                        String body = UpdateFetch.getText(GITHUB_LATEST, 2 * 1024 * 1024);
+                        o.put("body", body);
+                        String[] signed = UpdateFetch.releaseSums(body, GITHUB_DL);
+                        if (signed != null) { o.put("sums", signed[0]); o.put("sig", signed[1]); }
                         o.put("ok", true);
                     } catch (Throwable e) {
+                        o.remove("body");
                         o.put("ok", false);
                         o.put("why", String.valueOf(e.getMessage()));
                     }
@@ -87,6 +95,7 @@ final class Bridge {
     }
 
     static final String GITHUB_LATEST = "https://api.github.com/repos/Maniw1234/flick/releases/latest";
+    static final String GITHUB_DL = "https://github.com/Maniw1234/flick/releases/download/";
 
     // ---------------- Bluetooth (when there's no network) ----------------
     @JavascriptInterface public void btPermission() { a.runOnUiThread(new Runnable() { @Override public void run() { a.askBluetooth(); } }); }
@@ -119,6 +128,80 @@ final class Bridge {
     @JavascriptInterface
     public void askStorage() {
         a.runOnUiThread(new Runnable() { @Override public void run() { a.askStorage(); } });
+    }
+
+    // ---------------- encrypted links to the PC (see TlsProxy) ----------------
+    // its own threads: opening a link mustn't wait behind a slow folder listing on io()
+    private static final ExecutorService LINKS = Transfers.pool("flick-link", 2);
+
+    /**
+     * A local port that leads to the PC over TLS. Answers as an event: {ok, port, fp} or {ok:false, why} with why
+     * "pin" (the PC's certificate isn't the pinned one; fp = the one seen), "tls" or "unreachable".
+     */
+    @JavascriptInterface
+    public void tlsOpen(final String req, final String host, final int port, final String pin) {
+        LINKS.execute(new Runnable() {
+            @Override
+            public void run() {
+                JSONObject r = new JSONObject();
+                try {
+                    try {
+                        TlsProxy p = TlsProxy.open(host, port, pin);
+                        r.put("ok", true);
+                        r.put("port", p.localPort());
+                        r.put("fp", p.fp);
+                    } catch (TlsProxy.PinMismatch e) {
+                        r.put("ok", false); r.put("why", "pin"); r.put("fp", e.seen == null ? "" : e.seen);
+                    } catch (javax.net.ssl.SSLException e) {
+                        r.put("ok", false); r.put("why", "tls");
+                    } catch (Throwable e) {
+                        r.put("ok", false); r.put("why", "unreachable");
+                    }
+                } catch (Throwable e) { /* JSON can't fail here */ }
+                a.result(req, r.toString());
+            }
+        });
+    }
+
+    @JavascriptInterface public void tlsClose(int port) { TlsProxy.close(port); }
+
+    /**
+     * Sign-in proof for the PC pcId: HMAC-SHA256 with the token this phone holds for it, over both random numbers
+     * and the link's identity (the certificate fingerprint, or "bluetooth"). role "pc" checks the PC's proof,
+     * "phone" makes this phone's. "" when there's no token.
+     */
+    @JavascriptInterface
+    public String authProof(String pcId, String role, String nonceP, String nonceS, String chan) {
+        if (!"pc".equals(role) && !"phone".equals(role)) return "";
+        String token = prefs.getString("p:token:" + pcId, "");
+        if (token == null || token.length() == 0) return "";
+        try {
+            javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+            mac.init(new javax.crypto.spec.SecretKeySpec(token.getBytes("UTF-8"), "HmacSHA256"));
+            String msg = "flick-auth-v1|" + role + "|" + nonceP + "|" + nonceS + "|" + chan + "|" + a.deviceId() + "|" + pcId;
+            return hex(mac.doFinal(msg.getBytes("UTF-8")));
+        } catch (Throwable e) { return ""; }
+    }
+
+    /** The pairing code both screens show (see the PC's server.js, pairCode). */
+    @JavascriptInterface
+    public String pairCode(String chan, String nonceP, String nonceS) {
+        String h = sha256("flick-pair-v1|" + chan + "|" + nonceP + "|" + nonceS);
+        if (h.length() < 8) return "";
+        long n = Long.parseLong(h.substring(0, 8), 16) % 1000000L;
+        return String.format(java.util.Locale.US, "%06d", n);
+    }
+
+    @JavascriptInterface
+    public String sha256(String s) {
+        try { return hex(java.security.MessageDigest.getInstance("SHA-256").digest(s.getBytes("UTF-8"))); }
+        catch (Throwable e) { return ""; }
+    }
+
+    private static String hex(byte[] b) {
+        StringBuilder s = new StringBuilder(b.length * 2);
+        for (byte x : b) s.append(String.format("%02x", x));
+        return s.toString();
     }
 
     @JavascriptInterface
