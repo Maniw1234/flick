@@ -50,12 +50,21 @@ function readVarint(buf, off) {
   return [v, off];
 }
 
+// field number -> [name, def], built once per schema
+const INDEX = new WeakMap();
+function indexOf(schema) {
+  let byNum = INDEX.get(schema);
+  if (!byNum) { byNum = {}; for (const [name, def] of Object.entries(schema)) byNum[def[0]] = [name, def]; INDEX.set(schema, byNum); }
+  return byNum;
+}
+
+// Zero-copy: 'bytes' fields and nested messages are views into `buf` (code that keeps bytes beyond the life of the
+// frame copies them itself, e.g. quickshare.js's clientInitRaw).
 function decode(schema, buf) {
-  const byNum = {};
-  for (const [name, def] of Object.entries(schema)) byNum[def[0]] = [name, def];
+  const byNum = indexOf(schema);
   const out = {};
   let off = 0;
-  buf = Buffer.from(buf);
+  if (!Buffer.isBuffer(buf)) buf = ArrayBuffer.isView(buf) ? Buffer.from(buf.buffer, buf.byteOffset, buf.byteLength) : Buffer.from(buf);
   while (off < buf.length) {
     let k;
     [k, off] = readVarint(buf, off);
@@ -84,8 +93,8 @@ function decode(schema, buf) {
       case 'i64': v = BigInt.asIntN(64, raw); break;
       case 'u64': v = BigInt.asUintN(64, raw); break;
       case 'float': v = raw.readFloatLE(0); break;
-      case 'bytes': v = Buffer.from(raw); break;
-      case 'string': v = Buffer.from(raw).toString('utf8'); break;
+      case 'bytes': v = raw; break;
+      case 'string': v = raw.toString('utf8'); break;
       case 'msg': v = decode(sub, raw); break;
       default: continue;
     }

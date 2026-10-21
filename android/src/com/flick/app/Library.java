@@ -27,6 +27,7 @@ import android.webkit.WebResourceResponse;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -37,6 +38,8 @@ import java.io.OutputStream;
 import java.nio.charset.Charset;
 import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -124,14 +127,42 @@ public final class Library {
         return o == null ? null : fileOf(o);
     }
 
-    public synchronized boolean remove(String id) {
-        JSONObject o = find(id);
-        if (o == null) return false;
-        items.remove(o);
-        save();
-        deleteTree(new File(root, id));
-        new File(thumbs, id + ".jpg").delete();
-        return true;
+    public boolean remove(String id) {
+        return removeAll(Collections.singletonList(id)) > 0;
+    }
+
+    /** Several items at once, with one rewrite of lib.json for all of them. Returns how many were removed. */
+    public int removeAll(Collection<String> ids) {
+        ArrayList<String> gone = new ArrayList<String>();
+        synchronized (this) {
+            for (String id : ids) {
+                JSONObject o = find(id);
+                if (o == null) continue;
+                items.remove(o);
+                gone.add(o.optString("id"));
+            }
+            if (gone.isEmpty()) return 0;
+            save();
+        }
+        for (String id : gone) {
+            deleteTree(new File(root, id));
+            new File(thumbs, id + ".jpg").delete();
+        }
+        return gone.size();
+    }
+
+    /** Import folders a killed app left half-written: still marked as importing a day later, and not on the shelf. */
+    void sweep() {
+        File[] dirs = root.listFiles();
+        if (dirs == null) return;
+        long old = System.currentTimeMillis() - 24L * 60 * 60 * 1000;
+        for (File d : dirs) {
+            File mark = new File(d, IMPORTING);
+            if (!mark.isFile() || mark.lastModified() >= old) continue;
+            if (find(d.getName()) != null) { mark.delete(); continue; }   // it did make it onto the shelf
+            deleteTree(d);
+            new File(thumbs, d.getName() + ".jpg").delete();
+        }
     }
 
     public String thumbBase64(String id) {
@@ -190,14 +221,20 @@ public final class Library {
         return importStream(new java.io.ByteArrayInputStream(text.getBytes("UTF-8")), name, "text/plain", null);
     }
 
+    /** In lib/<id>/ while the file is still arriving (sanitized names never start with a dot, so it can't clash). */
+    static final String IMPORTING = ".importing";
+
     public JSONObject importStream(InputStream in, String name, String mime, Progress p) throws IOException {
         String id = newId();
         File dir = new File(root, id);
         dir.mkdirs();
+        File mark = new File(dir, IMPORTING);
+        try { mark.createNewFile(); } catch (IOException e) { /* only the clean-up after a crash needs it */ }
         String safe = sanitize(name);
         File f = new File(dir, safe);
         long n;
-        OutputStream out = new FileOutputStream(f);
+        // network reads come in pieces of up to 8 KB on Android: gather 256 KB per write
+        OutputStream out = new BufferedOutputStream(new FileOutputStream(f), 256 * 1024);
         try {
             byte[] buf = new byte[128 * 1024];
             n = 0;
@@ -207,12 +244,12 @@ public final class Library {
                 n += r;
                 if (p != null && !p.onBytes(n)) throw new IOException("aborted");
             }
+            out.close();                                   // flushes; a failure here cleans up like any other
         } catch (IOException e) {
-            out.close();
+            try { out.close(); } catch (IOException x) { /* already failing */ }
             deleteTree(dir);
             throw e;
         }
-        out.close();
         String ext = extOf(safe);
         if (mime == null || mime.length() == 0 || "application/octet-stream".equals(mime)) {
             String g = ext.length() > 0 ? MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) : null;
@@ -233,6 +270,7 @@ public final class Library {
             items.add(0, o);
             save();
         }
+        mark.delete();
         return publicJson(o);
     }
 
@@ -250,9 +288,35 @@ public final class Library {
         n = n.replaceAll("[\\\\/:*?\"<>|\\u0000-\\u001f]", "_").trim();
         while (n.startsWith(".")) n = n.substring(1);
         if (n.length() == 0) n = "file";
-        if (n.length() > 150) {
-            String e = extOf(n);
-            n = n.substring(0, 150 - e.length() - 1) + (e.length() > 0 ? "." + e : "");
+        // At most 150 characters and 237 bytes (file systems allow 255 bytes per name; this leaves room for " (2)" and
+        // the part file's name). The extension stays; a "dot" far from the end (a long title like "Notes v2.0 - …")
+        // is not one.
+        if (n.length() > 150 || utf8(n) > 237) {
+            int dot = n.lastIndexOf('.');
+            String e = dot > 0 && dot < n.length() - 1 && n.length() - dot <= 17 ? n.substring(dot) : "";
+            String base = cut(n.substring(0, n.length() - e.length()), 150 - e.length());
+            while (base.length() > 1 && utf8(base) + utf8(e) > 237) base = cut(base, base.length() - 1);
+            n = base + e;
+        }
+        return n;
+    }
+
+    /** s shortened to max chars, never between the two halves of a surrogate pair (an emoji). */
+    private static String cut(String s, int max) {
+        if (s.length() <= max) return s;
+        int end = Math.max(0, max);
+        if (end > 0 && Character.isHighSurrogate(s.charAt(end - 1))) end--;
+        return s.substring(0, end);
+    }
+
+    private static int utf8(String s) {
+        int n = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < 0x80) n += 1;
+            else if (c < 0x800) n += 2;
+            else if (Character.isHighSurrogate(c) && i + 1 < s.length() && Character.isLowSurrogate(s.charAt(i + 1))) { n += 4; i++; }
+            else n += 3;
         }
         return n;
     }
@@ -391,11 +455,31 @@ public final class Library {
         MediaMetadataRetriever r = new MediaMetadataRetriever();
         try {
             r.setDataSource(f.getPath());
-            Bitmap b = r.getFrameAtTime(400000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
-            if (b == null) b = r.getFrameAtTime();
+            Bitmap b;
+            if (Build.VERSION.SDK_INT >= 27) {
+                // a thumbnail-sized frame, not a full-resolution one (a 4K frame alone is 33 MB)
+                b = Api27.frame(r, 400000, max);
+                if (b == null) b = Api27.frame(r, -1, max);
+            } else {
+                b = r.getFrameAtTime(400000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+                if (b == null) b = r.getFrameAtTime();
+            }
             return scaleTo(b, max);
         } catch (Throwable e) { return null; }
         finally { try { r.release(); } catch (Throwable e) { /* ignore */ } }
+    }
+
+    @TargetApi(27)
+    static final class Api27 {
+        static Bitmap frame(MediaMetadataRetriever r, long us, int max) {
+            int w = 0, h = 0;
+            try {
+                w = Integer.parseInt(r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH));
+                h = Integer.parseInt(r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT));
+            } catch (Throwable e) { /* unknown size: let it scale */ }
+            if (w > 0 && h > 0 && Math.max(w, h) <= max) return r.getFrameAtTime(us, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);   // small already
+            return r.getScaledFrameAtTime(us, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, max, max);
+        }
     }
 
     static Bitmap albumArt(File f, int max) {

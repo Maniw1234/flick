@@ -16,6 +16,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -81,7 +82,10 @@ final class Files {
         return Library.kindOf(mime, e);
     }
 
-    static JSONObject fileJson(File f, long[] media) {
+    static JSONObject fileJson(File f, long[] media) { return fileJson(f, media, f.lastModified()); }
+
+    /** mtime: f.lastModified(), when the caller already has it (each call is a trip to the file system). */
+    static JSONObject fileJson(File f, long[] media, long mtime) {
         JSONObject o = new JSONObject();
         try {
             String name = f.getName();
@@ -90,13 +94,14 @@ final class Files {
             o.put("path", f.getPath());
             o.put("name", name);
             o.put("size", f.length());
-            o.put("mtime", f.lastModified());
-            o.put("added", f.lastModified());
+            o.put("mtime", mtime);
+            o.put("added", mtime);
             o.put("mime", mime);
             o.put("ext", extOf(name));
             o.put("kind", kindOf(name, mime));
             if (media != null) {
                 o.put("mid", media[0]);
+                if (media.length > 5 && media[5] > 0) o.put("mt", media[5]);   // MediaStore type (1 image, 3 video), for its thumbnails
                 long w = media[1], h = media[2];
                 if (media[3] == 90 || media[3] == 270) { long t = w; w = h; h = t; }
                 if (w > 0 && h > 0) { o.put("w", w); o.put("h", h); }
@@ -110,7 +115,7 @@ final class Files {
         String[] k = d.list();
         if (k == null) return 0;
         int n = 0;
-        for (String s : k) if (!s.startsWith(".")) n++;
+        for (String s : k) if (!s.startsWith(".") && !s.endsWith(PART)) n++;   // as listDir shows them
         return n;
     }
 
@@ -138,7 +143,7 @@ final class Files {
             if (kids != null) {
                 ArrayList<File> dirs = new ArrayList<File>(), files = new ArrayList<File>();
                 for (File k : kids) {
-                    if (k.getName().startsWith(".")) continue;
+                    if (k.getName().startsWith(".") || k.getName().endsWith(PART)) continue;   // hidden, or a download still arriving
                     if (k.isDirectory()) dirs.add(k); else files.add(k);
                 }
                 Collections.sort(dirs, new Comparator<File>() {
@@ -151,7 +156,7 @@ final class Files {
                 });
                 Map<String, long[]> media = files.isEmpty() ? new HashMap<String, long[]>() : mediaInDir(c, d);
                 for (File k : dirs) items.put(dirJson(k));
-                for (File f : files) items.put(fileJson(f, media.get(f.getPath())));
+                for (File f : files) items.put(fileJson(f, media.get(f.getPath()), mt.get(f)));
             }
             boolean isRoot = d.getCanonicalPath().equals(root().getCanonicalPath());
             out.put("path", d.getPath());
@@ -286,17 +291,75 @@ final class Files {
         return d;
     }
 
-    static File uniqueIn(File dir, String name) {
-        String safe = Library.sanitize(name);
-        File f = new File(dir, safe);
-        if (!f.exists()) return f;
-        String e = extOf(safe);
-        String base = e.length() > 0 ? safe.substring(0, safe.length() - e.length() - 1) : safe;
-        for (int i = 2; i < 10000; i++) {
-            f = new File(dir, base + " (" + i + ")" + (e.length() > 0 ? "." + e : ""));
-            if (!f.exists()) return f;
+    // ------------------------------------------------------------ files arriving from the PC
+    // Two files with the same name can arrive at once (two folders on the PC that each hold IMG_0001.jpg). A name is
+    // chosen and claimed in one step, under one lock for the whole app: claimed means its part file exists, which the
+    // next download sees. The part file is hidden (".IMG_0001.jpg.flickpart") until the file is complete; then it is
+    // renamed, under the same lock and never over an existing file.
+    static final String PART = ".flickpart";
+    private static final Object NAMES = new Object();
+
+    /** A file being received: written to part, then finish() gives it its name. */
+    static final class Incoming {
+        private final File dir;
+        private final String name;           // the (sanitized) name asked for
+        private final File dest;
+        final File part;
+
+        private Incoming(File dir, String name, File dest, File part) { this.dir = dir; this.name = name; this.dest = dest; this.part = part; }
+
+        /** Renames the complete part file; if its name got taken meanwhile, to the next free one. Returns the file. */
+        File finish() throws IOException {
+            synchronized (NAMES) {
+                File to = dest.exists() ? free(dir, name, 2) : dest;
+                if (to == null || !part.renameTo(to)) { part.delete(); throw new IOException("rename failed"); }
+                return to;
+            }
         }
-        return new File(dir, System.currentTimeMillis() + "_" + safe);
+
+        void cancel() { part.delete(); }
+    }
+
+    /** The hidden file a download is written to before it is complete. */
+    static File partOf(File f) { return new File(f.getParentFile(), "." + f.getName() + PART); }
+
+    /** Claims a name in dir that neither exists nor is being downloaded to, by creating its part file. */
+    static Incoming reserve(File dir, String name) throws IOException {
+        String safe = Library.sanitize(name);
+        synchronized (NAMES) {
+            for (int i = 1; i < 10000; i++) {
+                File f = new File(dir, numbered(safe, i)), p = partOf(f);
+                if (!f.exists() && p.createNewFile()) return new Incoming(dir, safe, f, p);
+            }
+            File f = new File(dir, System.currentTimeMillis() + "_" + safe), p = partOf(f);
+            if (!p.createNewFile()) throw new IOException("no free name");
+            return new Incoming(dir, safe, f, p);
+        }
+    }
+
+    /** The first of "name.ext", "name (2).ext", "name (3).ext"… from number `from` on that is free (null: none). */
+    private static File free(File dir, String safe, int from) {
+        for (int i = Math.max(1, from); i < 10000; i++) {
+            File f = new File(dir, numbered(safe, i));
+            if (!f.exists() && !partOf(f).exists()) return f;
+        }
+        return null;
+    }
+
+    /** "name.ext" (i = 1), "name (2).ext", "name (3).ext"… */
+    static String numbered(String safe, int i) {
+        if (i <= 1) return safe;
+        int e = extOf(safe).length();
+        return e > 0 ? safe.substring(0, safe.length() - e - 1) + " (" + i + ")" + safe.substring(safe.length() - e - 1)
+                : safe + " (" + i + ")";
+    }
+
+    /** Part files that a killed app or a crash left in Download/Flick (a day old: nothing still writes them). */
+    static void sweepParts() {
+        File[] fs = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Flick").listFiles();
+        if (fs == null) return;
+        long old = System.currentTimeMillis() - 24L * 60 * 60 * 1000;
+        for (File f : fs) if (f.getName().endsWith(PART) && f.isFile() && f.lastModified() < old) f.delete();
     }
 
     static String lower(String s) { return s == null ? "" : s.toLowerCase(Locale.US); }

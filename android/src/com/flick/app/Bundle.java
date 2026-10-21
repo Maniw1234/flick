@@ -8,6 +8,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
@@ -43,6 +44,37 @@ final class Bundle {
     private final Set<String> rootKeys = new HashSet<String>();
     long bytes = 0;
     int files = 0;
+    long manifestBytes = -1;        // a stream of a striped bundle announces the whole bundle's totals
+    int manifestFiles = -1;
+
+    /**
+     * The same bundle as k streams that can travel at once (each an ordinary bundle body): files are dealt out
+     * largest first to the stream with the fewest bytes so far, folders go with the first stream.
+     */
+    List<Bundle> split(int k) {
+        k = Math.max(1, Math.min(k, Math.max(1, files)));
+        List<Bundle> out = new ArrayList<Bundle>();
+        for (int i = 0; i < k; i++) {
+            Bundle b = new Bundle();
+            b.roots.addAll(roots);
+            b.manifestBytes = bytes;
+            b.manifestFiles = files;
+            out.add(b);
+        }
+        List<Entry> fs = new ArrayList<Entry>();
+        for (Entry e : entries) { if (e.dir) out.get(0).entries.add(e); else fs.add(e); }
+        Collections.sort(fs, new Comparator<Entry>() {
+            @Override public int compare(Entry a, Entry b) { return a.size == b.size ? 0 : (a.size > b.size ? -1 : 1); }
+        });
+        for (Entry e : fs) {
+            Bundle least = out.get(0);
+            for (Bundle b : out) if (b.bytes < least.bytes) least = b;
+            least.entries.add(e);
+            least.bytes += e.size;
+            least.files++;
+        }
+        return out;
+    }
 
     /** A top-level file or folder; folders go in whole, skipping hidden names the way the file browser does. */
     void add(File f, String name, AtomicBoolean abort) throws IOException {
@@ -88,7 +120,8 @@ final class Bundle {
     void write(OutputStream out, AtomicBoolean abort, Progress prog) throws IOException {
         DataOutputStream o = new DataOutputStream(out);
         o.write("FLKB1\n".getBytes("UTF-8"));
-        StringBuilder m = new StringBuilder("{\"v\":1,\"files\":").append(files).append(",\"bytes\":").append(bytes).append(",\"roots\":[");
+        StringBuilder m = new StringBuilder("{\"v\":1,\"files\":").append(manifestFiles >= 0 ? manifestFiles : files)
+                .append(",\"bytes\":").append(manifestBytes >= 0 ? manifestBytes : bytes).append(",\"roots\":[");
         for (int i = 0; i < roots.size(); i++) { if (i > 0) m.append(','); m.append(quote(roots.get(i))); }
         block(o, m.append("]}").toString());
         byte[] buf = new byte[256 * 1024];

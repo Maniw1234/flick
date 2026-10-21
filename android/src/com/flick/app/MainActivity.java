@@ -121,8 +121,17 @@ public class MainActivity extends Activity {
         });
         setContentView(web);
         web.loadUrl("file:///android_asset/www/index.html");
-        handleIntent(getIntent());
-        io().execute(new Runnable() { @Override public void run() { Updater.cleanupInstalled(getApplicationContext()); } });
+        // a share is handled once: not again when Android restores the activity after killing the app (state != null)
+        if (state == null) handleIntent(getIntent());
+        io().execute(new Runnable() {
+            @Override
+            public void run() {
+                try { Updater.cleanupInstalled(getApplicationContext()); } catch (Throwable e) { /* ignore */ }
+                // what a killed app left half-done: downloads in Download/Flick, imports onto the shelf
+                try { if (Files.granted(getApplicationContext())) Files.sweepParts(); } catch (Throwable e) { /* ignore */ }
+                try { Library.get(getApplicationContext()).sweep(); } catch (Throwable e) { /* ignore */ }
+            }
+        });
     }
 
     @Override
@@ -156,6 +165,11 @@ public class MainActivity extends Activity {
         if (discovery != null) discovery.setActive(false);
         if (btLink != null) btLink.setWanted(false);
         if (web != null) { web.destroy(); web = null; }
+        // this activity's own threads: work already handed to them finishes, nothing new starts
+        synchronized (this) {
+            if (ioPool != null) ioPool.shutdown();
+            if (transfers != null) transfers.shutdown();
+        }
         super.onDestroy();
     }
 
@@ -447,7 +461,8 @@ public class MainActivity extends Activity {
 
     @SuppressWarnings("deprecation")
     private void handleIntent(Intent in) {
-        if (in == null) return;
+        // reopened from Recents, Android hands back the intent the app was first started with: an old share
+        if (in == null || (in.getFlags() & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) return;
         String act = in.getAction();
         ArrayList<Uri> uris = new ArrayList<Uri>();
         String text = null;

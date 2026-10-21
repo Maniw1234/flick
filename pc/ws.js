@@ -4,6 +4,9 @@ const crypto = require('crypto');
 const { EventEmitter } = require('events');
 
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+// Flick only sends small JSON control frames over the socket (files go over HTTP), so a few MB is already generous.
+// Caps stop a hostile peer from making us buffer without limit (a single giant frame, or endless unfinished fragments).
+const MAX_MESSAGE = 4 * 1024 * 1024;
 
 class WSConnection extends EventEmitter {
   constructor(socket, req) {
@@ -12,7 +15,10 @@ class WSConnection extends EventEmitter {
     this.req = req;
     this.open = true;
     this._buf = Buffer.alloc(0);
-    this._frag = null; // { opcode, chunks }
+    this._parts = [];   // chunks that arrived while a frame is still incomplete (joined once it's all there)
+    this._have = 0;
+    this._need = 0;     // bytes the frame being received needs in total (0 = unknown yet)
+    this._frag = null; // { opcode, chunks, len }
     this._lastPong = Date.now();
     socket.setNoDelay(true);
     socket.setKeepAlive(true, 10000);
@@ -36,7 +42,11 @@ class WSConnection extends EventEmitter {
   }
 
   _onData(d) {
+    // a big frame trickling in must not be re-copied on every packet: collect, and join once it's complete
+    if (this._need && this._buf.length + this._have + d.length < this._need) { this._parts.push(d); this._have += d.length; return; }
+    if (this._parts.length) { this._parts.push(d); d = Buffer.concat(this._parts); this._parts = []; this._have = 0; }
     this._buf = this._buf.length ? Buffer.concat([this._buf, d]) : d;
+    this._need = 0;
     while (this.open) {
       const b = this._buf;
       if (b.length < 2) return;
@@ -52,14 +62,16 @@ class WSConnection extends EventEmitter {
         if (b.length < 10) return;
         const hi = b.readUInt32BE(2), lo = b.readUInt32BE(6);
         len = hi * 4294967296 + lo; off = 10;
-        if (len > 64 * 1024 * 1024) { this.close(); return; }
       }
+      if (len > MAX_MESSAGE) { this.close(); return; }
+      // a fragmented message is the sum of its pieces; refuse one that grows past the cap before it finishes
+      if (opcode === 0x0 && this._frag && this._frag.len + len > MAX_MESSAGE) { this.close(); return; }
       let mask = null;
       if (masked) {
         if (b.length < off + 4) return;
         mask = b.slice(off, off + 4); off += 4;
       }
-      if (b.length < off + len) return;
+      if (b.length < off + len) { this._need = off + len; return; }
       let payload = b.slice(off, off + len);
       if (mask) {
         payload = Buffer.from(payload);
@@ -82,6 +94,7 @@ class WSConnection extends EventEmitter {
     if (opcode === 0x0) { // continuation
       if (!this._frag) return;
       this._frag.chunks.push(payload);
+      this._frag.len += payload.length;
       if (fin) {
         const all = Buffer.concat(this._frag.chunks);
         const op = this._frag.opcode;
@@ -90,7 +103,7 @@ class WSConnection extends EventEmitter {
       }
       return;
     }
-    if (!fin) { this._frag = { opcode, chunks: [payload] }; return; }
+    if (!fin) { this._frag = { opcode, chunks: [payload], len: payload.length }; return; }
     this._deliver(opcode, payload);
   }
 

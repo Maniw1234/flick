@@ -12,6 +12,13 @@ const { EventEmitter } = require('events');
 const MAGIC = Buffer.from('FLKMUX1\n');
 const T = { OPEN: 1, DATA: 2, FIN: 3, RST: 4, PING: 5, PONG: 6 };
 const MAX = 64 * 1024;
+// One stream whose reader is briefly slow (a disk or antivirus stall) mustn't freeze the others: each stream may run
+// ahead by this much before the shared link stops reading. Bluetooth moves ~0.1-0.3 MB/s, so this is many seconds.
+const STREAM_CAP = 8 * 1024 * 1024;
+// The phone gives up on a link whose pings go unanswered for 35 s, and a held-back link reads none; its last answer
+// may be 10 s old when the link is held back. So one stuck reader is reset well before that, costing its own stream,
+// not the whole link.
+let STUCK_MS = 20000;
 
 function frame(type, id, payload) {
   const p = payload || Buffer.alloc(0);
@@ -49,6 +56,7 @@ class MuxStream extends Duplex {
       if (!this.remoteDone || !this.writableEnded2) this.link._send(frame(T.RST, this.id), () => {});
     }
     this.link.streams.delete(this.id);
+    this.link._resume();          // if this stream was the one holding the link back, the others go on now
     cb(err);
   }
 }
@@ -71,7 +79,33 @@ class MuxLink extends EventEmitter {
     if (this.sock.write(b)) cb && process.nextTick(cb);
     else this.sock.once('drain', () => cb && cb());
   }
-  _resume() { if (this.paused) { this.paused = false; this.sock.resume(); } }
+  // A stream that has ended (or whose reader stopped asking) never calls _read() again, so while the link is held
+  // back it is also looked at a few times a second. A reader that takes nothing at all for STUCK_MS has stopped for
+  // good: that one stream is reset, so it can't freeze every other stream on the link.
+  _pause() {
+    if (this.paused) return;
+    this.paused = true; this.sock.pause();
+    this.overLen = Infinity; this.progressAt = Date.now();
+    this.pauseT = setInterval(() => this._check(), 200);
+  }
+  _check() {
+    if (!this.paused) return;
+    let over = 0;
+    for (const s of this.streams.values()) if (s.readableLength > STREAM_CAP) over += s.readableLength;
+    if (!over) { this._resume(); return; }
+    if (over < this.overLen) this.progressAt = Date.now();
+    this.overLen = over;
+    if (Date.now() - this.progressAt > STUCK_MS) {
+      for (const s of [...this.streams.values()]) if (s.readableLength > STREAM_CAP) s.destroy();
+      this._resume();
+    }
+  }
+  _resume() {
+    if (!this.paused || this.closed) return;
+    for (const s of this.streams.values()) if (s.readableLength > STREAM_CAP) return;   // still one too far behind
+    this.paused = false; clearInterval(this.pauseT); this.pauseT = null;
+    this.sock.resume();
+  }
   _data(d) {
     this.buf = this.buf.length ? Buffer.concat([this.buf, d]) : d;
     if (!this.ready) {
@@ -97,7 +131,7 @@ class MuxLink extends EventEmitter {
         if (!s && id) { const ns = new MuxStream(this, id); this.streams.set(id, ns); this.emit('stream', ns); }
         break;
       case T.DATA:
-        if (s && !s.remoteDone && !s.push(p)) { this.paused = true; this.sock.pause(); }
+        if (s && !s.remoteDone) { s.push(p); if (s.readableLength > STREAM_CAP) this._pause(); }
         break;
       case T.FIN:
         if (s && !s.remoteDone) { s.remoteDone = true; s.push(null); }
@@ -114,7 +148,8 @@ class MuxLink extends EventEmitter {
   _close() {
     if (this.closed) return;
     this.closed = true;
-    for (const s of this.streams.values()) s.destroy();
+    clearInterval(this.pauseT); this.pauseT = null;
+    for (const s of [...this.streams.values()]) s.destroy();
     this.streams.clear();
     this.emit('close');
   }
@@ -157,4 +192,4 @@ class MuxClient extends EventEmitter {
   }
 }
 
-module.exports = { MuxLink, MuxClient, MuxStream, MAGIC, T, frame };
+module.exports = { MuxLink, MuxClient, MuxStream, MAGIC, T, frame, STREAM_CAP, _setStuckMs: (ms) => { STUCK_MS = ms; } };

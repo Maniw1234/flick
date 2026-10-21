@@ -110,9 +110,9 @@ img { -webkit-user-drag: none; user-select: none; pointer-events: none; }
 @keyframes rot { to { transform: rotate(360deg); } }
 #scroller::-webkit-scrollbar { display: none; }
 #grid { position: relative; margin: 0; }
-.card { position: absolute; left: 0; top: 0; will-change: transform; contain: layout style; }
+.card { position: absolute; left: 0; top: 0; contain: layout style; }
 .card.anim { transition: transform .42s cubic-bezier(.2,.85,.25,1), opacity .3s ease; }
-.card .thumb { position: relative; border-radius: 14px; overflow: hidden; background: #1c1c1e; transform: translateZ(0); }
+.card .thumb { position: relative; border-radius: 14px; overflow: hidden; background: #1c1c1e; }
 .card .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; opacity: 0; transition: opacity .25s; }
 .card .thumb img.ok { opacity: 1; }
 .card .thumb.doc { background: #fbfbfd; }

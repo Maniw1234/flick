@@ -35,7 +35,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      # third-party code that runs with the signing secret in reach is pinned to an exact commit, not a movable tag
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
           fetch-depth: 0  # history and tags: to tell whether the phone app changed since the last release
 
@@ -60,11 +61,18 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends nsis wine64 xvfb zip unzip gcc-mingw-w64-x86-64 > /dev/null
           mkdir -p "$RUNNER_TEMP/tools" && cd "$RUNNER_TEMP/tools"
+          # every downloaded tool is checked against a known checksum before it touches the build
           EV=$(node -p "require('$GITHUB_WORKSPACE/pc/package.json').electronVersion")
+          ESHA=$(node -p "require('$GITHUB_WORKSPACE/pc/package.json').electronSha256 || ''")
+          [ -n "$ESHA" ] || { echo "::error::pc/package.json has no electronSha256 for Electron $EV"; exit 1; }
           curl -fsSL -o electron-win32-x64.zip "https://github.com/electron/electron/releases/download/v$EV/electron-v$EV-win32-x64.zip"
           curl -fsSL -o rcedit-x64.exe "https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe"
           curl -fsSL -o uber-apk-signer.jar "https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar"
-          echo "e1299fd6fcf4da527dd53735b56127e8ea922a321128123b9c32d619bba1d835  uber-apk-signer.jar" | sha256sum -c -
+          sha256sum -c - <<SUMS
+          $ESHA  electron-win32-x64.zip
+          3e7801db1a5edbec91b49a24a094aad776cb4515488ea5a4ca2289c400eade2a  rcedit-x64.exe
+          e1299fd6fcf4da527dd53735b56127e8ea922a321128123b9c32d619bba1d835  uber-apk-signer.jar
+          SUMS
 
       - name: Phone app (rebuilt and signed only if it changed since the last release)
         if: steps.v.outputs.new == 'true'
@@ -72,7 +80,8 @@ jobs:
           FLICK_SIGNING_KEY: ${{ secrets.FLICK_SIGNING_KEY }}
           SIGNER: ${{ runner.temp }}/tools/uber-apk-signer.jar
           FORCE_PHONE_BUILD: ${{ steps.v.outputs.check == 'true' && '1' || '0' }}
-        run: ci/phone_app.sh "${{ steps.v.outputs.version }}"
+          VERSION: ${{ steps.v.outputs.version }}
+        run: ci/phone_app.sh "$VERSION"
 
       - name: Build the Windows app, its update bundle and the installer
         if: steps.v.outputs.new == 'true'
@@ -83,8 +92,9 @@ jobs:
 
       - name: Publish the release
         if: steps.v.outputs.new == 'true' && steps.v.outputs.check != 'true'
+        env:
+          V: ${{ steps.v.outputs.version }}
         run: |
-          V="${{ steps.v.outputs.version }}"
           OUT=build/release && mkdir -p "$OUT"
           APKV=$(node -p "require('./pc/apkinfo').apkInfo('pc/phone-app/Flick.apk').name")
           cp build/win/Flick-Setup.exe "$OUT/Flick-Setup.exe"

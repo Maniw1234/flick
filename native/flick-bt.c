@@ -96,12 +96,22 @@ static DWORD WINAPI serve(LPVOID arg) {
     return 0;
 }
 
-static void accept_loop(SOCKET s, int bluetooth) {
+static int accept_loop(SOCKET s, int bluetooth) {
+    int fails = 0;
     for (;;) {
         SOCKADDR_STORAGE from;
         int fl = sizeof from;
         SOCKET p = accept(s, (struct sockaddr *)&from, &fl);
-        if (p == INVALID_SOCKET) { say("error accept %d", WSAGetLastError()); Sleep(500); continue; }
+        if (p == INVALID_SOCKET) {
+            int e = WSAGetLastError();
+            say("error accept %d", e);
+            /* the radio went away (turned off, dongle pulled): exit so Flick restarts us and the service is registered
+               again once it's back, instead of spinning here forever */
+            if (bluetooth && (e == WSAENETDOWN || e == WSAENOTSOCK || ++fails >= 20)) { say("no-radio"); return 3; }
+            Sleep(500);
+            continue;
+        }
+        fails = 0;
         Client *c = (Client *)calloc(1, sizeof(Client));
         if (!c) { closesocket(p); continue; }
         c->phone = p;
@@ -117,6 +127,7 @@ static void accept_loop(SOCKET s, int bluetooth) {
         HANDLE t = CreateThread(NULL, 0, serve, c, 0, NULL);
         if (t) CloseHandle(t); else { closesocket(p); free(c); }
     }
+    return 0;
 }
 
 static int run_bluetooth(void) {
@@ -126,6 +137,12 @@ static int run_bluetooth(void) {
     memset(&sa, 0, sizeof sa);
     sa.addressFamily = AF_BTH;
     sa.port = BT_PORT_ANY;
+    /* only paired devices, over an encrypted link: an unpaired device in range can't open a stream to Flick */
+    {
+        ULONG on = TRUE;
+        if (setsockopt(s, SOL_RFCOMM, SO_BTH_AUTHENTICATE, (const char *)&on, sizeof on) != 0) say("error auth %d", WSAGetLastError());
+        if (setsockopt(s, SOL_RFCOMM, SO_BTH_ENCRYPT, (const char *)&on, sizeof on) != 0) say("error encrypt %d", WSAGetLastError());
+    }
     if (bind(s, (struct sockaddr *)&sa, sizeof sa) != 0) {
         int e = WSAGetLastError();
         closesocket(s);
@@ -157,8 +174,10 @@ static int run_bluetooth(void) {
     if (WSASetServiceW(&qs, RNRSERVICE_REGISTER, 0) != 0) { say("error register %d", WSAGetLastError()); return 4; }
 
     say("listening %lu", (unsigned long)sa.port);
-    accept_loop(s, 1);
-    return 0;
+    int r = accept_loop(s, 1);
+    WSASetServiceW(&qs, RNRSERVICE_DELETE, 0);
+    closesocket(s);
+    return r;
 }
 
 static int run_tcp(int listen_port) {
@@ -170,8 +189,7 @@ static int run_tcp(int listen_port) {
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     if (s == INVALID_SOCKET || bind(s, (struct sockaddr *)&a, sizeof a) != 0 || listen(s, 4) != 0) { say("error tcp %d", WSAGetLastError()); return 4; }
     say("listening tcp:%d", listen_port);
-    accept_loop(s, 0);
-    return 0;
+    return accept_loop(s, 0);
 }
 
 int main(int argc, char **argv) {

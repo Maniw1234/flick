@@ -49,7 +49,24 @@ To try the whole build without publishing: Actions > Release > Run workflow, tic
 - **Quick Share:** `pc/quickshare.js` makes the PC a Quick Share receiver on the local network (mDNS advertisement,
   UKEY2 key exchange, encrypted Nearby frames). The PC asks before accepting and shows the same code as the phone.
 - **Large files** go over several connections at once (`/api/part` up, HTTP byte ranges down) when both sides speak
-  protocol 2.
+  protocol 2; from protocol 3, **batches** (several files or folders) are split across several `/api/bundle` streams
+  (`streams=k&stream=i`) that write into one staging folder on the PC.
+
+## Security
+
+- **Pairing.** A phone gets a random token only after the user clicks Allow on the PC. Every upload, download and
+  update fetch needs it, and the phone in turn only accepts files, status and updates from a PC it holds a token for.
+  Pairing prompts are rate-limited, and browsers are refused (a web page can't reach the PC's server: requests with a
+  web `Origin` or a DNS-name `Host` get 403).
+- **Received files** are marked as downloaded from the internet (`Zone.Identifier`), so Windows SmartScreen and
+  Office Protected View apply. "Open files when they arrive" never launches programs, scripts or shortcuts.
+- **Limits.** WebSocket messages, pre-accept Quick Share data, sockets per address and Bluetooth stream buffers are
+  capped; uploads and Quick Shares that won't fit on the disk are refused up front.
+- **Bluetooth** accepts only paired devices over an encrypted link.
+- **Updates.** The PC verifies each update bundle's SHA-256 (from GitHub, over HTTPS) before installing it; Android
+  checks the phone app's signature. CI pins every downloaded tool by checksum and the checkout action by commit.
+- **Not yet:** traffic between phone and PC is plain HTTP on the local network (pairing tokens included), so someone
+  sniffing the same Wi-Fi could read it. Encrypting it (TLS with a key pinned at pairing) is the next step.
 
 ## Building by hand
 
