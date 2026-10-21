@@ -1,6 +1,5 @@
-verified=true v1=false v2=true v3=true
-  v2 signer: CN=Android Debug 1E08A903AEF9C3A7; 
-  v3 signer: CN=Android Debug 1E08A903AEF9C3A7;  sdk 24..32
-  v3.1 signer: CN=Flick 49DE7047A49F81F6;  sdk 33..2147483647
-  v3.1 verified: true
+verified=true v1=false v2=false v3=true
+  minSdk: 28
+  v3 signer: CN=Flick 49DE7047A49F81F6;  sdk 28..2147483647
+  v3.1 verified: false
   lineage: CN=Android Debug 1E08A903AEF9C3A7; CN=Flick 49DE7047A49F81F6; 

@@ -1,6 +1,6 @@
 'use strict';
 // Reads what the PC needs to offer a phone update from an APK file: package name, versionCode, versionName,
-// size and SHA-256. Pure Node (zip central directory + Android binary XML), no dependencies.
+// minSdkVersion, size and SHA-256. Pure Node (zip central directory + Android binary XML), no dependencies.
 const fs = require('fs');
 const zlib = require('zlib');
 const crypto = require('crypto');
@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const MAX_APK = 200 * 1024 * 1024;
 const ATTR_VERSION_CODE = 0x0101021b;
 const ATTR_VERSION_NAME = 0x0101021c;
+const ATTR_MIN_SDK = 0x0101020c;
 
 function findEntry(buf, wanted) {
   // end of central directory: last 22..65557 bytes
@@ -59,10 +60,10 @@ function readStringPool(b, off) {
   return out;
 }
 
-/** <manifest> attributes from a binary AndroidManifest.xml. */
+/** <manifest> attributes (and <uses-sdk> minSdkVersion, 0 when not given as a number) from a binary AndroidManifest.xml. */
 function parseManifest(b) {
   if (b.length < 8 || b.readUInt16LE(0) !== 0x0003) throw new Error('not binary xml');
-  let strings = [], resIds = [];
+  let strings = [], resIds = [], r = null;
   let p = b.readUInt16LE(2);
   while (p + 8 <= b.length) {
     const type = b.readUInt16LE(p), hsize = b.readUInt16LE(p + 2), size = b.readUInt32LE(p + 4);
@@ -72,24 +73,26 @@ function parseManifest(b) {
     else if (type === 0x0102) {
       const ext = p + hsize;
       const name = strings[b.readUInt32LE(ext + 4)];
-      if (name === 'manifest') {
+      if (name === 'manifest' || (r && name === 'uses-sdk')) {
         const attrStart = b.readUInt16LE(ext + 8), attrSize = b.readUInt16LE(ext + 10), attrCount = b.readUInt16LE(ext + 12);
-        const r = { package: null, versionCode: null, versionName: null };
+        if (!r) r = { package: null, versionCode: null, versionName: null, minSdk: 0 };
         for (let i = 0; i < attrCount; i++) {
           const a = ext + attrStart + i * attrSize;
           const ni = b.readUInt32LE(a + 4), raw = b.readUInt32LE(a + 8), dtype = b[a + 15], data = b.readUInt32LE(a + 16);
           const id = ni < resIds.length ? resIds[ni] : 0;
           const an = strings[ni] || '';
           const str = raw !== 0xffffffff ? strings[raw] : (dtype === 0x03 ? strings[data] : null);
-          if (an === 'package' && !id) r.package = str;
+          if (name === 'uses-sdk') { if (id === ATTR_MIN_SDK && dtype >= 0x10 && dtype <= 0x11) r.minSdk = data; }
+          else if (an === 'package' && !id) r.package = str;
           else if (id === ATTR_VERSION_CODE || (!id && an === 'versionCode')) r.versionCode = (dtype >= 0x10 && dtype <= 0x11) ? data : parseInt(str, 10);
           else if (id === ATTR_VERSION_NAME || (!id && an === 'versionName')) r.versionName = str != null ? String(str) : String(data);
         }
-        return r;
+        if (name === 'uses-sdk') return r;
       }
     }
     p += size;
   }
+  if (r) return r;
   throw new Error('no manifest element');
 }
 
@@ -99,12 +102,12 @@ function infoFrom(buf, mtime) {
   const m = parseManifest(xml);
   if (!m.package || !Number.isFinite(m.versionCode)) throw new Error('incomplete manifest');
   return {
-    package: m.package, code: m.versionCode, name: m.versionName || String(m.versionCode),
+    package: m.package, code: m.versionCode, name: m.versionName || String(m.versionCode), minSdk: m.minSdk,
     size: buf.length, sha256: crypto.createHash('sha256').update(buf).digest('hex'), mtime,
   };
 }
 
-/** { package, code, name, size, sha256, mtime } for an APK, or throws. */
+/** { package, code, name, minSdk, size, sha256, mtime } for an APK, or throws. */
 function apkInfo(file) {
   const st = fs.statSync(file);
   if (!st.isFile() || st.size < 100 || st.size > MAX_APK) throw new Error('not an apk');

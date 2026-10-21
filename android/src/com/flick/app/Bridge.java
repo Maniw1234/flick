@@ -58,13 +58,17 @@ final class Bridge {
         } catch (Throwable e) { return "{}"; }
     }
 
+    /** sums + sig: the SHA256SUMS and SHA256SUMS.sig of the Flick release the update comes from (refused without). */
     @JavascriptInterface
-    public void updateDownload(String url, String code, String size, String sha256) {
-        try { a.updater().download(url, Long.parseLong(code), Long.parseLong(size), sha256); }
+    public void updateDownload(String url, String code, String size, String sha256, String sums, String sig) {
+        try { a.updater().download(url, Long.parseLong(code), Long.parseLong(size), sha256, sums, sig); }
         catch (Throwable e) { a.updater().fail("bad request"); }
     }
 
-    /** Asks GitHub for the latest Flick release; answers with a "gh" event carrying GitHub's JSON (the page picks the APK). */
+    /**
+     * Asks GitHub for the latest Flick release; answers with a "gh" event carrying GitHub's JSON (the page picks the
+     * APK) and, when the release has them, its SHA256SUMS and SHA256SUMS.sig ("sums", "sig").
+     */
     @JavascriptInterface
     public void updateCheckGitHub() {
         new Thread(new Runnable() {
@@ -74,9 +78,13 @@ final class Bridge {
                 try {
                     o.put("t", "gh");
                     try {
-                        o.put("body", UpdateFetch.getText(GITHUB_LATEST, 2 * 1024 * 1024));
+                        String body = UpdateFetch.getText(GITHUB_LATEST, 2 * 1024 * 1024);
+                        o.put("body", body);
+                        String[] signed = UpdateFetch.releaseSums(body, GITHUB_DL);
+                        if (signed != null) { o.put("sums", signed[0]); o.put("sig", signed[1]); }
                         o.put("ok", true);
                     } catch (Throwable e) {
+                        o.remove("body");
                         o.put("ok", false);
                         o.put("why", String.valueOf(e.getMessage()));
                     }
@@ -87,6 +95,7 @@ final class Bridge {
     }
 
     static final String GITHUB_LATEST = "https://api.github.com/repos/Maniw1234/flick/releases/latest";
+    static final String GITHUB_DL = "https://github.com/Maniw1234/flick/releases/download/";
 
     // ---------------- Bluetooth (when there's no network) ----------------
     @JavascriptInterface public void btPermission() { a.runOnUiThread(new Runnable() { @Override public void run() { a.askBluetooth(); } }); }
