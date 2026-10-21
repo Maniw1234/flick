@@ -111,6 +111,17 @@
   api.on('panel:pair', (s) => {
     pairDevice = s.device;
     $('pairName').textContent = s.name || 'A phone';
+    // phone apps from 1.9 show the same code: a different one means something else is answering in your PC's place
+    const sub = $('pairSub');
+    sub.textContent = '';
+    if (s.code && /^\d{6}$/.test(s.code)) {
+      const b = document.createElement('b');
+      b.className = 'pin';
+      b.textContent = s.code.slice(0, 3) + ' ' + s.code.slice(3);
+      sub.append('Pairing code ', b, '. Allow only if your phone shows the same code.');
+    } else {
+      sub.textContent = 'Allow it to send files to this PC?';
+    }
     $('pair').hidden = false;
     $('allow').focus();
   });

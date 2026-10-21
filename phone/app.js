@@ -78,6 +78,10 @@
     screen: 'pair',
   };
   const tokenKey = (pcId) => 'token:' + pcId;
+  // the SHA-256 of the PC's certificate, pinned when this phone paired with it (or when a PC paired before 1.9 first
+  // proved over an encrypted link that it holds this phone's token): only that PC gets a connection
+  const pinKey = (pcId) => 'pin:' + pcId;
+  const rhex = (n) => { const a = new Uint8Array(n); crypto.getRandomValues(a); return Array.from(a, (b) => b.toString(16).padStart(2, '0')).join(''); };
   const SEL = { on: false, ids: new Set() };   // multi-select: ids of the selected items in the current view
   // wireless update: the PC announces the newest phone app it has; app = { code, name, size, sha256, url }
   const UPD = { app: null, pcApp: null, ghApp: null, ghAt: 0, ghAsk: false, pcKnows: false, state: 'idle', got: 0, total: 0, why: '', dismissed: 0, checkT: 0, auto: false };
@@ -294,13 +298,14 @@
       choosePc(pick(last) || st.pcs.slice().sort((a, b) => rankOf(b) - rankOf(a))[0]);
     } else if (st.pc) {
       const same = pick(st.pc.id);
-      if (same && (same.ip !== st.pc.ip || same.port !== st.pc.port || same.name !== st.pc.name || same.via !== st.pc.via)) {
-        const moved = same.ip !== st.pc.ip || same.port !== st.pc.port;
+      if (same && (same.ip !== st.pc.ip || same.port !== st.pc.port || same.name !== st.pc.name || same.via !== st.pc.via || (+same.tls || 0) !== (+st.pc.tls || 0))) {
+        // a PC that turned out to take encrypted links (it just updated) is reconnected like one that moved
+        const moved = same.ip !== st.pc.ip || same.port !== st.pc.port || (+same.tls || 0) !== (+st.pc.tls || 0);
         const faster = rankOf(same) > rankOf(st.pc);
         // a faster link to the connected PC (say, a USB cable was just plugged in): move over once nothing is in flight
         if (moved && st.connected && (!faster || busyMoving())) { setPcName(); return; }
         st.pc = Object.assign({}, st.pc, same);
-        if (same.via !== 'bluetooth') pref.set('lastPcAddr', same.ip + ':' + same.port);
+        if (same.via !== 'bluetooth') { pref.set('lastPcAddr', same.ip + ':' + same.port); pref.set('lastPcTls', same.tls ? '1' : '0'); }
         if (moved && st.connected) { toast('Connected over ' + (LINK_NAMES[same.via] || same.via), 2000); openLink(true); }
         else if (moved) openLink(st.wantResume);
       }
@@ -310,9 +315,10 @@
 
   function choosePc(pc) {
     if (!pc) return;
-    st.pc = { id: pc.id, name: pc.name, ip: pc.ip, port: pc.port, via: pc.via || 'wifi' };
+    st.pc = { id: pc.id, name: pc.name, ip: pc.ip, port: pc.port, via: pc.via || 'wifi', v: +pc.v || 1, tls: +pc.tls || 0 };
+    st.linkBlocked = '';
     pref.set('lastPc', pc.id);
-    if (pc.via !== 'bluetooth') pref.set('lastPcAddr', pc.ip + ':' + pc.port);
+    if (pc.via !== 'bluetooth') { pref.set('lastPcAddr', pc.ip + ':' + pc.port); pref.set('lastPcTls', pc.tls ? '1' : '0'); }
     pref.set('lastPcName', pc.name);
     st.replaced = false;
     setPcName();
@@ -356,14 +362,21 @@
     const ip = m[1], port = +(m[2] || 47860);
     $('askOk').textContent = 'Connecting…';
     try {
+      // asked over an encrypted link like everything else (the phone sends nothing over the network in the clear);
+      // which certificate to trust is settled when it connects, once the PC's id is known
+      const lk = await nreqT(8000, 'tlsOpen', ip, port, '');
+      if (!lk || !lk.ok) {
+        if (lk && lk.why === 'tls') { toast('Flick on the PC at ' + ip + ' needs updating first', 3200); $('askOk').textContent = 'Connect'; return false; }
+        throw new Error('unreachable');
+      }
       const ctl = new AbortController();
       const to = setTimeout(() => ctl.abort(), 3500);
-      const r = await fetch('http://' + ip + ':' + port + '/api/hello', { signal: ctl.signal });
+      const r = await fetch('http://127.0.0.1:' + lk.port + '/api/hello', { signal: ctl.signal });
       clearTimeout(to);
       const j = await r.json();
       if (!j || j.app !== 'flick') throw new Error('not flick');
       $('askOk').textContent = 'Connect';
-      const pc = { id: j.id, name: j.name, ip, port: j.port || port };
+      const pc = { id: j.id, name: j.name, ip, port: j.port || port, v: +j.v || 4, tls: 1 };
       if (!st.pcs.find((p) => p.id === pc.id)) st.pcs.push(pc);
       closeLink();
       choosePc(pc);
@@ -384,7 +397,53 @@
     clearTimeout(reconnectT); clearInterval(pingT);
     if (st.ws) { try { st.ws.close(); } catch (e) { /* ignore */ } }
     st.ws = null; st.wsOpen = false; st.connected = false; st.trusted = false; st.awaitingApproval = false; st.connecting = false;
+    st.pcProved = false;
     updateConn();
+  }
+
+  // The way to the PC. Over Bluetooth: the local port the app's Bluetooth link gives (Bluetooth encrypts that link
+  // itself). Otherwise: an encrypted link (TLS) through a local port the app opens, which only reaches a PC whose
+  // certificate is the one this phone pinned. A PC that can't do encrypted links (Flick before 1.9) isn't used.
+  async function prepareLink(pc) {
+    if (pc.via === 'bluetooth') {
+      if ((+pc.v || 1) < 4) { linkProblem('old'); return null; }
+      return { ip: pc.ip, port: pc.port, chan: 'bluetooth', key: 'bt:' + pc.port };
+    }
+    if (!pc.tls) { linkProblem('old'); return null; }
+    const pin = pref.get(pinKey(pc.id), '');
+    const r = await nreqT(20000, 'tlsOpen', pc.ip, pc.port, pin);
+    if (!r) return null;
+    if (!r.ok) { if (r.why === 'pin') linkProblem('pin'); return null; }
+    return { ip: '127.0.0.1', port: r.port, chan: r.fp, fp: r.fp, pinned: !!pin, key: pc.ip + ':' + pc.port };
+  }
+  // where HTTP requests to the connected PC go (the encrypted link's local port, or the Bluetooth one)
+  const linkBase = () => (st.link ? 'http://' + st.link.ip + ':' + st.link.port : 'http://0.0.0.0:0');
+
+  // Why this phone can't connect to st.pc right now: said where the user is looking. Retrying slows down meanwhile.
+  function linkProblem(kind) {
+    st.linkBlocked = kind;
+    const name = '<b>' + esc(st.pc ? st.pc.name : 'your PC') + '</b>';
+    let msg = '';
+    if (kind === 'old') msg = 'Flick on ' + name + ' needs updating before this phone can connect: connections are now encrypted. Flick updates itself on the PC; restarting it there updates it now.';
+    else if (kind === 'pin') msg = name + ' has a new security key, so this phone won’t connect to it. If you reinstalled Flick on that PC, <a href="#" id="repairBtn">pair again</a>.';
+    else if (kind === 'auth') msg = 'This phone couldn’t verify ' + name + '. Hold Connect to pair again, and check that both screens show the same code.';
+    if (st.screen === 'pair') {
+      pairHint(msg);
+      const b = $('repairBtn');
+      if (b) b.onclick = (e) => { e.preventDefault(); repair(); };
+    } else if (st.problemShown !== kind) {
+      st.problemShown = kind;
+      toast(msg.replace(/<[^>]+>/g, '').replace(/ If you reinstalled.*$/, ''), 4200);
+      if (kind !== 'old') { closeLink(); showScreen('pair'); linkProblem(kind); }
+    }
+  }
+  // forget this PC's key and pairing: the next connection pairs again (with the code on both screens)
+  function repair() {
+    if (!st.pc) return;
+    pref.set(tokenKey(st.pc.id), ''); pref.set(pinKey(st.pc.id), '');
+    st.linkBlocked = ''; st.problemShown = '';
+    pairHint('Hold Connect, then check that your PC shows the same code as this phone.');
+    openLink();
   }
 
   function openLink(resume) {
@@ -392,13 +451,29 @@
     const gen = ++wsGen;
     clearTimeout(reconnectT);
     if (st.ws) { try { st.ws.close(); } catch (e) { /* ignore */ } }
+    st.ws = null; st.wsOpen = false; st.connecting = true;
+    prepareLink(st.pc).then((lk) => {
+      if (gen !== wsGen) return;
+      if (!lk) { st.connecting = false; scheduleReconnect(st.linkBlocked ? 20000 : 0); return; }
+      st.linkBlocked = ''; st.problemShown = '';
+      // an encrypted link to an address the phone no longer uses is closed, unless files are still moving over it
+      const old = st.link;
+      if (old && old.key !== lk.key && old.chan !== 'bluetooth' && !busyMoving()) nc('tlsClose', old.port);
+      st.link = lk;
+      connectWs(gen, resume);
+    });
+  }
+
+  function connectWs(gen, resume) {
     let ws;
-    try { ws = new WebSocket('ws://' + st.pc.ip + ':' + st.pc.port + '/ws'); } catch (e) { scheduleReconnect(); return; }
-    st.ws = ws; st.connecting = true; st.wsOpen = false;
+    try { ws = new WebSocket('ws://' + st.link.ip + ':' + st.link.port + '/ws'); } catch (e) { st.connecting = false; scheduleReconnect(); return; }
+    st.ws = ws;
     ws.onopen = () => {
       if (gen !== wsGen) return;
       st.wsOpen = true; st.connecting = false; st.lastRx = Date.now();
-      ws.send(JSON.stringify({ t: 'hello', device: DEVICE, name: phoneName(), token: pref.get(tokenKey(st.pc.id), null), w: innerWidth, h: innerHeight, dpr: devicePixelRatio, resume: !!resume, v: 1, app: MY_CODE, appName: INFO.version || '', via: st.pc.via || 'wifi' }));
+      // protocol 4: no token in hello. A paired PC answers with proof that it holds this phone's token ('auth?').
+      st.nonceP = rhex(16); st.pcProved = false;
+      ws.send(JSON.stringify({ t: 'hello', v: 4, device: DEVICE, name: phoneName(), nonce: st.nonceP, w: innerWidth, h: innerHeight, dpr: devicePixelRatio, resume: !!resume, app: MY_CODE, appName: INFO.version || '', via: st.pc.via || 'wifi', sdk: INFO.sdk || 0 }));
       clearInterval(pingT);
       pingT = setInterval(() => {
         if (gen !== wsGen) return;
@@ -415,7 +490,7 @@
 
   function linkLost() {
     const was = st.connected;
-    st.wsOpen = false; st.connected = false; st.connecting = false;
+    st.wsOpen = false; st.connected = false; st.connecting = false; st.pcProved = false;
     clearInterval(pingT);
     updateConn();
     for (const [tid, p] of st.pending) {
@@ -431,14 +506,14 @@
   }
 
   let lostSince = 0;
-  function scheduleReconnect() {
+  function scheduleReconnect(ms) {
     clearTimeout(reconnectT);
     if (!lostSince) lostSince = Date.now();
-    if (st.wantResume && Date.now() - lostSince > 12000 && st.screen === 'main' && !st.lostToast) {
+    if (st.wantResume && !st.linkBlocked && Date.now() - lostSince > 12000 && st.screen === 'main' && !st.lostToast) {
       st.lostToast = true;
       toast('Lost connection to your PC. Flick will reconnect when it’s back.', 2800);
     }
-    reconnectT = setTimeout(() => openLink(st.wantResume), document.hidden ? 4000 : (st.connectWanted ? 500 : 1200));
+    reconnectT = setTimeout(() => openLink(st.wantResume), ms || (document.hidden ? 4000 : (st.connectWanted ? 500 : 1200)));
   }
 
   function updateConn() {
@@ -447,10 +522,19 @@
     if (SEL.on) renderSelection();
   }
 
+  // "connect" on the user's go-ahead. Not paired yet (protocol 4): it also commits to this phone's half of the pairing
+  // code (a hash of a random number, revealed only once the PC has answered with its half: see 'pairing'), so nobody
+  // in between can steer the code the two screens show.
+  function sendConnectUser() {
+    if (st.trusted) return wsSend({ t: 'connect', user: true });
+    st.pairNonce = rhex(16); st.pairCode = '';
+    return wsSend({ t: 'connect', user: true, commit: nc('sha256', st.pairNonce) || '' });
+  }
+
   // The hold finished: connect now, or as soon as the link to the PC is up (never fail just because it's still linking).
   function requestConnect() {
     st.replaced = false; st.pairAsked = true;
-    if (st.wsOpen && wsSend({ t: 'connect', user: true })) return;
+    if (st.wsOpen && sendConnectUser()) return;
     st.connectWanted = Date.now();
     pairHint('Connecting to <b>' + esc(st.pc ? st.pc.name : 'your PC') + '</b>…');
     G.hold = Math.max(G.hold, 0.5);
@@ -468,35 +552,69 @@
   // The phone's own view of trust: it holds a token for this PC id, given by that PC when the user allowed pairing.
   // Only such a PC can say "connected", send files, or offer an update; anything else on the network is ignored.
   const hasToken = () => !!(st.pc && pref.get(tokenKey(st.pc.id), ''));
-  const linkTrusted = () => st.connected && hasToken();
+  const linkTrusted = () => st.connected && hasToken() && st.pcProved;
 
   function onMsg(m) {
     switch (m.t) {
+      case 'auth?': {
+        // Sign-in: the PC shows it holds this phone's token (an HMAC over both random numbers and the link's identity:
+        // the certificate this phone sees, or "bluetooth"). Only then does the phone prove the same in return; the
+        // token itself never crosses the network.
+        if (!st.pc || !st.link || (m.pc && m.pc.id && m.pc.id !== st.pc.id)) { closeLink(); break; }
+        const chan = st.link.chan, nS = String(m.nonce || '');
+        const want = /^[0-9a-f]{32,64}$/.test(nS) ? nc('authProof', st.pc.id, 'pc', st.nonceP, nS, chan) : '';
+        if (!want || want !== m.proof) {
+          // not the PC this phone paired with, or it no longer knows this phone: prove nothing to it
+          wsSend({ t: 'auth', proof: 'none' });
+          if (hasToken()) linkProblem('auth');
+          break;
+        }
+        st.pcProved = true;
+        wsSend({ t: 'auth', proof: nc('authProof', st.pc.id, 'phone', st.nonceP, nS, chan) });
+        // it proved itself over this very link: a PC paired before 1.9 gets its certificate pinned now
+        if (st.link.fp && !pref.get(pinKey(st.pc.id), '')) { pref.set(pinKey(st.pc.id), st.link.fp); st.link.pinned = true; }
+        break;
+      }
+      case 'token':
+        // the PC's first sign-in from this phone over a secure link replaces a token that may have travelled in the clear
+        if (st.pcProved && typeof m.token === 'string' && /^[0-9a-f]{32}$/.test(m.token)) pref.set(tokenKey(st.pc.id), m.token);
+        break;
       case 'welcome':
         // a different PC answered at this address (its IP went to another computer): leave every pairing alone
         if (m.pc && m.pc.id && st.pc && m.pc.id !== st.pc.id) { closeLink(); break; }
         lostSince = 0;
-        st.trusted = !!m.trusted;
+        st.trusted = !!m.trusted && st.pcProved;    // trusted only after the PC proved itself ('auth?')
         st.pcProto = +m.v || 1;                 // 2+: large files travel in several parts at once
         if (m.side) st.side = m.side;
         if (m.theme) applyTheme(m.theme);
         if (m.pc && m.pc.name && st.pc) { st.pc.name = m.pc.name; pref.set('lastPcName', m.pc.name); setPcName(); }
-        if (!m.trusted) pref.set(tokenKey(st.pc.id), '');
-        if (st.connectWanted && Date.now() - st.connectWanted < 10000) { st.connectWanted = 0; st.pairAsked = true; clearTimeout(connectT); wsSend({ t: 'connect', user: true }); }
-        else if (st.wantResume && m.trusted && !st.connected && !st.replaced) wsSend({ t: 'connect' });   // pick the session back up
-        else if (st.screen === 'pair') pairHint('');
+        // the PC doesn't know this phone (any more): its pairing is over. Believed only from a PC this phone can be
+        // sure of (pinned certificate, or Bluetooth), so a stranger can't make it throw a pairing away.
+        if (!m.trusted && (st.link.pinned || st.link.chan === 'bluetooth') && m.why !== 'auth' && !st.pcProved) pref.set(tokenKey(st.pc.id), '');
+        if (st.connectWanted && Date.now() - st.connectWanted < 10000) { st.connectWanted = 0; st.pairAsked = true; clearTimeout(connectT); sendConnectUser(); }
+        else if (st.wantResume && st.trusted && !st.connected && !st.replaced) wsSend({ t: 'connect' });   // pick the session back up
+        else if (st.screen === 'pair' && !st.linkBlocked) pairHint('');
         break;
-      case 'pairing':
-        if (!st.pairAsked) break;                // only after this phone asked to connect
+      case 'pairing': {
+        if (!st.pairAsked || !st.pairNonce) break;  // only after this phone asked to connect
+        const nS = String(m.nonce || '');
+        if (!/^[0-9a-f]{32,64}$/.test(nS)) break;   // a PC that can't show a pairing code isn't paired with
+        // the PC's half of the code is here: now this phone reveals its own, and both screens show the same code
+        wsSend({ t: 'pair-reveal', nonce: st.pairNonce });
+        st.pairCode = nc('pairCode', st.link.chan, st.pairNonce, nS) || '';
         st.awaitingApproval = true;
         setPcName();
-        pairHint('Look at your PC — click <b>Allow</b> in the Flick window.');
+        pairHint('Click <b>Allow</b> on your PC only if it shows this code:<br><b class="pcode">' + esc(st.pairCode.slice(0, 3) + ' ' + st.pairCode.slice(3)) + '</b>');
         G.hold = 0.35;
         break;
+      }
       case 'paired':
-        if (!st.pairAsked || typeof m.token !== 'string' || !m.token) break;   // never a pairing this phone didn't ask for
+        if (!st.pairAsked || !st.pairCode || typeof m.token !== 'string' || !/^[0-9a-f]{32}$/.test(m.token)) break;   // never a pairing this phone didn't ask for
         pref.set(tokenKey(st.pc.id), m.token);
-        st.trusted = true; st.awaitingApproval = false; st.pairAsked = false;
+        // the certificate of the PC the user just approved is the one this phone trusts from now on
+        if (st.link && st.link.fp) { pref.set(pinKey(st.pc.id), st.link.fp); st.link.pinned = true; }
+        st.pcProved = true;
+        st.trusted = true; st.awaitingApproval = false; st.pairAsked = false; st.pairNonce = ''; st.pairCode = '';
         break;
       case 'denied':
         st.pairAsked = false;
@@ -506,7 +624,7 @@
         haptic('reject');
         break;
       case 'connected':
-        if (!hasToken()) break;
+        if (!hasToken() || !st.pcProved) break;
         lostSince = 0; st.lostToast = false;
         st.connected = true; st.trusted = true; st.awaitingApproval = false; st.connectWanted = 0;
         clearTimeout(connectT);
@@ -641,7 +759,7 @@
   function updUrl(a) {
     if (a.src === 'github') return a.url;
     const tok = pref.get(tokenKey(st.pc.id), '');
-    return 'http://' + st.pc.ip + ':' + st.pc.port + a.url + '?device=' + encodeURIComponent(DEVICE) + '&token=' + encodeURIComponent(tok);
+    return linkBase() + a.url + '?device=' + encodeURIComponent(DEVICE) + '&token=' + encodeURIComponent(tok);
   }
 
   function startUpdate() {
@@ -1756,7 +1874,7 @@
   function bundleUrl(tid) {
     const tok = pref.get(tokenKey(st.pc.id), '');
     // PCs that speak protocol 3 take a bundle over several connections at once (the phone app decides when it's worth it)
-    return 'http://' + st.pc.ip + ':' + st.pc.port + '/api/bundle?tid=' + encodeURIComponent(tid) + '&device=' + encodeURIComponent(DEVICE) + '&token=' + encodeURIComponent(tok) +
+    return linkBase() + '/api/bundle?tid=' + encodeURIComponent(tid) + '&device=' + encodeURIComponent(DEVICE) + '&token=' + encodeURIComponent(tok) +
       ((st.pcProto || 1) >= 3 ? parallelArg() : '');
   }
   // one file goes as it is; several items, or any folder, go as one bundle (folders keep their insides)
@@ -1779,7 +1897,7 @@
   const parallelArg = () => ((st.pcProto || 1) >= 2 && settings.parallel && !(st.pc && st.pc.via === 'bluetooth') ? '&parallel=4' : '');
   function uploadUrl(tid, it) {
     const tok = pref.get(tokenKey(st.pc.id), '');
-    return 'http://' + st.pc.ip + ':' + st.pc.port + '/api/upload?tid=' + encodeURIComponent(tid) + '&device=' + encodeURIComponent(DEVICE) +
+    return linkBase() + '/api/upload?tid=' + encodeURIComponent(tid) + '&device=' + encodeURIComponent(DEVICE) +
       '&token=' + encodeURIComponent(tok) + '&name=' + encodeURIComponent(it.name) + '&size=' + (it.size || 0) + parallelArg();
   }
 
@@ -2176,7 +2294,7 @@
     })(t0);
     setCardProgress(it.id, 0);
     const tok = pref.get(tokenKey(st.pc.id), '');
-    const url = 'http://' + st.pc.ip + ':' + st.pc.port + m.url + '?device=' + encodeURIComponent(DEVICE) + '&token=' + encodeURIComponent(tok) + parallelArg();
+    const url = linkBase() + m.url + '?device=' + encodeURIComponent(DEVICE) + '&token=' + encodeURIComponent(tok) + parallelArg();
     nc('download', m.fid, url, m.name, String(m.size || 0), m.mime || '');
   }
 
@@ -2268,7 +2386,9 @@
   const lastId = pref.get('lastPc', '');
   if (lastAddr && lastId) {
     const parts = lastAddr.split(':');
-    st.pcs = [{ id: lastId, name: pref.get('lastPcName', 'your PC'), ip: parts[0], port: +parts[1] }];
+    // a PC whose certificate is pinned (or that last said so) takes encrypted links; discovery confirms either way
+    const tls = pref.get(pinKey(lastId), '') || pref.get('lastPcTls', '') === '1' ? 1 : 0;
+    st.pcs = [{ id: lastId, name: pref.get('lastPcName', 'your PC'), ip: parts[0], port: +parts[1], tls, v: tls ? 4 : 1 }];
     choosePc(st.pcs[0]);
   }
   setTimeout(() => { if (!st.pc) pairHint('Make sure Flick is open on your PC and both are on the <b>same Wi-Fi</b>.'); }, 4500);

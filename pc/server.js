@@ -2,6 +2,8 @@
 // Flick PC server: HTTP (uploads/downloads) + WebSocket (live drag stream) + UDP discovery.
 // Pure Node so it can be tested without Electron.
 const http = require('http');
+const net = require('net');
+const tls = require('tls');
 const dgram = require('dgram');
 const fs = require('fs');
 const os = require('os');
@@ -12,9 +14,23 @@ const { EventEmitter } = require('events');
 const { acceptUpgrade } = require('./ws');
 const { BundleReceiver } = require('./bundle');
 
-const PROTO = 3;   // 2: large files in parallel parts (/api/part) and byte ranges; 3: bundles over several streams
+// 2: large files in parallel parts (/api/part) and byte ranges; 3: bundles over several streams; 4: encrypted links
+// (TLS on the same port, a pinned certificate) and a sign-in that never sends the pairing token (see "sign-in")
+const PROTO = 4;
 
 function rid(n = 12) { return crypto.randomBytes(n).toString('hex'); }
+const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
+const hmac = (key, s) => crypto.createHmac('sha256', String(key)).update(s).digest('hex');
+function sameHex(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || !/^[0-9a-f]{64}$/.test(a) || !/^[0-9a-f]{64}$/.test(b)) return false;
+  return crypto.timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
+}
+
+/** The pairing code both screens show: a MITM can't make them match (see 'connect' and 'pair-reveal'). */
+function pairCode(chan, nonceP, nonceS) {
+  const n = parseInt(sha256('flick-pair-v1|' + chan + '|' + nonceP + '|' + nonceS).slice(0, 8), 16) % 1000000;
+  return String(n).padStart(6, '0');
+}
 
 function lanAddresses() {
   const out = [];
@@ -53,6 +69,10 @@ class FlickServer extends EventEmitter {
     this.cool = new Map();      // address -> time until which its pairing requests are refused (after a "Don't allow")
     this.phoneApp = null;       // newest phone app this PC can hand out: { path, code, name, size, sha256 }
     this.allowOrigin = opts.allowOrigin || null;   // tests only (a RegExp); never set by a normal start
+    // this PC's certificate ({ key, cert, fp } from tlscert.js): links to the phone are encrypted with it. Without one
+    // (it couldn't be made) Flick still answers plain links, which phone apps from 1.9 on refuse to use.
+    this.tlsId = opts.tls || null;
+    this.fp = this.tlsId ? this.tlsId.fp : null;
     fs.mkdirSync(this.tmpDir, { recursive: true });
   }
 
@@ -77,15 +97,22 @@ class FlickServer extends EventEmitter {
     this.http.keepAliveTimeout = 30000;
     this.http.requestTimeout = 0; // large uploads
     this.http.headersTimeout = 20000;
+    if (this.tlsId) {
+      try { this.tlsCtx = tls.createSecureContext({ key: this.tlsId.key, cert: this.tlsId.cert, minVersion: 'TLSv1.2' }); }
+      catch (e) { this.tlsCtx = null; this.fp = null; this.emit('log', 'tls off: ' + e.message); }
+    }
+    // One port for both: an encrypted link starts with a TLS handshake (first byte 0x16); anything else is plain HTTP
+    // (phone apps before 1.9, Bluetooth relayed from this PC, browsers)
+    this.net = net.createServer((sock) => this._onSocket(sock));
     let lastErr;
     for (let p = this.basePort; p < this.basePort + 6; p++) {
       try {
         await new Promise((resolve, reject) => {
-          const onErr = (e) => { this.http.removeListener('listening', onOk); reject(e); };
-          const onOk = () => { this.http.removeListener('error', onErr); resolve(); };
-          this.http.once('error', onErr);
-          this.http.once('listening', onOk);
-          this.http.listen(p, '0.0.0.0');
+          const onErr = (e) => { this.net.removeListener('listening', onOk); reject(e); };
+          const onOk = () => { this.net.removeListener('error', onErr); resolve(); };
+          this.net.once('error', onErr);
+          this.net.once('listening', onOk);
+          this.net.listen(p, '0.0.0.0');
         });
         this.port = p;
         break;
@@ -96,9 +123,40 @@ class FlickServer extends EventEmitter {
     return this.port;
   }
 
+  _onSocket(sock) {
+    sock.on('error', () => sock.destroy());
+    // a connection that never says anything doesn't get to hold a socket
+    const quiet = setTimeout(() => sock.destroy(), 15000);
+    sock.once('close', () => clearTimeout(quiet));
+    sock.once('data', (first) => {
+      clearTimeout(quiet);
+      sock.pause();
+      sock.unshift(first);
+      if (first[0] === 0x16 && this.tlsCtx) {
+        const t = new tls.TLSSocket(sock, { isServer: true, secureContext: this.tlsCtx });
+        const hs = setTimeout(() => t.destroy(), 15000);
+        t.on('error', () => t.destroy());
+        t.once('close', () => clearTimeout(hs));
+        t.once('secure', () => { clearTimeout(hs); this.http.emit('connection', t); });
+      } else {
+        this.http.emit('connection', sock);
+      }
+      process.nextTick(() => sock.resume());
+    });
+  }
+
+  // How a socket reached us: 'plain', 'bluetooth' (a paired device over an encrypted Bluetooth link, relayed through
+  // the mux) or this PC's certificate fingerprint (TLS). The sign-in and the pairing code are bound to it.
+  _chan(sock) {
+    if (sock && sock.remoteFamily === 'bluetooth') return 'bluetooth';
+    if (sock && sock.encrypted && this.fp) return this.fp;
+    return 'plain';
+  }
+
   stop() {
     clearInterval(this.sweepT); this.sweepT = null;
     for (const b of [...this.bundleAsm.values()]) this._dropBundleAsm(b, true);
+    try { this.net && this.net.close(); } catch (e) { /* ignore */ }
     try { this.http && this.http.close(); } catch (e) { /* ignore */ }
     try { this.udp && this.udp.close(); } catch (e) { /* ignore */ }
     if (this.session && this.session.conn) this.session.conn.close();
@@ -114,7 +172,7 @@ class FlickServer extends EventEmitter {
       if (!m || m.t !== 'flick?') return;
       const reply = Buffer.from(JSON.stringify({
         t: 'flick!', v: PROTO, id: this.id, name: this.name, port: this.port, os: process.platform,
-        known: !!(m.id && this.devices[m.id]),
+        known: !!(m.id && this.devices[m.id]), tls: this.tlsCtx ? 1 : 0,
       }));
       sock.send(reply, rinfo.port, rinfo.address, () => {});
       this.emit('discovered-by', { address: rinfo.address, name: m.name });
@@ -139,6 +197,17 @@ class FlickServer extends EventEmitter {
     return a.length === b.length && crypto.timingSafeEqual(a, b);             // constant-time comparison
   }
 
+  // A request carrying a token: once a phone has signed in over a secure link, its token is only good on one (a
+  // phone app from 1.9 never uses a plain link, so a plain request with its token is someone else)
+  _trustedReq(req, device, token) {
+    if (!this._trusted(device, token)) return false;
+    return !this.devices[device].tls || this._chan(req.socket) !== 'plain';
+  }
+
+  _proof(token, role, s) {
+    return hmac(token, 'flick-auth-v1|' + role + '|' + s.nonceP + '|' + s.nonceS + '|' + s.chan + '|' + s.device + '|' + this.id);
+  }
+
   // A real phone reaches us at a LAN IP and its page is local (file://), so it sends no web Origin and a Host that is
   // a bare IP:port. Reject anything with a real browser Origin (a web page trying to drive us) or a DNS-name Host
   // (so a rebinding page can't pose as the phone). Loopback/absent is fine — that's how the phone and tests connect.
@@ -156,9 +225,11 @@ class FlickServer extends EventEmitter {
 
   approve(device) {
     const s = this.pending.get(device);
+    if (s && s.v4 && !s.pairCode) return;                  // the code wasn't shown yet: nothing the user could approve
     this.pending.delete(device);
     const token = rid(16);
     this.devices[device] = { name: (s && s.name) || 'Phone', token, added: Date.now() };
+    if (s && s.chan && s.chan !== 'plain') this.devices[device].tls = true;      // paired over a secure link: stays secure
     this.emit('devices-changed', this.devices);
     this.emit('pair-cancel', device);
     if (s && s.conn && s.conn.open) {
@@ -224,7 +295,24 @@ class FlickServer extends EventEmitter {
   }
 
   _publicSession(s) {
-    return { device: s.device, name: s.name, screen: s.screen, address: s.address, app: s.app || 0, appName: s.appName || '', via: s.via || '' };
+    return { device: s.device, name: s.name, screen: s.screen, address: s.address, app: s.app || 0, appName: s.appName || '', via: s.via || '', secure: !!s.chan && s.chan !== 'plain' };
+  }
+
+  // after hello (and the sign-in, if any): s joins as trusted or not, and is told so
+  _helloDone(s, trusted, why) {
+    s.trusted = !!trusted;
+    if (!s.trusted) s.token = null;
+    // Only one phone uses the PC at a time. Opening Flick on a second phone must not knock the connected one off: a new
+    // socket becomes the session when nobody is connected, or when it's the same phone (signed in) on a newer link.
+    // Switching to another phone takes an explicit "connect" from it or the user allowing it here.
+    const cur = this.session;
+    if (cur && cur !== s && cur.device === s.device && s.trusted) this._takeOver(s, true);   // same phone, newer link
+    else this._focus(s);                                                                        // never knocks one off
+    const w = { t: 'welcome', v: PROTO, pc: { id: this.id, name: this.name }, trusted: s.trusted, side: this.settings.side, anchor: this.settings.anchor, theme: this.settings.theme };
+    if (why) w.why = why;
+    s.conn.send(w);
+    this.emit('phone-hello', this._publicSession(s));
+    if (s.resume && s.trusted && this.session === s) this._connected(s);
   }
 
   _onUpgrade(req, socket, head) {
@@ -239,9 +327,9 @@ class FlickServer extends EventEmitter {
     const conn = acceptUpgrade(req, socket, head);
     if (!conn) return;
     this.wsByAddr.set(addr, (this.wsByAddr.get(addr) || 0) + 1);
-    const s = { conn, device: null, name: 'Phone', trusted: false, connected: false, screen: null, address: socket.remoteAddress };
-    // a phone says hello right away; a socket that doesn't is closed
-    const helloT = setTimeout(() => { if (!s.device) conn.close(); }, 10000);
+    const s = { conn, device: null, name: 'Phone', trusted: false, connected: false, screen: null, address: socket.remoteAddress, chan: this._chan(socket) };
+    // a phone says hello right away (and signs in right after); a socket that doesn't is closed
+    const helloT = setTimeout(() => { if (!s.device || s.authWait) conn.close(); }, 10000);
     conn.on('message', (txt) => {
       let m;
       try { m = JSON.parse(txt); } catch (e) { return; }
@@ -265,25 +353,56 @@ class FlickServer extends EventEmitter {
   _onPhoneMessage(s, m) {
     switch (m.t) {
       case 'hello': {
+        if (s.helloed) break;                                   // one hello per socket
+        s.helloed = true;
         s.device = String(m.device || '').slice(0, 64);
         s.name = String(m.name || 'Phone').slice(0, 60);
         s.screen = { w: +m.w || 400, h: +m.h || 860, dpr: +m.dpr || 2 };
         s.app = Math.max(0, Math.floor(+m.app || 0));          // phone app version code (0 = before 1.4)
         s.appName = String(m.appName || '').slice(0, 20);
         s.via = /^(wifi|usb|hotspot|direct|ethernet|bluetooth)$/.test(m.via) ? m.via : (s.via || '');
-        s.trusted = this._trusted(s.device, m.token);
-        s.token = s.trusted ? m.token : null;
-        // Only one phone uses the PC at a time. Opening Flick on a second phone must not knock the connected one off:
-        // a new socket becomes the session when nobody is connected, or when it's the same phone on a newer link.
-        // Switching to another phone takes an explicit "connect" from it (see below) or the user allowing it here.
-        {
-          const cur = this.session;
-          if (cur && cur !== s && cur.device === s.device) this._takeOver(s, true);   // the same phone on a newer link
-          else this._focus(s);                                                          // never knocks off a connected phone
+        s.resume = !!m.resume;
+        const d = this.devices[s.device];
+        if ((+m.v || 0) >= 4 && /^[0-9a-f]{32,64}$/.test(String(m.nonce || ''))) {
+          // Sign-in (phone apps from 1.9). The token never crosses the network: each side proves it holds it with an
+          // HMAC over both sides' random numbers and the link's identity (this PC's certificate), so someone in the
+          // middle can neither read it nor relay the proof onto a link of their own. The PC proves itself first.
+          s.v4 = true; s.nonceP = m.nonce; s.nonceS = rid(16);
+          if (d && d.token && !(d.tls && s.chan === 'plain')) {
+            s.authWait = true;
+            s.conn.send({ t: 'auth?', v: PROTO, nonce: s.nonceS, proof: this._proof(d.token, 'pc', s), pc: { id: this.id, name: this.name } });
+            break;                                              // continues at 'auth'
+          }
+          this._helloDone(s, false);                            // not paired here: it can ask to pair
+          break;
         }
-        s.conn.send({ t: 'welcome', v: PROTO, pc: { id: this.id, name: this.name }, trusted: s.trusted, side: this.settings.side, anchor: this.settings.anchor, theme: this.settings.theme });
-        this.emit('phone-hello', this._publicSession(s));
-        if (m.resume && s.trusted && this.session === s) this._connected(s);
+        // phone apps before 1.9 send the token itself: good only over a plain link, from a phone that never signed in
+        // over a secure one
+        s.trusted = this._trusted(s.device, m.token) && !(d && d.tls);
+        s.token = s.trusted ? m.token : null;
+        this._helloDone(s, s.trusted);
+        break;
+      }
+      case 'auth': {
+        if (!s.authWait) break;
+        s.authWait = false;
+        const d = this.devices[s.device];
+        if (!d || !d.token || !sameHex(String(m.proof || ''), this._proof(d.token, 'phone', s))) {
+          this.emit('log', 'sign-in failed for a phone');
+          this._helloDone(s, false, 'auth');                    // it can still ask to pair again
+          break;
+        }
+        s.token = d.token;
+        if (s.chan !== 'plain' && !d.tls) {
+          // its first sign-in over a secure link: a new token that never travelled in the clear (an old one might
+          // have been overheard), and from now on plain links don't work for this phone
+          const token = rid(16);
+          this.devices[s.device] = Object.assign({}, d, { token, tls: true });
+          s.token = token;
+          s.conn.send({ t: 'token', token });
+          this.emit('devices-changed', this.devices);
+        }
+        this._helloDone(s, true);
         break;
       }
       case 'screen':
@@ -306,20 +425,42 @@ class FlickServer extends EventEmitter {
           }
           this._connected(s);
         } else {
+          if (!s.helloed || s.authWait) break;
           // Each request pulls the Flick window to the front, so a stranger mustn't be able to spam them: one prompt
           // at a time, a short pause for an address the user just declined, and a cap per minute.
           const now = Date.now();
           if ((this.cool.get(s.address) || 0) > now) { s.conn.send({ t: 'denied' }); break; }
           for (const [dev, p] of this.pending) if (!p.conn || !p.conn.open) this.pending.delete(dev);
           if ([...this.pending.values()].some((p) => p !== s)) { s.conn.send({ t: 'denied' }); break; }
+          if (s.v4 && !/^[0-9a-f]{64}$/.test(String(m.commit || ''))) break;
           this.pairTimes = this.pairTimes.filter((t) => now - t < 60000);
           if (this.pairTimes.length >= 6) { s.conn.send({ t: 'denied' }); break; }
           this.pairTimes.push(now);
           this.pending.set(s.device, s);
+          if (s.v4) {
+            // Pairing code (phone apps from 1.9): the phone has committed to its random number (a hash of it); we
+            // answer with ours; only then does it reveal its own. So nobody, the phone included, can pick numbers that
+            // steer the code, and someone in the middle (with a different certificate) shows a different code.
+            s.pairCommit = String(m.commit); s.pairNonceS = rid(16); s.pairCode = null;
+            s.conn.send({ t: 'pairing', nonce: s.pairNonceS });
+            break;                                              // the PC asks once the phone reveals ('pair-reveal')
+          }
           s.conn.send({ t: 'pairing' });
           this.emit('pair-request', this._publicSession(s));
         }
         break;
+      case 'pair-reveal': {
+        if (!s.v4 || !s.pairCommit || s.pairCode || this.pending.get(s.device) !== s) break;
+        const n = String(m.nonce || '');
+        if (!/^[0-9a-f]{32,64}$/.test(n) || sha256(n) !== s.pairCommit) {
+          this.pending.delete(s.device);
+          s.conn.send({ t: 'denied' });
+          break;
+        }
+        s.pairCode = pairCode(s.chan, n, s.pairNonceS);
+        this.emit('pair-request', Object.assign(this._publicSession(s), { code: s.pairCode }));
+        break;
+      }
       case 'lift': case 'move': case 'drop': case 'cancel': case 'send':
         if (this.session === s && s.trusted) this.emit(m.t, m);
         break;
@@ -364,26 +505,26 @@ class FlickServer extends EventEmitter {
     const q = u.searchParams;
     if (req.method === 'GET' && u.pathname === '/api/hello') {
       // reachable only by non-browser clients (the host/origin gate above blocks web pages); the phone needs id+name
-      return this._json(res, 200, { app: 'flick', v: PROTO, id: this.id, name: this.name, port: this.port });
+      return this._json(res, 200, { app: 'flick', v: PROTO, id: this.id, name: this.name, port: this.port, tls: this.tlsCtx ? 1 : 0 });
     }
     if (req.method === 'POST' && u.pathname === '/api/upload') {
-      if (!this._trusted(q.get('device'), q.get('token'))) return this._json(res, 403, { ok: false, error: 'not paired' });
+      if (!this._trustedReq(req, q.get('device'), q.get('token'))) return this._json(res, 403, { ok: false, error: 'not paired' });
       return this._handleUpload(req, res, q);
     }
     if (req.method === 'POST' && u.pathname === '/api/part') {
-      if (!this._trusted(q.get('device'), q.get('token'))) return this._json(res, 403, { ok: false, error: 'not paired' });
+      if (!this._trustedReq(req, q.get('device'), q.get('token'))) return this._json(res, 403, { ok: false, error: 'not paired' });
       return this._handlePart(req, res, q);
     }
     if (req.method === 'POST' && u.pathname === '/api/bundle') {
-      if (!this._trusted(q.get('device'), q.get('token'))) return this._json(res, 403, { ok: false, error: 'not paired' });
+      if (!this._trustedReq(req, q.get('device'), q.get('token'))) return this._json(res, 403, { ok: false, error: 'not paired' });
       return this._handleBundle(req, res, q);
     }
     if (req.method === 'GET' && u.pathname.startsWith('/api/file/')) {
-      if (!this._trusted(q.get('device'), q.get('token'))) return this._json(res, 403, { ok: false, error: 'not paired' });
+      if (!this._trustedReq(req, q.get('device'), q.get('token'))) return this._json(res, 403, { ok: false, error: 'not paired' });
       return this._handleDownload(req, res, decodeURIComponent(u.pathname.slice('/api/file/'.length)));
     }
     if (req.method === 'GET' && u.pathname === '/api/app.apk') {
-      if (!this._trusted(q.get('device'), q.get('token'))) return this._json(res, 403, { ok: false, error: 'not paired' });
+      if (!this._trustedReq(req, q.get('device'), q.get('token'))) return this._json(res, 403, { ok: false, error: 'not paired' });
       return this._handleAppDownload(req, res);
     }
     this._json(res, 404, { ok: false });
@@ -857,4 +998,4 @@ class FlickServer extends EventEmitter {
   }
 }
 
-module.exports = { FlickServer, lanAddresses, rid };
+module.exports = { FlickServer, lanAddresses, rid, pairCode, PROTO };

@@ -6,6 +6,7 @@ const os = require('os');
 const { execFile, spawn } = require('child_process');
 const { FlickServer, lanAddresses, rid } = require('./server');
 const { apkInfoAsync } = require('./apkinfo');
+const tlscert = require('./tlscert');
 const { Updater } = require('./updater');
 
 const VERSION = require('./package.json').version;
@@ -1307,11 +1308,15 @@ app.whenReady().then(async () => {
   sweepTemp();
   // 1.0.0 could name the PC "Comment's PC" (Windows account without a full name): fix it automatically
   if (!store.name || store.name === "Comment's PC") { store.name = await defaultName(); saveStore(); }
+  // this PC's certificate (made the first time): phones from 1.9 on talk to it only over links encrypted with it
+  const tlsId = tlscert.ensure(app.getPath('userData'), 'Flick ' + store.id);
+  if (!tlsId) log('no certificate: encrypted links are off');
   server = new FlickServer({
     id: store.id, name: store.name, port: 47860, discoveryPort: 47870, version: VERSION,
     tmpDir: path.join(app.getPath('temp'), 'flick-incoming'), devices: store.devices,
     settings: { side: store.side, anchor: store.anchor, theme: themeName() },
     allowOrigin: TEST_MODE ? /^http:\/\/127\.0\.0\.1:\d+$/ : null,   // test harnesses serve the phone page over http
+    tls: tlsId,
   });
   wireServer();
   try { const port = await server.start(); log('listening', port, lanAddresses().map((a) => a.address).join(',')); }
