@@ -127,7 +127,8 @@ if (!opt.viaWorkflow) {
 }
 if (!direct.ok) {
   console.log('direct upload: ' + direct.err.split('\n')[0] + '\nattaching it through the "Attach release signature" workflow instead');
-  const run = tryGh(['workflow', 'run', 'attach-signature.yml', '--repo', opt.repo, '-f', 'version=' + version, '-f', 'sig=' + sig.trim()]);
+  const run = tryGh(['api', '--method', 'POST', `repos/${opt.repo}/actions/workflows/attach-signature.yml/dispatches`,
+    '-f', 'ref=main', '-f', 'inputs[version]=' + version, '-f', 'inputs[sig]=' + sig.trim()]);
   if (!run.ok) die("couldn't start the workflow: " + run.err);
   const nap = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   const until = Date.now() + 15 * 60 * 1000;
