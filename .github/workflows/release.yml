@@ -1,0 +1,72 @@
+# Builds and publishes a Flick release whenever a push to main carries a version number that has no release yet.
+#
+#   1. bump "version" in pc/package.json (and add a "## <version>" section to CHANGES.md)
+#   2. push to main
+#
+# Installed copies of Flick on Windows check these releases and update themselves (pc/updater.js); phones then get
+# the phone app inside it over Wi-Fi from the PC. The phone app (pc/phone-app/Flick.apk) is built and signed
+# outside GitHub, so its signing key never lives here (see signing/README.md).
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: New version?
+        id: v
+        run: |
+          V=$(node -p "require('./pc/package.json').version")
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          if gh release view "v$V" > /dev/null 2>&1; then
+            echo "new=false" >> "$GITHUB_OUTPUT"; echo "v$V is already released: nothing to do"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"; echo "building v$V"
+          fi
+
+      - name: Tools
+        if: steps.v.outputs.new == 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends nsis wine64 xvfb zip unzip > /dev/null
+          mkdir -p "$RUNNER_TEMP/tools" && cd "$RUNNER_TEMP/tools"
+          EV=$(node -p "require('$GITHUB_WORKSPACE/pc/package.json').electronVersion")
+          curl -fsSL -o electron-win32-x64.zip "https://github.com/electron/electron/releases/download/v$EV/electron-v$EV-win32-x64.zip"
+          curl -fsSL -o rcedit-x64.exe "https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe"
+
+      - name: Build the Windows app, its update bundle and the installer
+        if: steps.v.outputs.new == 'true'
+        run: |
+          WINE=$(command -v wine64 || command -v wine || echo /usr/lib/wine/wine64)
+          EZIP="$RUNNER_TEMP/tools/electron-win32-x64.zip" RCEDIT="$RUNNER_TEMP/tools/rcedit-x64.exe" WINE="$WINE" \
+          WINEPREFIX="$RUNNER_TEMP/wine" NSISDIR=/usr/share/nsis MAKENSIS=makensis STRICT=1 ./build_win.sh
+
+      - name: Publish the release
+        if: steps.v.outputs.new == 'true'
+        run: |
+          V="${{ steps.v.outputs.version }}"
+          OUT=build/release && mkdir -p "$OUT"
+          APKV=$(node -p "require('./pc/apkinfo').apkInfo('pc/phone-app/Flick.apk').name")
+          cp build/win/Flick-Setup.exe "$OUT/Flick-Setup.exe"
+          cp build/win/flick-app-$V.zip "$OUT/flick-app-$V.zip"
+          cp pc/phone-app/Flick.apk "$OUT/Flick-$APKV.apk"
+          ( cd "$OUT" && sha256sum * > SHA256SUMS )
+          awk -v v="## $V" '$0==v{f=1;next} /^## /{f=0} f' CHANGES.md > notes.md
+          [ -s notes.md ] || echo "Flick $V" > notes.md
+          gh release create "v$V" --target "$GITHUB_SHA" --title "Flick $V" --notes-file notes.md "$OUT"/*

@@ -39,6 +39,14 @@
     if (document.activeElement !== $('name')) $('name').value = s.name || '';
     $('addr').textContent = (s.ips && s.ips.length ? s.ips.slice(0, 3).join(', ') : 'No network') + (s.port ? `  (port ${s.port})` : '');
     $('ver').textContent = 'Flick ' + s.version;
+    // updates from GitHub
+    const u = s.update || {};
+    const ut = u.state === 'ready' ? 'Update ' + u.version + ' is downloaded. Flick restarts into it when it isn\u2019t busy.'
+      : u.state === 'installer' ? 'Flick ' + u.version + ' is out and needs the full installer.' : '';
+    $('upd').hidden = !ut;
+    $('updText').textContent = ut;
+    $('updLink').hidden = u.state !== 'installer';
+    $('updLink').textContent = 'Get it';
     if (s.phoneApp) {
       // the phone app this PC hands out over Wi-Fi
       const line = document.createElement('div');
@@ -92,6 +100,7 @@
   $('deny').onclick = () => { if (pairDevice) api.send('panel:pair-answer', { device: pairDevice, allow: false }); $('pair').hidden = true; pairDevice = null; };
   $('close').onclick = () => act('hide');
   $('quit').onclick = () => act('quit');
+  $('updLink').onclick = () => act(S && S.update && S.update.state === 'installer' ? 'openRelease' : 'checkUpdates');
   $('openFolder').onclick = () => act('openFolder');
   $('firewall').onclick = () => act('fixFirewall');
   $('introOk').onclick = () => act('dismissIntro');

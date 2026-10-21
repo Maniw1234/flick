@@ -1,13 +1,16 @@
 #!/bin/bash
-# Builds Flick.apk without Gradle: javac -> dx -> aapt2 -> zip -> zipalign+sign (uber-apk-signer)
+# Builds Flick.apk without Gradle: javac -> dx/d8 -> aapt2 -> zip -> zipalign+sign (uber-apk-signer)
+# usage: ./build_apk.sh <versionCode> <versionName>   (versionCode = major*10000 + minor*100 + patch)
 set -euo pipefail
-ROOT=/home/claude/flick
+ROOT=$(cd "$(dirname "$0")" && pwd)
 AND=$ROOT/android
 OUT=$ROOT/build/android
-AJ=/home/claude/tools/aplat/repo/android-34/android.jar
-A2=/home/claude/tools/aapt2/aapt2
-DX=$(ls /home/claude/tools/dex2jar/x/*/lib/dx-30.0.2.jar)
-SIGNER=/home/claude/tools/signer/uber-apk-signer.jar
+# tool locations (override with environment variables on another machine)
+AJ=${AJ:-/home/claude/tools/aplat/repo/android-34/android.jar}
+A2=${A2:-/home/claude/tools/aapt2/aapt2}
+D8=${D8:-}                                     # Android build-tools d8, if available; otherwise the old dx jar
+DX=${DX:-$(ls /home/claude/tools/dex2jar/x/*/lib/dx-30.0.2.jar 2>/dev/null || true)}
+SIGNER=${SIGNER:-/home/claude/tools/signer/uber-apk-signer.jar}
 VERSION_CODE=${1:-1}
 VERSION_NAME=${2:-1.0.0}
 
@@ -18,8 +21,12 @@ echo "== javac"
 javac -encoding UTF-8 -source 8 -target 8 -bootclasspath "$AJ" -Xlint:-options -Xlint:deprecation -d "$OUT/classes" $(find "$AND/src" -name '*.java') 2>&1 | grep -v "JAVA_TOOL_OPTIONS" || true
 test -f "$OUT/classes/com/flick/app/MainActivity.class"
 
-echo "== dx"
-java -cp "$DX" com.android.dx.command.Main --dex --min-sdk-version=24 --output="$OUT/classes.dex" "$OUT/classes" 2>&1 | grep -v "JAVA_TOOL_OPTIONS" || true
+echo "== dex"
+if [ -n "$D8" ]; then
+  "$D8" --release --min-api 24 --lib "$AJ" --output "$OUT" $(find "$OUT/classes" -name '*.class')
+else
+  java -cp "$DX" com.android.dx.command.Main --dex --min-sdk-version=24 --output="$OUT/classes.dex" "$OUT/classes" 2>&1 | grep -v "JAVA_TOOL_OPTIONS" || true
+fi
 test -f "$OUT/classes.dex"
 
 echo "== aapt2"
@@ -40,4 +47,7 @@ java -jar "$SIGNER" -a "$OUT/base.apk" -o "$OUT/signed" --allowResign \
   --ksPass 1=android 2="$PW" --ksKeyPass 1=android 2="$PW" -l "$KEYS/flick.lineage" \
   2>&1 | grep -v "JAVA_TOOL_OPTIONS" | grep -E "verified|Successfully|ERROR|error" || true
 cp "$OUT"/signed/*.apk "$ROOT/build/Flick.apk"
+# the signed phone app ships inside the PC app (pc/phone-app); it is committed, because the signing key never
+# leaves this machine (GitHub builds the PC app around it, see .github/workflows/release.yml)
+mkdir -p "$ROOT/pc/phone-app" && cp "$ROOT/build/Flick.apk" "$ROOT/pc/phone-app/Flick.apk"
 ls -la "$ROOT/build/Flick.apk"

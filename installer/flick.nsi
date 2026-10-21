@@ -3,7 +3,6 @@ Unicode true
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
 !include "x64.nsh"
-!addplugindir /x86-unicode "${RESDIR}\plugins\x86-unicode"
 
 Name "Flick"
 OutFile "Flick-Setup.exe"
@@ -52,16 +51,12 @@ Function un.onInit
 FunctionEnd
 
 Function LaunchFlick
-  ; start as the normal (non-admin) user so drag-and-drop from Explorer works
-  StdUtils::ExecShellAsUser /NOUNLOAD "$INSTDIR\Flick.exe" "open" ""
-  Pop $0
-  ${If} $0 != "ok"
-    Exec '"$WINDIR\explorer.exe" "$INSTDIR\Flick.exe"'
-  ${EndIf}
+  ; started through Explorer, Flick runs as the normal (non-admin) user, so drag-and-drop from Explorer works
+  Exec '"$WINDIR\explorer.exe" "$INSTDIR\Flick.exe"'
 FunctionEnd
 
 Section "Install"
-  nsProcess::_KillProcess "Flick.exe"
+  nsExec::Exec 'taskkill /F /IM Flick.exe'
   Pop $0
   Sleep 800
   SetOutPath "$INSTDIR"
@@ -71,9 +66,7 @@ Section "Install"
 
   SetShellVarContext all
   CreateShortCut "$SMPROGRAMS\Flick.lnk" "$INSTDIR\Flick.exe" "" "$INSTDIR\Flick.ico" 0
-  WinShell::SetLnkAUMI "$SMPROGRAMS\Flick.lnk" "com.flick.pc"
   CreateShortCut "$DESKTOP\Flick.lnk" "$INSTDIR\Flick.exe" "" "$INSTDIR\Flick.ico" 0
-  WinShell::SetLnkAUMI "$DESKTOP\Flick.lnk" "com.flick.pc"
 
   ; allow the phone to reach Flick on this PC (private and public Wi-Fi)
   nsExec::Exec 'netsh advfirewall firewall delete rule name="Flick"'
@@ -93,11 +86,13 @@ Section "Install"
 SectionEnd
 
 Section "Uninstall"
-  nsProcess::_KillProcess "Flick.exe"
+  nsExec::Exec 'taskkill /F /IM Flick.exe'
   Pop $0
   Sleep 800
+  ; updates Flick downloaded by itself (per user, see updater.js)
+  SetShellVarContext current
+  RMDir /r "$LOCALAPPDATA\Flick\app"
   SetShellVarContext all
-  WinShell::UninstAppUserModelId "com.flick.pc"
   Delete "$SMPROGRAMS\Flick.lnk"
   Delete "$DESKTOP\Flick.lnk"
   nsExec::Exec 'netsh advfirewall firewall delete rule name="Flick"'

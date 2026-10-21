@@ -91,3 +91,5 @@ input[type=text]:focus { border-bottom: 2px solid var(--accent); background: rgb
 .psub { color: var(--sub); margin-top: 4px; }
 .pbtns { display: flex; gap: 8px; margin-top: 18px; } .pbtns .btn { flex: 1; padding: 7px; }
 @keyframes pop { from { transform: scale(.96); opacity: 0; } }
+.ver.upd { color: rgba(255,255,255,0.62); margin-top: 4px; line-height: 1.4; }
+.ver.upd .link { display: inline; font-size: 11px; padding: 0; }

@@ -66,7 +66,7 @@
   const tokenKey = (pcId) => 'token:' + pcId;
   const SEL = { on: false, ids: new Set() };   // multi-select: ids of the selected items in the current view
   // wireless update: the PC announces the newest phone app it has; app = { code, name, size, sha256, url }
-  const UPD = { app: null, pcKnows: false, state: 'idle', got: 0, total: 0, why: '', dismissed: 0, checkT: 0 };
+  const UPD = { app: null, pcKnows: false, state: 'idle', got: 0, total: 0, why: '', dismissed: 0, checkT: 0, auto: false };
   const MY_CODE = +INFO.code || 0;
 
   // ------------------------------------------------------------------ animation themes (the PC is the source of truth)
@@ -486,6 +486,21 @@
     if (isNewer(UPD.app) && (!was || was.code !== UPD.app.code || was.sha256 !== UPD.app.sha256) && !/^(downloading|installing|perm)$/.test(UPD.state)) UPD.state = 'ready';
     if (!isNewer(UPD.app) && UPD.state !== 'installing') UPD.state = 'idle';
     renderUpd();
+    if (UPD.state === 'ready' && st.connected) autoFetch();
+  }
+
+  // a newer version is waiting on the PC: fetch it in the background, so installing takes one tap
+  function autoFetch() {
+    const a = UPD.app;
+    if (!isNewer(a) || !st.pc) return;
+    const ns = njson('updateState');
+    if (!ns) return;                                    // this phone app can't update itself
+    if (ns.ready === a.code && ns.readySha === a.sha256.slice(0, 16).toLowerCase()) { UPD.state = 'fetched'; renderUpd(); return; }
+    if (ns.busy) return;
+    UPD.auto = true;
+    UPD.state = 'downloading'; UPD.got = 0; UPD.total = a.size || 0; UPD.why = '';
+    renderUpd();
+    if (nc('updateDownload', updUrl(), String(a.code), String(a.size), a.sha256) === null) { UPD.auto = false; UPD.state = 'ready'; renderUpd(); }
   }
 
   function updUrl() {
@@ -500,6 +515,7 @@
     if (!st.connected || !st.pc) { toast('Connect to your PC to update', 2200); renderUpd(); return; }
     const ns = njson('updateState') || {};
     if (ns.ready === a.code && ns.readySha === a.sha256.slice(0, 16).toLowerCase()) { installUpdate(); return; }      // already downloaded and checked
+    UPD.auto = false;
     UPD.state = 'downloading'; UPD.got = 0; UPD.total = a.size || 0; UPD.why = '';
     renderUpd();
     haptic('tick');
@@ -540,8 +556,9 @@
     const a = UPD.app, card = $('upd');
     const newer = isNewer(a);
     $('moreBtn').classList.toggle('dot', newer && UPD.state !== 'installing');
-    const active = /^(downloading|installing|perm|denied|back|error)$/.test(UPD.state);
-    const show = newer && st.screen === 'main' && !SEL.on && (active || UPD.dismissed !== a.code);
+    // a step the user started stays visible; anything else respects "Not now"
+    const started = /^(downloading|installing|perm)$/.test(UPD.state) && !UPD.auto;
+    const show = newer && st.screen === 'main' && !SEL.on && (started || UPD.dismissed !== a.code);
     document.body.classList.toggle('upd-on', !!show);
     if (!show) { card.hidden = true; return; }
     const v = a.name || String(a.code);
@@ -558,6 +575,7 @@
       case 'perm': title = 'Allow Flick to update itself'; sub = 'Turn on “Allow from this source”, then go back'; break;
       case 'denied': title = 'Allow Flick updates'; sub = 'A one-time Android permission'; btn = 'Allow'; break;
       case 'back': title = 'Flick ' + v + ' is downloaded'; sub = 'Tap Install to finish'; btn = 'Install'; break;
+      case 'fetched': title = 'Flick ' + v + ' is ready'; sub = 'Downloaded from ' + pc; btn = 'Install'; break;
       case 'error': title = 'Update didn’t finish'; sub = updWhy(UPD.why); btn = 'Try again'; break;
       default: title = 'Flick ' + v + ' is ready'; sub = 'Over Wi-Fi from ' + pc; btn = 'Update';
     }
@@ -570,12 +588,12 @@
   }
 
   $('updBtn').onclick = () => {
-    if (UPD.state === 'back' || UPD.state === 'denied') installUpdate();
+    if (UPD.state === 'back' || UPD.state === 'denied' || UPD.state === 'fetched') installUpdate();
     else startUpdate();
   };
   $('updClose').onclick = () => {
     if (UPD.app) UPD.dismissed = UPD.app.code;
-    if (UPD.state === 'error' || UPD.state === 'denied' || UPD.state === 'back') UPD.state = 'ready';
+    if (UPD.state === 'error' || UPD.state === 'denied') UPD.state = 'ready';
     haptic('soft');
     renderUpd();
   };
@@ -584,8 +602,9 @@
     switch (e.t) {
       case 'upd': UPD.got = +e.got || 0; UPD.total = +e.total || UPD.total; if (UPD.state === 'downloading') renderUpd(); break;
       case 'upd-done':
-        if (e.ok) installUpdate();
-        else { UPD.state = 'error'; UPD.why = e.why; haptic('reject'); renderUpd(); }
+        if (e.ok && UPD.auto) { UPD.auto = false; UPD.state = 'fetched'; renderUpd(); haptic('soft'); }   // fetched in the background: wait for a tap
+        else if (e.ok) installUpdate();
+        else { UPD.auto = false; UPD.state = 'error'; UPD.why = e.why; renderUpd(); }
         break;
       case 'upd-installing': UPD.state = 'installing'; renderUpd(); break;
       case 'upd-perm': UPD.state = 'perm'; renderUpd(); break;

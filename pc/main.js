@@ -6,6 +6,7 @@ const os = require('os');
 const { execFile, spawn } = require('child_process');
 const { FlickServer, lanAddresses, rid } = require('./server');
 const { apkInfoAsync } = require('./apkinfo');
+const { Updater } = require('./updater');
 
 const VERSION = require('./package.json').version;
 const IS_WIN = process.platform === 'win32';
@@ -369,6 +370,7 @@ function panelState() {
     connected: !!(server && server.connected), phone: s && s.connected ? s.name : null,
     phoneApp: server && server.phoneApp ? { name: server.phoneApp.name, code: server.phoneApp.code } : null,
     phoneHas: s && s.connected ? { code: s.app || 0, name: s.appName || '' } : null,
+    update: { state: updateInfo.state, version: updateInfo.version || '' },
     side: store.side, anchor: store.anchor, size: store.size, saveDir: store.saveDir, saveDirLabel: saveDirLabel(), saveDirPath: saveDirPath(),
     sound: store.sound, startup: store.startup, edgeSend: store.edgeSend, isWin: IS_WIN, theme: themeName(),
     devices: Object.entries(store.devices || {}).map(([id, d]) => ({ id, name: d.name, added: d.added })),
@@ -430,6 +432,8 @@ ipcMain.on('panel:action', async (_e, { what, arg }) => {
     case 'demo': fx('demo', {}); break;
     case 'dismissIntro': store.firstRun = false; saveStore(); pushPanelState(); break;
     case 'openLog': shell.openPath(LOG); break;
+    case 'openRelease': shell.openExternal(updateInfo.page && /^https:\/\/github\.com\//.test(updateInfo.page) ? updateInfo.page : 'https://github.com/Maniw1234/flick/releases/latest'); break;
+    case 'checkUpdates': runUpdateCheck(); break;
     default: break;
   }
 });
@@ -531,6 +535,51 @@ async function refreshPhoneApp(always) {
   pushPanelState();
 }
 setInterval(() => { if (server && server.connected) refreshPhoneApp(); }, 20000);
+
+// ------------------------------------------------------------ updates from GitHub (this PC app; the phone follows)
+const BOOT = global.FLICK_BOOT || null;     // set by boot.js: which copy of the app is running
+let updater = null, updateBusy = false, restartT = null;
+let updateInfo = { state: 'idle' };
+
+async function runUpdateCheck() {
+  if (!updater || updateBusy || process.env.FLICK_NO_UPDATES === '1') return;
+  updateBusy = true;
+  try {
+    updateInfo = await updater.check();
+    if (updateInfo.state === 'error') log('update check:', updateInfo.version || '', updateInfo.why);
+    if (updateInfo.state === 'ready') scheduleRestart(updateInfo.version);
+  } catch (e) { log('update check failed', e.message); }
+  updateBusy = false;
+  pushPanelState();
+}
+
+// restart into the new version, but never in the middle of a transfer or an animation
+function scheduleRestart(ver) {
+  if (restartT) return;
+  const tryNow = () => {
+    restartT = null;
+    const busy = transfers.size > 0 || overlayShown || (panel && panel.isVisible() && panel.isFocused());
+    if (busy) { restartT = setTimeout(tryNow, 30000); return; }
+    log('restarting into', ver);
+    const args = process.argv.slice(1).filter((a) => a !== '--hidden').concat('--hidden');
+    app.relaunch({ args });
+    app.isQuitting = true;
+    app.quit();
+  };
+  restartT = setTimeout(tryNow, TEST_MODE ? 1500 : 5000);
+}
+
+function startUpdater() {
+  updater = new Updater({
+    version: VERSION, electron: process.versions.electron, log,
+    fetch: (url, opts) => require('electron').net.fetch(url, opts),
+  });
+  if (BOOT && BOOT.failed) log('downloaded version failed to load, using the installed one:', BOOT.failed);
+  log('running', VERSION, BOOT && BOOT.dir ? 'from ' + BOOT.root + '\\' + BOOT.dir : '(installed copy)');
+  setTimeout(() => updater.markHealthy(BOOT), TEST_MODE ? 4000 : 15000);
+  setTimeout(runUpdateCheck, TEST_MODE ? 6000 : 20000);
+  setInterval(runUpdateCheck, 30 * 60 * 1000);
+}
 
 // ------------------------------------------------------------ transfers (phone -> PC)
 const transfers = new Map(); // tid -> state
@@ -763,6 +812,7 @@ app.whenReady().then(async () => {
   try { const port = await server.start(); log('listening', port, lanAddresses().map((a) => a.address).join(',')); }
   catch (e) { log('server failed', e.message); dialog.showErrorBox('Flick', 'Flick could not start its connection service.\n\n' + e.message); }
   refreshPhoneApp();
+  startUpdater();
 
   createOverlay();
   createTray();
@@ -792,6 +842,7 @@ function startTestControl() {
           transfers: [...transfers.values()].map((t) => ({ tid: t.tid, state: t.state, upload: t.upload, done: !!t.done })),
           panel: !!(panel && panel.isVisible()), catcher: !!catcher, catcherBounds: catcher && catcher.getBounds(),
           overlayBounds: overlay && overlay.getBounds(), saveDir: saveDirPath(), name: server && server.name,
+          version: VERSION, boot: BOOT, update: updateInfo,
         }));
       }
       if (u.pathname === '/eval') {
