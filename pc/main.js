@@ -475,7 +475,10 @@ async function sendPathsToPhone(list, screenY) {
     const name = path.basename(p);
     const mime = MIME[extOf(name)] || 'application/octet-stream';
     const offer = server.offerFile(p, mime);
-    const th = await thumbFor(p);
+    // only the cards that fly across the screen need a picture (the phone makes its own once a file has arrived).
+    // Thumbnails decode on this thread, so let downloads and messages run between files.
+    const th = i < shown ? await thumbFor(p) : null;
+    await new Promise((r) => setImmediate(r));
     const ext = extOf(name);
     const kind = kindOf(name);
     const aspect = th ? th.w / th.h : 0.72;
@@ -581,6 +584,8 @@ function onQsProgress(m) {
   const t = tid && transfers.get(tid);
   if (!t || !m.total) return;
   const now = Date.now();
+  if (now - (t.qsShown || 0) < 40 && m.got < m.total) return;   // one update per frame or two, like the Wi-Fi path
+  t.qsShown = now;
   if (!t.rt) { t.rt = now; t.rs = m.got; } else if (now - t.rt > 400) { const inst = Math.max(0, m.got - t.rs) / ((now - t.rt) / 1000); t.rate = t.rate ? t.rate * 0.6 + inst * 0.4 : inst; t.rt = now; t.rs = m.got; }
   t.seen = now;
   fx('progress', { tid, p: m.got / m.total, rate: store.showSpeed ? t.rate || 0 : 0 });

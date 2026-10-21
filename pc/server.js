@@ -12,7 +12,7 @@ const { EventEmitter } = require('events');
 const { acceptUpgrade } = require('./ws');
 const { BundleReceiver } = require('./bundle');
 
-const PROTO = 2;   // 2: large files in parallel parts (/api/part) and byte ranges
+const PROTO = 3;   // 2: large files in parallel parts (/api/part) and byte ranges; 3: bundles over several streams
 
 function rid(n = 12) { return crypto.randomBytes(n).toString('hex'); }
 
@@ -46,6 +46,7 @@ class FlickServer extends EventEmitter {
     this.uploads = new Map();   // tid -> { req, path }
     this.assemblies = new Map(); // tid -> a large file arriving in parallel parts (see _handlePart)
     this.partsSeen = new Map();  // "tid:att" -> { done | aborted, until }: late parts of a finished/aborted upload
+    this.bundleAsm = new Map();  // tid -> a bundle arriving over several streams at once (see _handleBundleStream)
     this.outgoing = new Map();  // fid -> { path, name, size, mime }
     this.pending = new Map();   // deviceId -> session awaiting approval
     this.pairTimes = [];        // when recent pairing prompts were shown (rate limit)
@@ -97,6 +98,7 @@ class FlickServer extends EventEmitter {
 
   stop() {
     clearInterval(this.sweepT); this.sweepT = null;
+    for (const b of [...this.bundleAsm.values()]) this._dropBundleAsm(b, true);
     try { this.http && this.http.close(); } catch (e) { /* ignore */ }
     try { this.udp && this.udp.close(); } catch (e) { /* ignore */ }
     if (this.session && this.session.conn) this.session.conn.close();
@@ -423,6 +425,8 @@ class FlickServer extends EventEmitter {
     if (old && old !== entry) { old.superseded = true; try { old.req.destroy(); } catch (e) { /* ignore */ } }
     const asm = this.assemblies.get(tid);
     if (asm) this._dropAssembly(asm, true);
+    const ba = this.bundleAsm.get(tid);
+    if (ba) this._dropBundleAsm(ba, true);
     this.uploads.set(tid, entry);
   }
 
@@ -438,7 +442,11 @@ class FlickServer extends EventEmitter {
     for (const a of [...this.assemblies.values()]) {
       if (a.reqs.size === 0 && now - a.active > 60000) { this._dropAssembly(a, false); this.emit('upload-failed', { tid: a.tid, why: 'abandoned' }); }
     }
+    for (const b of [...this.bundleAsm.values()]) {
+      if (b.reqs.size === 0 && now - b.active > 60000) { this._dropBundleAsm(b, false); this.emit('upload-failed', { tid: b.tid, why: 'abandoned' }); }
+    }
   }
+  _sweepSoon() { if (!this.sweepT) { this.sweepT = setInterval(() => this._sweepAssemblies(), 15000); if (this.sweepT.unref) this.sweepT.unref(); } }
   _release(tid, entry) { if (this.uploads.get(tid) === entry) this.uploads.delete(tid); }
 
   _handleUpload(req, res, q) {
@@ -496,8 +504,110 @@ class FlickServer extends EventEmitter {
     });
   }
 
+  // A bundle striped over several connections (streams=K, stream=i): each stream is an ordinary bundle body carrying
+  // some of the files; all of them write into one staging folder, and the transfer is done when every stream is.
+  // A stream sent again (same "att") starts over and rewrites the files it had written; a new attempt replaces all.
+  _handleBundleStream(req, res, q) {
+    const clean = (v, n) => String(v || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, n);
+    const tid = clean(q.get('tid'), 40) || rid(6);
+    const att = clean(q.get('att'), 20) || 'a';
+    const K = parseInt(q.get('streams'), 10), si = parseInt(q.get('stream'), 10);
+    if (!(K >= 2 && K <= 8 && si >= 0 && si < K)) { req.resume(); return this._json(res, 400, { ok: false, error: 'bad stream' }); }
+    const seen = this.partsSeen.get(tid + ':' + att);
+    if (seen && seen.until > Date.now()) {
+      req.resume();
+      return seen.what === 'done' ? this._json(res, 200, { ok: true, stream: si, done: true }) : this._json(res, 410, { ok: false, error: 'aborted' });
+    }
+    let A = this.bundleAsm.get(tid);
+    if (A && (A.att !== att || A.K !== K)) { if (A.att !== att) this._remember(tid, A.att, 'aborted'); this._dropBundleAsm(A, true); A = null; }
+    if (!A) {
+      if (!this._roomFor(+q.get('bytes') || 0)) { req.resume(); return this._json(res, 507, { ok: false, error: 'no space' }); }
+      const old = this.uploads.get(tid);
+      if (old) { old.superseded = true; try { old.req.destroy(); } catch (e) { /* ignore */ } }
+      const pa = this.assemblies.get(tid);
+      if (pa) this._dropAssembly(pa, true);
+      const root = path.join(this.tmpDir, 'b-' + tid + '-' + att + '-' + rid(3));
+      try { fs.mkdirSync(root, { recursive: true }); } catch (e) { req.resume(); return this._json(res, 500, { ok: false, error: 'staging' }); }
+      A = { tid, att, K, root, shared: { taken: new Map(), tops: [], assigned: new Map() }, got: new Array(K).fill(0), done: new Array(K).fill(false),
+        reqs: new Set(), manifest: null, total: +q.get('bytes') || 0, finished: false, superseded: false, t0: Date.now(), lastEmit: 0, active: Date.now() };
+      this.bundleAsm.set(tid, A);
+      this.emit('upload-start', { tid, name: 'bundle', total: A.total, streams: K });
+    }
+    if (A.finished) { req.resume(); return this._json(res, 409, { ok: false, error: 'finished' }); }
+    A.reqs.add(req); A.active = Date.now();
+    this._sweepSoon();
+    A.got[si] = 0; A.done[si] = false;
+    let over = false;
+    const progress = () => {
+      const now = Date.now();
+      if (now - A.lastEmit < 40) return;
+      A.lastEmit = now;
+      this.emit('upload-progress', { tid, received: A.got.reduce((x, y) => x + y, 0), total: A.total });
+    };
+    const rx = new BundleReceiver(A.root, {
+      onManifest: (m) => {
+        if (A.manifest) return;
+        A.manifest = m; A.total = +m.bytes || A.total;
+        this.emit('bundle-manifest', { tid, files: +m.files || 0, bytes: +m.bytes || 0, roots: Array.isArray(m.roots) ? m.roots.slice(0, 500).map(String) : [] });
+      },
+      onProgress: (got) => { A.got[si] = got; A.active = Date.now(); progress(); },
+    }, A.shared);
+    const fail = (why, code) => {
+      if (over) return;
+      over = true;
+      A.reqs.delete(req); A.active = Date.now();
+      A.got[si] = 0;
+      Promise.resolve().then(() => rx.abort()).catch(() => {});
+      if (!res.headersSent) { try { this._json(res, code || 500, { ok: false, error: why }); } catch (e) { /* ignore */ } }
+      try { req.destroy(); } catch (e) { /* ignore */ }
+    };
+    const complete = () => {
+      if (over) return;
+      if (!rx.done) return fail('short', 400);
+      over = true;
+      A.reqs.delete(req);
+      A.done[si] = true;
+      this._json(res, 200, { ok: true, stream: si });
+      if (A.finished || A.superseded || !A.done.every(Boolean)) return progress();
+      A.finished = true;
+      this.bundleAsm.delete(tid);
+      this._remember(tid, att, 'done');
+      // the items in the order the phone listed them, whichever stream carried them
+      const roots = (A.manifest && Array.isArray(A.manifest.roots)) ? A.manifest.roots.map(String) : [];
+      const order = (x) => { const i = roots.indexOf(x); return i < 0 ? 1e9 : i; };
+      const tops = A.shared.tops.slice().sort((a, b) => order(a) - order(b));
+      const received = A.got.reduce((x, y) => x + y, 0);
+      this.emit('upload-progress', { tid, received, total: A.total || received });
+      this.emit('upload-done', { tid, tmpPath: A.root, name: tops.length === 1 ? tops[0] : tops.length + ' items', size: received, ms: Date.now() - A.t0, streams: K,
+        bundle: { tops, files: +(A.manifest && A.manifest.files) || 0, bytes: received } });
+    };
+    const queue = [];
+    let busy = false, ended = false;
+    const pump = async () => {
+      busy = true;
+      try { while (queue.length && !over && !A.superseded) await rx.push(queue.shift()); } catch (e) { busy = false; return fail(e.message || 'bad bundle', 400); }
+      busy = false;
+      if (over || A.superseded) return;
+      if (ended) return complete();
+      req.resume();
+    };
+    req.on('data', (chunk) => { if (over || A.superseded) return; queue.push(chunk); if (!busy) { req.pause(); pump(); } });
+    req.on('end', () => { ended = true; if (!busy) complete(); });
+    req.on('aborted', () => fail('aborted'));
+    req.on('error', () => fail('error'));
+  }
+
+  _dropBundleAsm(A, superseded) {
+    A.superseded = !!superseded; A.finished = true;
+    if (this.bundleAsm.get(A.tid) === A) this.bundleAsm.delete(A.tid);
+    for (const r of A.reqs) { try { r.destroy(); } catch (e) { /* ignore */ } }
+    A.reqs.clear();
+    setTimeout(() => fs.rm(A.root, { recursive: true, force: true, maxRetries: 3 }, () => {}), 50);
+  }
+
   // many files and folders in one streamed request (see bundle.js); staged in a folder of their own
   _handleBundle(req, res, q) {
+    if (q.get('streams') && q.get('streams') !== '1') return this._handleBundleStream(req, res, q);
     const tid = (q.get('tid') || rid(6)).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) || rid(6);
     const root = path.join(this.tmpDir, 'b-' + tid + '-' + rid(4));
     let finished = false;
@@ -599,7 +709,7 @@ class FlickServer extends EventEmitter {
     if (asm.finished) { req.resume(); return this._json(res, 409, { ok: false, error: 'finished' }); }
     const A = asm;
     A.reqs.add(req); A.active = Date.now();
-    if (!this.sweepT) { this.sweepT = setInterval(() => this._sweepAssemblies(), 15000); if (this.sweepT.unref) this.sweepT.unref(); }
+    this._sweepSoon();
     A.got[index] = 0; A.done[index] = false;      // a part sent again starts over
     let pos = offset, got = 0, queued = 0, writing = false, ended = false, over = false;
     const queue = [];
@@ -640,10 +750,15 @@ class FlickServer extends EventEmitter {
           // write what has arrived in one go (fewer, larger writes)
           let n = 0, k = 0;
           while (k < queue.length && n < 4 * 1024 * 1024) n += queue[k++].length;
-          const chunk = k === 1 ? queue.shift() : Buffer.concat(queue.splice(0, k), n);
-          queued -= chunk.length;
-          let w = 0;
-          while (w < chunk.length) { const r = await fd.write(chunk, w, chunk.length - w, pos); w += r.bytesWritten; pos += r.bytesWritten; }
+          // one writev for everything that has arrived: no copy into a joined buffer
+          let bufs = queue.splice(0, k);
+          queued -= n;
+          let left = n;
+          while (left > 0) {
+            const r = await fd.writev(bufs, pos);
+            pos += r.bytesWritten; left -= r.bytesWritten;
+            if (left > 0) { let skip = r.bytesWritten; while (skip >= bufs[0].length) { skip -= bufs[0].length; bufs.shift(); } if (skip) bufs[0] = bufs[0].subarray(skip); }
+          }
           if (req.isPaused() && queued < 4 * 1024 * 1024) req.resume();
         }
       } catch (e) { writing = false; return partFail('disk ' + (e.code || e.message)); }
@@ -679,6 +794,8 @@ class FlickServer extends EventEmitter {
     if (e) { try { e.req.destroy(); } catch (x) { /* ignore */ } }
     const a = this.assemblies.get(tid);
     if (a) { this._remember(tid, a.att, 'aborted'); this._dropAssembly(a, false); this.emit('upload-failed', { tid, why: 'aborted' }); }
+    const b = this.bundleAsm.get(tid);
+    if (b) { this._remember(tid, b.att, 'aborted'); this._dropBundleAsm(b, false); this.emit('upload-failed', { tid, why: 'aborted' }); }
   }
 
   /** files are on their way to the phone, or were just offered and not fetched yet: don't restart now */

@@ -36,8 +36,9 @@ class BundleReceiver {
   /**
    * @param {string} root  empty staging folder for this transfer
    * @param {object} hooks { onManifest(m), onProgress(received, total) }
+   * @param {object} [shared] { taken, tops, assigned }: state shared by the streams of one striped bundle
    */
-  constructor(root, hooks) {
+  constructor(root, hooks, shared) {
     this.root = path.resolve(root);
     this.hooks = hooks || {};
     this.stage = 'magic';
@@ -48,8 +49,9 @@ class BundleReceiver {
     this.received = 0;               // file bytes written
     this.total = 0;
     this.fd = null; this.left = 0; this.cur = null;
-    this.tops = [];                  // top-level names, in arrival order
-    this.taken = new Map();          // lower-cased staged file paths
+    this.tops = shared ? shared.tops : [];          // top-level names, in arrival order
+    this.taken = shared ? shared.taken : new Map(); // lower-cased staged file paths
+    this.assigned = shared ? shared.assigned : null; // requested path -> staged path: a stream sent again rewrites its own files
     this.done = false;
   }
 
@@ -80,9 +82,13 @@ class BundleReceiver {
     const size = Math.max(0, Math.floor(+h.s || 0));
     await fs.promises.mkdir(path.dirname(full), { recursive: true });
     const ext = path.extname(full), base = full.slice(0, full.length - ext.length);
-    let dest = full, i = 2;
-    while (this.taken.has(this._key(dest)) || fs.existsSync(dest)) dest = base + ' (' + i++ + ')' + ext;
-    this.taken.set(this._key(dest), true);
+    let dest = this.assigned && this.assigned.get(String(h.p));
+    if (!dest) {
+      dest = full; let i = 2;
+      while (this.taken.has(this._key(dest)) || fs.existsSync(dest)) dest = base + ' (' + i++ + ')' + ext;
+      this.taken.set(this._key(dest), true);
+      if (this.assigned) this.assigned.set(String(h.p), dest);
+    }
     if (segs.length === 1) this._top(path.basename(dest));
     this.fd = await fs.promises.open(dest, 'w');
     this.cur = { path: dest, mtime: +h.m || 0 };

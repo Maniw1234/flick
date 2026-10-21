@@ -13,6 +13,15 @@ A full review of Flick for bugs, security and speed.
 - Malformed or oversized network traffic can no longer make Flick on the PC use unlimited memory or disk.
 - Bluetooth only accepts paired devices over an encrypted link.
 
+**Faster**
+- Sending several photos or a folder now uses several connections at once, like a single big file already did
+  (about 3x faster for a batch of photos on good Wi-Fi). Needs Flick 1.8 on both the phone and the PC.
+- Files sent from the PC start reaching the phone right away instead of after every thumbnail is made (about 5x
+  faster for 100 photos).
+- Scrolling the phone's file grid is smooth even with thousands of files, and it decodes far fewer thumbnails.
+- The phone writes received files in bigger chunks, large single files use parallel connections from 8 MB (was
+  24 MB), the Flick window's preview videos pause when it isn't in front, and Quick Share uses less CPU.
+
 **Fixes**
 - A downloaded update could be undone by opening Flick a few times (or using Send to), and an update could wait
   forever to restart after a canceled transfer. Both are fixed; the restart also no longer re-sends files.

@@ -26,17 +26,17 @@ import java.util.concurrent.atomic.AtomicLong;
 final class Parallel {
     interface Progress { void onBytes(long done); }
 
-    // Retry budgets per part. Only attempts that moved no bytes (or that the PC answered with an error) count against
-    // them: on a weak link connections drop every few MB, and an attempt that got data through is worth repeating.
-    // An upload part starts over each time (the PC can't resume one), so its overall cap is small; a download range
-    // carries on from the bytes already written.
+    // Retry budgets per part. Only attempts that moved no bytes count against them, or that ended in a Strike (the PC
+    // answered with an error, or the connection stalled): on a weak link connections drop every few MB, and an attempt
+    // that got data through is worth repeating. An upload part starts over each time (the PC can't resume one), so its
+    // overall cap is small; a download range carries on from the bytes already written.
     static final int UP_FAILS = 3, UP_CAP = 10;
     static final int DOWN_FAILS = 4, DOWN_CAP = 100;
 
-    /** The PC answered, with an error status. */
-    static final class Refused extends IOException {
+    /** An attempt that counts against the budget even if bytes moved: an error status from the PC, or a stall. */
+    static final class Strike extends IOException {
         private static final long serialVersionUID = 1L;
-        Refused(String m) { super(m); }
+        Strike(String m, Throwable cause) { super(m, cause); }
     }
 
     private static final ExecutorService POOL = Executors.newCachedThreadPool(new ThreadFactory() {
@@ -72,7 +72,7 @@ final class Parallel {
                             sent.addAndGet(-mine[0]);
                             lastErr = e;
                             if (abort.get()) throw e;
-                            if ((mine[0] == 0 || e instanceof Refused) && ++fails >= UP_FAILS) throw e;
+                            if ((mine[0] == 0 || e instanceof Strike) && ++fails >= UP_FAILS) throw e;
                             try { Thread.sleep(400L * (fails + 1)); } catch (InterruptedException x) { throw e; }
                         }
                     }
@@ -118,9 +118,9 @@ final class Parallel {
             g.idle();
             int code = c.getResponseCode();
             drain(code == 200 ? c.getInputStream() : c.getErrorStream());
-            if (code != 200) throw new Refused("http " + code);
+            if (code != 200) throw new Strike("http " + code, null);
         } catch (IOException e) {
-            throw g != null && g.ended() != null ? new IOException(g.ended(), e) : e;
+            throw g != null && g.ended() != null ? new Strike(g.ended(), e) : e;
         } finally {
             if (g != null) g.close();
             try { if (raf != null) raf.close(); } catch (Throwable e) { /* ignore */ }
@@ -161,7 +161,7 @@ final class Parallel {
                             c.setRequestProperty("Range", "bytes=" + (off + done) + "-" + (off + len - 1));
                             int code = c.getResponseCode();
                             String cr = c.getHeaderField("Content-Range");
-                            if (code != 206 || cr == null || !cr.endsWith("/" + total)) throw new Refused("http " + code);
+                            if (code != 206 || cr == null || !cr.endsWith("/" + total)) throw new Strike("http " + code, null);
                             InputStream in = w.watch(c.getInputStream());
                             raf = new RandomAccessFile(part, "rw");
                             raf.seek(off + done);
@@ -178,9 +178,9 @@ final class Parallel {
                             } finally { try { in.close(); } catch (Throwable e) { /* ignore */ } }
                             if (done < len) throw new IOException("connection closed early");
                         } catch (IOException e) {
-                            lastErr = w != null && w.ended() != null ? new IOException(w.ended(), e) : e;
+                            lastErr = w != null && w.ended() != null ? new Strike(w.ended(), e) : e;
                             if (stop.get()) throw lastErr;
-                            if ((done == before || e instanceof Refused) && ++fails >= DOWN_FAILS) break;
+                            if ((done == before || lastErr instanceof Strike) && ++fails >= DOWN_FAILS) break;
                             try { Thread.sleep(300L * (fails + 1)); } catch (InterruptedException x) { throw lastErr; }
                         } finally {
                             if (w != null) w.close();

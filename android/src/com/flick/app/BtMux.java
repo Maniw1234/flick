@@ -51,6 +51,7 @@ final class BtMux {
     private final Object q = new Object();
     private final ArrayDeque<byte[]> control = new ArrayDeque<byte[]>(), data = new ArrayDeque<byte[]>();
     private static final int QUEUED = 8;            // data frames waiting at most (8 × 32 KB)
+    private final Object pinger = new Object();     // close() wakes the ping loop through it
 
     BtMux(InputStream in, OutputStream out, Closeable link, Listener l) {
         this.in = in; this.out = out; this.link = link; this.listener = l;
@@ -205,7 +206,8 @@ final class BtMux {
 
     private void pingLoop() {
         while (!closed) {
-            try { Thread.sleep(10000); } catch (InterruptedException e) { return; }
+            try { synchronized (pinger) { if (!closed) pinger.wait(10000); } } catch (InterruptedException e) { return; }
+            if (closed) return;
             if (System.currentTimeMillis() - lastRx > 35000) { close("silent"); return; }
             try { send(PING, 0, new byte[8], 0, 8); } catch (IOException e) { close("ping: " + e.getMessage()); return; }
         }
@@ -218,6 +220,7 @@ final class BtMux {
     void close(String why) {
         synchronized (this) { if (closed) return; closed = true; }
         synchronized (q) { control.clear(); data.clear(); q.notifyAll(); }   // the writer and waiting senders see it
+        synchronized (pinger) { pinger.notifyAll(); }                       // and the ping loop, now
         try { if (server != null) server.close(); } catch (IOException e) { /* ignore */ }
         try { link.close(); } catch (IOException e) { /* ignore */ }
         for (Stream st : streams.values()) { try { st.s.close(); } catch (IOException e) { /* ignore */ } }

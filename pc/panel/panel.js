@@ -101,9 +101,11 @@
   // preview clips play while the window is open (paused with reduced motion)
   const videos = [...document.querySelectorAll('.theme video')];
   function playClips(on) { for (const v of videos) { if (on && !reduceMotion) { const p = v.play(); if (p && p.catch) p.catch(() => {}); } else v.pause(); } }
-  document.addEventListener('visibilitychange', () => playClips(!document.hidden));
+  // only while someone is looking at this window: an open but unfocused panel costs nothing
+  document.addEventListener('visibilitychange', () => playClips(!document.hidden && document.hasFocus()));
   window.addEventListener('focus', () => playClips(true));
-  playClips(true);
+  window.addEventListener('blur', () => playClips(false));
+  playClips(document.hasFocus());
 
   api.on('panel:state', render);
   api.on('panel:pair', (s) => {

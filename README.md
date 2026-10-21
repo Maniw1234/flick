@@ -49,7 +49,8 @@ To try the whole build without publishing: Actions > Release > Run workflow, tic
 - **Quick Share:** `pc/quickshare.js` makes the PC a Quick Share receiver on the local network (mDNS advertisement,
   UKEY2 key exchange, encrypted Nearby frames). The PC asks before accepting and shows the same code as the phone.
 - **Large files** go over several connections at once (`/api/part` up, HTTP byte ranges down) when both sides speak
-  protocol 2.
+  protocol 2; from protocol 3, **batches** (several files or folders) are split across several `/api/bundle` streams
+  (`streams=k&stream=i`) that write into one staging folder on the PC.
 
 ## Security
 

@@ -12,7 +12,12 @@
   const damp = (cur, target, dt, ms) => target + (cur - target) * Math.exp(-dt / ms);
   const rid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  function svgEl(html) { const t = document.createElement('template'); t.innerHTML = html.trim(); return t.content.firstChild; }
+  const SVG_T = new Map();       // each SVG string is parsed once, then cloned
+  function svgEl(html) {
+    let t = SVG_T.get(html);
+    if (!t) { t = document.createElement('template'); t.innerHTML = html.trim(); SVG_T.set(html, t); }
+    return t.content.firstChild.cloneNode(true);
+  }
 
   // ------------------------------------------------------------------ native bridge
   const NV = window.FlickNative || null;
@@ -1020,7 +1025,7 @@
         img.draggable = false;
         img.onload = () => img.classList.add('ok');
         img.onerror = () => { img.remove(); if (isDoc && it.kind !== 'apk' && it.kind !== 'audio') { th.classList.add('doc'); th.appendChild(Object.assign(document.createElement('div'), { className: 'doclines' })); } };
-        img.src = src;
+        c._img = img; c._src = src;          // loaded by renderWindow once the grid isn't flying past it
         th.appendChild(img);
         if (isDoc) th.classList.add('hasimg');
       } else if (isDoc) {
@@ -1062,22 +1067,26 @@
     pr.querySelector('.arc').style.strokeDashoffset = String(53.4 * (1 - clamp(p, 0, 1)));
   }
 
+  let layoutGen = 0, maxCardH = 0;
   function computeLayout() {
     const W = innerWidth;
     const colW = (W - L.pad * 2 - L.gap) / 2;
     const cols = [0, 0];
     geo = visibleItems();
+    layoutGen++; maxCardH = 0;
     for (const it of geo) {
       const c = cols[0] <= cols[1] + 1 ? 0 : 1;
       const th = thumbH(it, colW);
       it._x = L.pad + c * (colW + L.gap); it._y = cols[c]; it._w = colW; it._th = th;
       cols[c] += th + L.meta + L.gap;
+      if (th + L.meta > maxCardH) maxCardH = th + L.meta;
     }
     gridH = Math.max(cols[0], cols[1]);
     grid.style.height = gridH + 'px';
   }
 
   function placeCard(el, it, animate, fresh) {
+    el._gen = layoutGen; el._anim = !!(animate && !fresh);
     el.style.width = it._w + 'px';
     el.querySelector('.thumb').style.height = it._th + 'px';
     const tf = 'translate3d(' + it._x.toFixed(1) + 'px,' + it._y.toFixed(1) + 'px,0)';
@@ -1086,24 +1095,44 @@
     el.style.transform = tf;
   }
 
+  // how fast the grid is moving (px/s): thumbnails wait while it flies past
+  const SV = { top: 0, t: 0, v: 0, settleT: 0 };
   function renderWindow(animate) {
-    const top = scroller.scrollTop - innerHeight * 1.0;
-    const bottom = scroller.scrollTop + innerHeight * 2.2;
+    const st0 = scroller.scrollTop, tnow = performance.now();
+    if (tnow - SV.t < 200) SV.v = Math.abs(st0 - SV.top) / Math.max(1, tnow - SV.t) * 1000; else SV.v = 0;
+    SV.top = st0; SV.t = tnow;
+    const top = st0 - innerHeight * 1.0;
+    const bottom = st0 + innerHeight * 2.2;
     const keep = new Set();
-    for (const it of geo) {
-      const inRange = it._y + it._th + L.meta > top && it._y < bottom;
-      const lifted = D && D.it === it;
-      if (!inRange && !lifted) continue;
+    // geo is ordered by _y (masonry: within 1 px), so start at the first item that can reach `top`
+    let lo = 0, hi = geo.length;
+    const from = top - maxCardH - 2;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (geo[mid]._y < from) lo = mid + 1; else hi = mid; }
+    const loadImgs = SV.v < 1500;                     // slow: the whole window
+    const loadVisible = SV.v < 3000;                  // medium: what is on screen
+    const visTop = st0 - 200, visBottom = st0 + innerHeight + 200;
+    const visit = (it) => {
       keep.add(it.id);
       let el = cards.get(it.id);
       const fresh = !el;
       if (!el) { el = buildCard(it); cards.set(it.id, el); grid.appendChild(el); if (SEL.ids.has(it.id)) el.classList.add('sel'); }
-      placeCard(el, it, animate, fresh);
+      if (fresh || el._gen !== layoutGen || animate) placeCard(el, it, animate, fresh);
+      else if (el._anim) { el._anim = false; el.classList.remove('anim'); }
+      if (el._src && (loadImgs || (loadVisible && it._y + it._th > visTop && it._y < visBottom))) { el._img.src = el._src; el._src = null; }
       if (fresh && animate && it._popIn) { delete it._popIn; el.classList.add('pop'); setTimeout(() => el.classList.remove('pop'), 600); }
+    };
+    for (let i = lo; i < geo.length; i++) {
+      const it = geo[i];
+      if (it._y >= bottom + 2) break;
+      if (it._y + it._th + L.meta > top) visit(it);
     }
+    if (D && D.it && !keep.has(D.it.id) && geo.includes(D.it)) visit(D.it);
     for (const [id, el] of cards) {
       if (!keep.has(id)) { el.remove(); cards.delete(id); }
     }
+    // once the grid slows down, the thumbnails it skipped are loaded
+    clearTimeout(SV.settleT);
+    if (!loadImgs) SV.settleT = setTimeout(() => { SV.t = 0; renderWindow(false); }, 140);
   }
 
   function layout(animate) {
@@ -1478,7 +1507,8 @@
   function fxSize() { const d = devicePixelRatio || 1; fxc.width = Math.round(innerWidth * d); fxc.height = Math.round(innerHeight * d); fctx.setTransform(d, 0, 0, d, 0, 0); }
   fxSize();
   window.addEventListener('resize', fxSize);
-  function fxKick() { if (!fxRaf) { fxLast = now(); fxRaf = requestAnimationFrame(fxFrame); } }
+  fxc.style.display = 'none';      // a full-screen layer costs every frame even when empty: shown only while an effect plays
+  function fxKick() { if (!fxRaf) { fxc.style.display = ''; fxLast = now(); fxRaf = requestAnimationFrame(fxFrame); } }
   function fxFrame(t) {
     const dt = Math.min(50, t - fxLast) / 1000; fxLast = t;
     fctx.clearRect(0, 0, innerWidth, innerHeight);
@@ -1490,11 +1520,15 @@
       p.draw(p, dt);
     }
     if (fxParts.length) fxRaf = requestAnimationFrame(fxFrame);
-    else { fxRaf = 0; fctx.clearRect(0, 0, innerWidth, innerHeight); }
+    else { fxRaf = 0; fctx.clearRect(0, 0, innerWidth, innerHeight); fxc.style.display = 'none'; }
   }
   // a soft cloud sprite, drawn once
   // vapor puffs: a few turbulent, wispy sprites (value-noise fbm, lit from the upper left), made once at startup
-  const puffImgs = (() => {
+  // made on first use (or once the page is idle), not while the app starts: ~25 ms on a desktop, ~90 ms on a phone
+  let puffCache = null;
+  const puffImgs = () => puffCache || (puffCache = makePuffs());
+  (window.requestIdleCallback || ((f) => setTimeout(f, 2000)))(() => puffImgs(), { timeout: 4000 });
+  function makePuffs() {
     const N = 128, out = [];
     const hash = (x, y, sd) => { let h = (Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(sd, 1442695041)) | 0; h = Math.imul(h ^ (h >>> 13), 1274126177); return ((h ^ (h >>> 16)) >>> 0) / 4294967295; };
     const vn = (x, y, sd) => {
@@ -1521,13 +1555,13 @@
       out.push(c);
     }
     return out;
-  })();
+  }
   function vaporBurst(x, y, dir, n) {
     for (let i = 0; i < n; i++) {
       const sp = 240 + Math.random() * 560, a = (Math.random() - 0.5) * 1.4;
       fxParts.push({ x: x + (Math.random() - 0.5) * 10, y: y + (Math.random() - 0.5) * 70, vx: dir * Math.cos(a) * sp, vy: Math.sin(a) * sp * 0.6,
         s0: 16 + Math.random() * 14, s1: 90 + Math.random() * 90, rot: Math.random() * 6.28, spin: (Math.random() - 0.5) * 1.2,
-        img: puffImgs[i % puffImgs.length], al: 0.55 + Math.random() * 0.3, age: -Math.random() * 0.07, life: 0.75 + Math.random() * 0.5,
+        img: (P => P[i % P.length])(puffImgs()), al: 0.55 + Math.random() * 0.3, age: -Math.random() * 0.07, life: 0.75 + Math.random() * 0.5,
         draw(p, dt) {
           const f = Math.exp(-dt / 0.17); p.vx *= f; p.vy *= f; p.x += p.vx * dt; p.y += p.vy * dt;
           const u = p.age / p.life, s = p.s0 + (p.s1 - p.s0) * (1 - Math.exp(-p.age / 0.22));
@@ -1699,7 +1733,9 @@
   }
   function bundleUrl(tid) {
     const tok = pref.get(tokenKey(st.pc.id), '');
-    return 'http://' + st.pc.ip + ':' + st.pc.port + '/api/bundle?tid=' + encodeURIComponent(tid) + '&device=' + encodeURIComponent(DEVICE) + '&token=' + encodeURIComponent(tok);
+    // PCs that speak protocol 3 take a bundle over several connections at once (the phone app decides when it's worth it)
+    return 'http://' + st.pc.ip + ':' + st.pc.port + '/api/bundle?tid=' + encodeURIComponent(tid) + '&device=' + encodeURIComponent(DEVICE) + '&token=' + encodeURIComponent(tok) +
+      ((st.pcProto || 1) >= 3 ? parallelArg() : '');
   }
   // one file goes as it is; several items, or any folder, go as one bundle (folders keep their insides)
   function startSend(tid, items) {
