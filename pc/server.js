@@ -34,6 +34,19 @@ function pairCode(chan, nonceP, nonceS) {
   return String(n).padStart(6, '0');
 }
 
+// The SDK level of the Android version a WebView's user agent names ("...; Android 8.1.0; ...", the lower one where a
+// version has two), or 0 when it doesn't say. Phone apps before 1.9 don't send their SDK level in hello, and they are
+// all an Android 7-8 phone can run.
+function uaSdk(ua) {
+  const m = /\bAndroid (\d+)(?:\.(\d+))?/.exec(String(ua || ''));
+  if (!m) return 0;
+  const v = +m[1], dot1 = +(m[2] || 0) >= 1;
+  if (v === 7 || v === 8) return (v === 7 ? 24 : 26) + (dot1 ? 1 : 0);   // 7.0 24, 7.1 25, 8.0 26, 8.1 27
+  if (v === 9) return 28;
+  if (v >= 10 && v <= 12) return v + 19;                                   // 10 29, 11 30, 12 31 (12L 32)
+  return v >= 13 && v < 100 ? v + 20 : 0;                                  // 13 33, 14 34, ...
+}
+
 function lanAddresses() {
   const out = [];
   const ifs = os.networkInterfaces();
@@ -81,17 +94,28 @@ class FlickServer extends EventEmitter {
   }
 
   // ---------- phone app updates ----------
-  _appPublic() {
+  // what phone s is offered: nothing its Android can't install (minSdk); sums + sig are the signed SHA256SUMS of the
+  // Flick release that lists this APK, which phone apps from 1.9 on require
+  _appPublic(s) {
     const a = this.phoneApp;
-    return a ? { code: a.code, name: a.name, size: a.size, sha256: a.sha256, url: '/api/app.apk' } : null;
+    if (!a) return null;
+    const sdk = s ? s.sdk || s.uaSdk || 0 : 0;
+    if (a.minSdk && sdk && sdk < a.minSdk) return null;
+    const o = { code: a.code, name: a.name, size: a.size, sha256: a.sha256, url: '/api/app.apk' };
+    if (a.minSdk) o.minSdk = a.minSdk;
+    if (a.sums && a.sig) { o.sums = a.sums; o.sig = a.sig; }
+    return o;
   }
 
   /** The phone decides for itself whether this is newer than what it runs; `always` answers a "check for updates". */
   setPhoneApp(info, always) {
     const prev = this.phoneApp;
-    this.phoneApp = info ? { path: info.path, code: info.code, name: info.name, size: info.size, sha256: info.sha256 } : null;
-    const changed = !prev !== !info || (prev && info && (prev.sha256 !== info.sha256 || prev.path !== info.path));
-    if (changed || always) this.pushToPhone({ t: 'app', app: this._appPublic() });
+    this.phoneApp = info ? {
+      path: info.path, code: info.code, name: info.name, size: info.size, sha256: info.sha256,
+      minSdk: info.minSdk || 0, sums: info.sums || '', sig: info.sig || '',
+    } : null;
+    const changed = !prev !== !info || (prev && info && (prev.sha256 !== info.sha256 || prev.path !== info.path || prev.sig !== this.phoneApp.sig));
+    if (changed || always) this.pushToPhone({ t: 'app', app: this._appPublic(this.session) });
   }
 
   // ---------- lifecycle ----------
@@ -307,7 +331,7 @@ class FlickServer extends EventEmitter {
 
   _connected(s) {
     s.connected = true;
-    s.conn.send({ t: 'connected', pc: { id: this.id, name: this.name }, side: this.settings.side, anchor: this.settings.anchor, theme: this.settings.theme, app: this._appPublic() });
+    s.conn.send({ t: 'connected', pc: { id: this.id, name: this.name }, side: this.settings.side, anchor: this.settings.anchor, theme: this.settings.theme, app: this._appPublic(s) });
     this.emit('connected', this._publicSession(s));
   }
 
@@ -345,6 +369,7 @@ class FlickServer extends EventEmitter {
     if (!conn) return;
     this.wsByAddr.set(addr, (this.wsByAddr.get(addr) || 0) + 1);
     const s = { conn, device: null, name: 'Phone', trusted: false, connected: false, screen: null, address: socket.remoteAddress, chan: this._chan(socket) };
+    s.uaSdk = uaSdk(req.headers['user-agent']);
     // a phone says hello right away (and signs in right after); a socket that doesn't is closed
     const helloT = setTimeout(() => { if (!s.device || s.authWait) conn.close(); }, 10000);
     conn.on('message', (txt) => {
@@ -377,6 +402,7 @@ class FlickServer extends EventEmitter {
         s.screen = { w: +m.w || 400, h: +m.h || 860, dpr: +m.dpr || 2 };
         s.app = Math.max(0, Math.floor(+m.app || 0));          // phone app version code (0 = before 1.4)
         s.appName = String(m.appName || '').slice(0, 20);
+        s.sdk = Math.max(0, Math.floor(+m.sdk || 0));           // Android SDK level (0 = not said: phone apps before 1.9)
         s.via = /^(wifi|usb|hotspot|direct|ethernet|bluetooth)$/.test(m.via) ? m.via : (s.via || '');
         s.resume = !!m.resume;
         const d = this.devices[s.device];

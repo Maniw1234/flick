@@ -1,5 +1,8 @@
 package com.flick.app;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -13,7 +16,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Downloads the phone-app update from the PC and makes sure it is exactly the file the PC announced
- * (size + SHA-256). No Android classes in here, so it can be exercised on any JVM.
+ * (size + SHA-256). No Android classes in here (org.json aside), so it can be exercised on any JVM.
  */
 final class UpdateFetch {
     interface Progress { void onBytes(long got, long total); }
@@ -66,14 +69,18 @@ final class UpdateFetch {
     }
 
     /** A small text resource (GitHub's "latest release" JSON). */
-    static String getText(String url, int max) throws IOException {
+    static String getText(String url, int max) throws IOException { return getText(url, max, "application/vnd.github+json"); }
+
+    /** The same for any small file (a release's SHA256SUMS); redirects to another https host are followed. */
+    static String getText(String url, int max, String accept) throws IOException {
         HttpURLConnection c = null;
         try {
             c = (HttpURLConnection) new URL(url).openConnection();
             c.setConnectTimeout(10000);
             c.setReadTimeout(20000);
             c.setUseCaches(false);
-            c.setRequestProperty("Accept", "application/vnd.github+json");
+            c.setInstanceFollowRedirects(true);
+            c.setRequestProperty("Accept", accept);
             c.setRequestProperty("User-Agent", "Flick-phone");
             int code = c.getResponseCode();
             if (code != 200) throw new IOException("http " + code);
@@ -93,6 +100,26 @@ final class UpdateFetch {
         } finally {
             if (c != null) c.disconnect();
         }
+    }
+
+    /**
+     * A GitHub release's SHA256SUMS and SHA256SUMS.sig as { sums, sig }, fetched from the download links in its JSON that
+     * start with prefix (GitHub answers those with a redirect to its file host); null when it doesn't have both.
+     */
+    static String[] releaseSums(String releaseJson, String prefix) throws IOException {
+        String sums = null, sig = null;
+        try {
+            JSONArray as = new JSONObject(releaseJson).optJSONArray("assets");
+            for (int i = 0; as != null && i < as.length(); i++) {
+                JSONObject x = as.optJSONObject(i);
+                String u = x == null ? "" : x.optString("browser_download_url", "");
+                if (!u.startsWith(prefix)) continue;
+                if ("SHA256SUMS".equals(x.optString("name"))) sums = u;
+                else if ("SHA256SUMS.sig".equals(x.optString("name"))) sig = u;
+            }
+        } catch (Exception e) { throw new IOException("bad release"); }
+        if (sums == null || sig == null) return null;
+        return new String[]{getText(sums, 64 * 1024, "application/octet-stream"), getText(sig, 4096, "application/octet-stream")};
     }
 
     static String hex(byte[] b) {

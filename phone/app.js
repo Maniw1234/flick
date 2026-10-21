@@ -85,8 +85,8 @@
   // compares two strings in time that doesn't depend on where they differ
   const sameStr = (a, b) => { a = String(a || ''); b = String(b || ''); if (!a || a.length !== b.length) return false; let x = 0; for (let i = 0; i < a.length; i++) x |= a.charCodeAt(i) ^ b.charCodeAt(i); return x === 0; };
   const SEL = { on: false, ids: new Set() };   // multi-select: ids of the selected items in the current view
-  // wireless update: the PC announces the newest phone app it has; app = { code, name, size, sha256, url }
-  const UPD = { app: null, pcApp: null, ghApp: null, ghAt: 0, ghAsk: false, pcKnows: false, state: 'idle', got: 0, total: 0, why: '', dismissed: 0, checkT: 0, auto: false };
+  // wireless update: the PC announces the newest phone app it has; app = { code, name, size, sha256, url, sums, sig }
+  const UPD = { app: null, pcApp: null, ghApp: null, ghAt: 0, ghAsk: false, pcKnows: false, state: 'idle', got: 0, total: 0, why: '', dismissed: 0, checkT: 0, auto: false, loud: false };
   const MY_CODE = +INFO.code || 0;
 
   // ------------------------------------------------------------------ animation themes (the PC is the source of truth)
@@ -723,15 +723,33 @@
   }
 
   // ------------------------------------------------------------------ updates (from GitHub, or over Wi-Fi from the PC)
-  // Both sources offer { code, name, size, sha256, url }; the newer one wins. Whatever is downloaded, Android-side
-  // code checks it is Flick, that exact version, and signed with Flick's key before it can be installed.
+  // Both sources offer { code, name, size, sha256, url, sums, sig } (+ minSdk from the PC); the newer one wins. Whatever
+  // is downloaded, Android-side code checks that Flick's release key signed sums (the release's SHA256SUMS, in sig) and
+  // that it lists this exact file, that it is Flick, that version, and signed with Flick's key before it can be installed.
   const isNewer = (a) => !!(a && a.code > MY_CODE);
   const GH_DL = /^https:\/\/github\.com\/Maniw1234\/flick\/releases\/download\//;
   const canFetch = (a) => !!a && (a.src === 'github' || !!(st.connected && st.pc));
+  const fits = (a) => !(+a.minSdk > 0 && +INFO.sdk > 0 && +INFO.sdk < +a.minSdk);   // this Android can install it
+  const UNSIGNED = 'This update isn’t signed by Flick, so it won’t be installed';
+
+  // signed: the offer carries a SHA256SUMS that lists this APK, and its signature (which only Android-side code checks)
+  function withSig(a, sums, sig) {
+    a.sums = typeof sums === 'string' ? sums : '';
+    a.sig = typeof sig === 'string' ? sig : '';
+    a.signed = !!a.sig.trim() && a.sums.split('\n').some((l) => {
+      const m = /^([0-9a-fA-F]{64}) [ *](.+?)\r?$/.exec(l);
+      return !!m && m[1].toLowerCase() === a.sha256.toLowerCase() && m[2] === 'Flick-' + a.name + '.apk';
+    });
+    return a;
+  }
 
   function bestApp() {
-    const p = UPD.pcApp, g = UPD.ghApp;
+    // an update this phone can't install is never offered; an unsigned one only once the user checks for updates
+    // (a release goes out a little before it is signed: no alarm in between, just as the PC skips it quietly)
+    const ok = (a) => !!a && fits(a) && (a.signed || UPD.loud);
+    const p = ok(UPD.pcApp) ? UPD.pcApp : null, g = ok(UPD.ghApp) ? UPD.ghApp : null;
     if (!p || !g) return p || g;
+    if (isNewer(p) && isNewer(g) && p.signed !== g.signed) return p.signed ? p : g;
     if (g.code !== p.code) return g.code > p.code ? g : p;
     return st.connected ? p : g;                        // same version: over Wi-Fi when connected
   }
@@ -739,14 +757,15 @@
   function applyApp() {
     const was = UPD.app;
     UPD.app = bestApp();
-    if (isNewer(UPD.app) && (!was || was.code !== UPD.app.code || was.sha256 !== UPD.app.sha256) && !/^(downloading|installing|perm)$/.test(UPD.state)) UPD.state = 'ready';
-    if (!isNewer(UPD.app) && UPD.state !== 'installing') UPD.state = 'idle';
+    const a = UPD.app;
+    if (isNewer(a) && (!was || was.code !== a.code || was.sha256 !== a.sha256 || was.signed !== a.signed) && !/^(downloading|installing|perm)$/.test(UPD.state)) UPD.state = a.signed ? 'ready' : 'unsigned';
+    if (!isNewer(a) && UPD.state !== 'installing') UPD.state = 'idle';
     renderUpd();
-    if (UPD.state === 'ready' && canFetch(UPD.app)) autoFetch();
+    if (UPD.state === 'ready' && canFetch(a)) autoFetch();
   }
 
   function onAppInfo(app, answer) {
-    UPD.pcApp = app && app.code && app.size > 0 && /^[0-9a-f]{64}$/i.test(app.sha256 || '') && app.url ? Object.assign({}, app, { src: 'pc' }) : null;
+    UPD.pcApp = app && app.code && app.size > 0 && /^[0-9a-f]{64}$/i.test(app.sha256 || '') && app.url ? withSig(Object.assign({}, app, { src: 'pc' }), app.sums, app.sig) : null;
     applyApp();
     if (answer && UPD.checkT && !UPD.ghAsk) {
       // reply to "Check for updates" (when GitHub isn't being asked)
@@ -766,21 +785,22 @@
     return true;
   }
 
-  function ghRelease(body) {
+  // sums, sig: the release's SHA256SUMS and SHA256SUMS.sig, which the Android side fetched with it (when it has them)
+  function ghRelease(body, sums, sig) {
     const r = JSON.parse(body);
     if (!r || r.draft || r.prerelease) return null;
     for (const as of r.assets || []) {
       const m = /^Flick-(\d{1,3})\.(\d{1,2})\.(\d{1,2})\.apk$/.exec((as && as.name) || '');
       const d = /^sha256:([0-9a-f]{64})$/i.exec((as && as.digest) || '');
       if (m && d && as.size > 0 && GH_DL.test(as.browser_download_url || '')) {
-        return { src: 'github', code: +m[1] * 10000 + +m[2] * 100 + +m[3], name: +m[1] + '.' + +m[2] + '.' + +m[3], size: +as.size, sha256: d[1].toLowerCase(), url: as.browser_download_url };
+        return withSig({ src: 'github', code: +m[1] * 10000 + +m[2] * 100 + +m[3], name: +m[1] + '.' + +m[2] + '.' + +m[3], size: +as.size, sha256: d[1].toLowerCase(), url: as.browser_download_url }, sums, sig);
       }
     }
     return null;
   }
 
   function onGitHub(e) {
-    if (e.ok) { try { UPD.ghApp = ghRelease(e.body); } catch (x) { UPD.ghApp = null; } }
+    if (e.ok) { try { UPD.ghApp = ghRelease(e.body, e.sums, e.sig); } catch (x) { UPD.ghApp = null; } }
     const ask = UPD.ghAsk;
     UPD.ghAsk = false;
     applyApp();
@@ -797,7 +817,7 @@
   // a newer version is out: fetch it in the background, so installing takes one tap
   function autoFetch() {
     const a = UPD.app;
-    if (!isNewer(a) || !canFetch(a) || settings.autoUpdate === false) return;
+    if (!isNewer(a) || !a.signed || !canFetch(a) || settings.autoUpdate === false) return;
     const ns = njson('updateState');
     if (!ns) return;                                    // this phone app can't update itself
     if (ns.ready === a.code && ns.readySha === a.sha256.slice(0, 16).toLowerCase()) { UPD.state = 'fetched'; renderUpd(); return; }
@@ -805,7 +825,7 @@
     UPD.auto = true;
     UPD.state = 'downloading'; UPD.got = 0; UPD.total = a.size || 0; UPD.why = '';
     renderUpd();
-    if (nc('updateDownload', updUrl(a), String(a.code), String(a.size), a.sha256) === null) { UPD.auto = false; UPD.state = 'ready'; renderUpd(); }
+    if (nc('updateDownload', updUrl(a), String(a.code), String(a.size), a.sha256, a.sums, a.sig) === null) { UPD.auto = false; UPD.state = 'ready'; renderUpd(); }
   }
 
   function updUrl(a) {
@@ -818,6 +838,7 @@
     const a = UPD.app;
     if (!isNewer(a)) return;
     UPD.dismissed = 0;
+    if (!a.signed) { UPD.state = 'unsigned'; renderUpd(); return; }
     if (!canFetch(a)) { toast('Connect to your PC to update', 2200); renderUpd(); return; }
     const ns = njson('updateState') || {};
     if (ns.ready === a.code && ns.readySha === a.sha256.slice(0, 16).toLowerCase()) { installUpdate(); return; }      // already downloaded and checked
@@ -825,7 +846,7 @@
     UPD.state = 'downloading'; UPD.got = 0; UPD.total = a.size || 0; UPD.why = '';
     renderUpd();
     haptic('tick');
-    if (nc('updateDownload', updUrl(a), String(a.code), String(a.size), a.sha256) === null) { UPD.state = 'error'; UPD.why = 'unsupported'; renderUpd(); }
+    if (nc('updateDownload', updUrl(a), String(a.code), String(a.size), a.sha256, a.sums, a.sig) === null) { UPD.state = 'error'; UPD.why = 'unsupported'; renderUpd(); }
   }
 
   function installUpdate() {
@@ -835,6 +856,7 @@
   }
 
   function checkForUpdates() {
+    UPD.loud = true;                                    // the user asked: an unsigned update gets its message too
     const gh = checkGitHub(true);
     if (!gh && !st.connected) { toast('Connect to your PC to check for updates', 2400); return; }
     clearTimeout(UPD.checkT);
@@ -853,6 +875,7 @@
     if (/^http 403/.test(w)) return 'Your PC didn’t recognize this phone. Reconnect first.';
     if (/^http (404|409)/.test(w)) return 'The update on your PC changed. Try again.';
     if (/not newer/.test(w)) return 'You already have this version.';
+    if (/not signed/.test(w)) return UNSIGNED;
     if (/signature|not Flick|not an app|unexpected version/.test(w)) return 'That file isn’t a genuine Flick update.';
     if (/installer/.test(w)) return 'Android’s installer didn’t open.';
     if (/settings/.test(w)) return 'Android settings didn’t open.';
@@ -864,7 +887,7 @@
   function renderUpd() {
     const a = UPD.app, card = $('upd');
     const newer = isNewer(a);
-    $('moreBtn').classList.toggle('dot', newer && UPD.state !== 'installing');
+    $('moreBtn').classList.toggle('dot', newer && UPD.state !== 'installing' && UPD.state !== 'unsigned');
     // a step the user started stays visible; anything else respects "Not now"
     const started = /^(downloading|installing|perm)$/.test(UPD.state) && !UPD.auto;
     const show = newer && st.screen === 'main' && !SEL.on && (started || UPD.dismissed !== a.code);
@@ -886,6 +909,7 @@
       case 'back': title = 'Flick ' + v + ' is downloaded'; sub = 'Tap Install to finish'; btn = 'Install'; break;
       case 'fetched': title = 'Flick ' + v + ' is ready'; sub = 'Downloaded from ' + pc; btn = 'Install'; break;
       case 'error': title = 'Update didn’t finish'; sub = updWhy(UPD.why); btn = 'Try again'; break;
+      case 'unsigned': title = 'Not installing Flick ' + v; sub = UNSIGNED; break;
       default: title = 'Flick ' + v + ' is ready'; sub = a.src === 'github' ? 'New version on GitHub' : 'Over Wi-Fi from ' + pc; btn = 'Update';
     }
     $('updTitle').textContent = title;
@@ -902,6 +926,7 @@
   };
   $('updClose').onclick = () => {
     if (UPD.app) UPD.dismissed = UPD.app.code;
+    UPD.loud = false;
     if (UPD.state === 'error' || UPD.state === 'denied') UPD.state = 'ready';
     haptic('soft');
     renderUpd();
@@ -913,7 +938,7 @@
       case 'upd-done':
         if (e.ok && UPD.auto) { UPD.auto = false; UPD.state = 'fetched'; renderUpd(); haptic('soft'); }   // fetched in the background: wait for a tap
         else if (e.ok) installUpdate();
-        else { UPD.auto = false; UPD.state = 'error'; UPD.why = e.why; renderUpd(); }
+        else { UPD.auto = false; UPD.state = /not signed/.test(e.why || '') ? 'unsigned' : 'error'; UPD.why = e.why; renderUpd(); }
         break;
       case 'upd-installing': UPD.state = 'installing'; renderUpd(); break;
       case 'upd-perm': UPD.state = 'perm'; renderUpd(); break;
@@ -1497,7 +1522,7 @@
     for (const b of document.querySelectorAll('.tsheet .titem')) b.classList.toggle('on', b.dataset.v === st.theme);
   }
   $('moreBtn').onclick = () => {
-    const upd = isNewer(UPD.app);
+    const upd = isNewer(UPD.app) && UPD.app.signed;
     openSheet('', [
       upd ? { label: 'Update to Flick ' + (UPD.app.name || UPD.app.code), icon: 'update', tag: 'Ready', run: startUpdate } : null,
       { label: 'Animation', icon: 'spark', tag: themeOf(st.theme).name, run: themeSheet },

@@ -2,6 +2,8 @@
 #
 #   1. bump "version" in pc/package.json (and add a "## <version>" section to CHANGES.md)
 #   2. push to main
+#   3. once it is published, sign it on the computer that keeps the release key: node signing/sign_release.js <version>
+#      (installed copies take a release only once it has a valid SHA256SUMS.sig; this workflow never sees that key)
 #
 # Installed copies of Flick on Windows check these releases and update themselves (pc/updater.js); phones then get
 # the phone app inside it over Wi-Fi from the PC. The phone app is rebuilt and signed here only when it changed since

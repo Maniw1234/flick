@@ -8,6 +8,7 @@ const { FlickServer, lanAddresses, rid } = require('./server');
 const { apkInfoAsync } = require('./apkinfo');
 const tlscert = require('./tlscert');
 const { Updater } = require('./updater');
+const { readProof, writeProof } = require('./updatecore');
 
 const VERSION = require('./package.json').version;
 const IS_WIN = process.platform === 'win32';
@@ -15,6 +16,8 @@ const HIDDEN_START = process.argv.includes('--hidden');
 // The test control server runs arbitrary JS in a window, so it must never be reachable in a shipped build, even if
 // someone sets the env var: a packaged app refuses it outright.
 const TEST_MODE = process.env.FLICK_TEST === '1' && !app.isPackaged;
+// Releases must be signed with Flick's release key (updatecore.js); only a test run may trust its own throwaway key.
+const TEST_RELEASE_KEYS = TEST_MODE && process.env.FLICK_TEST_RELEASE_KEYS ? process.env.FLICK_TEST_RELEASE_KEYS.split(',') : undefined;
 
 if (process.env.FLICK_USERDATA) app.setPath('userData', process.env.FLICK_USERDATA);
 if (!app.requestSingleInstanceLock()) {
@@ -889,6 +892,30 @@ async function scanPhoneApps() {
   return best;
 }
 
+// Phones (1.9+) install a phone app only with the signed SHA256SUMS of the Flick release that lists it. This PC hands
+// out the pair of the release it runs: kept with a downloaded version (updater.js), or, for a copy installed with
+// Flick-Setup.exe, fetched once from GitHub and kept in userData. An APK it doesn't list goes out without them.
+const PROOF_DIR = path.join(userDir, 'release', VERSION);
+let proof = null, proofAt = 0, proofBusy = false;
+function releaseProof(asked) {     // asked: a phone's "Check for updates" may ask GitHub again after a minute
+  if (!proof) proof = readProof(__dirname, VERSION, TEST_RELEASE_KEYS) || readProof(PROOF_DIR, VERSION, TEST_RELEASE_KEYS);
+  if (!proof && updater && !proofBusy && Date.now() - proofAt > (asked ? 60000 : 30 * 60000) && process.env.FLICK_NO_UPDATES !== '1') {
+    proofBusy = true;
+    proofAt = Date.now();
+    updater.releaseProof(VERSION).then((p) => {
+      proofBusy = false;
+      if (!p) { log('no signed SHA256SUMS for', VERSION, 'yet'); return; }
+      try {
+        fs.rmSync(path.dirname(PROOF_DIR), { recursive: true, force: true });   // older versions' pairs
+        writeProof(PROOF_DIR, p);
+      } catch (e) { log('keeping SHA256SUMS failed', e.message); }
+      proof = p;
+      refreshPhoneApp();
+    });
+  }
+  return proof;
+}
+
 let appScan = null;
 async function refreshPhoneApp(always) {
   if (!server) return;
@@ -896,9 +923,11 @@ async function refreshPhoneApp(always) {
   appScan = scanPhoneApps().catch((e) => { log('phone app scan failed', e.message); return null; });
   const best = await appScan;
   appScan = null;
+  const p = best && releaseProof(!!always);
+  if (p && p.list.get('Flick-' + best.name + '.apk') === best.sha256) Object.assign(best, { sums: p.sums.toString('utf8'), sig: p.sig });
   const prev = server.phoneApp;
-  if ((!prev) !== (!best) || (prev && best && (prev.sha256 !== best.sha256 || prev.path !== best.path))) {
-    log('phone app', best ? `${best.name} (${best.code}) ${best.path}` : 'none');
+  if ((!prev) !== (!best) || (prev && best && (prev.sha256 !== best.sha256 || prev.path !== best.path || prev.sig !== (best.sig || '')))) {
+    log('phone app', best ? `${best.name} (${best.code}) ${best.path}${best.sig ? ', signed release' : ''}` : 'none');
   }
   server.setPhoneApp(best, !!always);
   pushPanelState();
@@ -944,7 +973,7 @@ function scheduleRestart(ver) {
 
 function startUpdater() {
   updater = new Updater({
-    version: VERSION, electron: process.versions.electron, log,
+    version: VERSION, electron: process.versions.electron, log, keys: TEST_RELEASE_KEYS,
     fetch: (url, opts) => require('electron').net.fetch(url, opts),
   });
   if (BOOT && BOOT.failed) log('downloaded version failed to load, using the installed one:', BOOT.failed);

@@ -16,9 +16,21 @@ import android.provider.Settings;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
 import java.security.MessageDigest;
+import java.security.PublicKey;
+import java.security.spec.X509EncodedKeySpec;
+import java.util.Base64;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -28,10 +40,15 @@ import java.util.regex.Pattern;
  * signed with the key the installed app is signed with now, then hands it to Android's own installer, which asks the
  * user to confirm ("Do you want to update this app?") and ends with an "Open" button.
  *
+ * Every update (from the PC or from GitHub) must also come with its release's SHA256SUMS and SHA256SUMS.sig: signed
+ * with Flick's offline release key, which GitHub never sees, and listing this exact file. Without that it is refused.
+ *
  * One instance per process (the files are shared), attached to whichever activity is current.
  */
 final class Updater {
     private static final Pattern NAME = Pattern.compile("flick-(\\d{1,12})-([0-9a-f]{16})\\.apk");
+    // an update and, next to it, its release's signature + SHA256SUMS (written once the update passed every check)
+    private static final Pattern FILE = Pattern.compile("flick-(\\d{1,12})-([0-9a-f]{16})\\.(apk|release)");
     private static Updater instance;
 
     static synchronized Updater get(MainActivity a) {
@@ -73,7 +90,7 @@ final class Updater {
         if (fs == null) return;
         long have = installedCode(c);
         for (File f : fs) {
-            Matcher m = NAME.matcher(f.getName());
+            Matcher m = FILE.matcher(f.getName());
             boolean stale = m.matches() ? Long.parseLong(m.group(1)) <= have : System.currentTimeMillis() - f.lastModified() > 10 * 60 * 1000;
             if (stale) f.delete();
         }
@@ -104,9 +121,25 @@ final class Updater {
             Matcher m = NAME.matcher(f.getName());
             if (!m.matches()) continue;
             long code = Long.parseLong(m.group(1));
-            if (code > installedCode(app) && verify(f, code) == null) { ready = f; readyCode = code; readySha = m.group(2); return code; }
+            String[] rel = readRelease(f);                // no signed release next to it: never checked, not used
+            if (rel != null && code > installedCode(app) && verify(f, code, rel[0], rel[1]) == null) {
+                ready = f; readyCode = code; readySha = m.group(2); return code;
+            }
         }
         return 0;
+    }
+
+    static File releaseFile(File apk) { return new File(apk.getParent(), apk.getName().replaceAll("\\.apk$", ".release")); }
+
+    /** { sums, sig } kept next to a checked update, or null. The file is the signature line, then SHA256SUMS. */
+    static String[] readRelease(File apk) {
+        File f = releaseFile(apk);
+        if (!f.isFile() || f.length() > 70 * 1024) return null;
+        try {
+            String t = new String(java.nio.file.Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8);
+            int nl = t.indexOf('\n');
+            return nl < 0 ? null : new String[]{t.substring(nl + 1), t.substring(0, nl)};
+        } catch (Throwable e) { return null; }
     }
 
     String readySha() { return ready != null ? readySha : ""; }
@@ -125,7 +158,8 @@ final class Updater {
     void fail(String why) { emit("upd-done", "ok", false, "why", why); }
 
     // ---------------------------------------------------------------- download + check
-    void download(final String url, final long code, final long size, final String sha256) {
+    /** sums + sig: the SHA256SUMS of the Flick release this update comes from, and its SHA256SUMS.sig. */
+    void download(final String url, final long code, final long size, final String sha256, final String sums, final String sig) {
         synchronized (this) {
             if (busy) return;                    // a download is already running; its events reach the current page
             busy = true;
@@ -136,6 +170,9 @@ final class Updater {
                 File dest = null;
                 try {
                     if (sha256 == null || !sha256.matches("[0-9a-fA-F]{64}")) throw new IOException("checksum");
+                    // not even downloaded unless Flick's signed release lists it (checked again on the file below)
+                    String why = checkRelease(sums, sig, releasedName(sums, sha256), sha256);
+                    if (why != null) throw new IOException(why);
                     File d = dir(app);
                     if (!d.isDirectory() && !d.mkdirs()) throw new IOException("no space");
                     synchronized (Updater.this) { ready = null; }
@@ -150,12 +187,13 @@ final class Updater {
                             if (now - last[0] > 100 || got == total) { last[0] = now; emit("upd", "got", got, "total", total); }
                         }
                     });
-                    String why = verify(dest, code);
+                    why = verify(dest, code, sums, sig);
                     if (why != null) throw new IOException(why);
+                    writeRelease(dest, sums, sig);
                     synchronized (Updater.this) { ready = dest; readyCode = code; readySha = sha16; }
                     emit("upd-done", "ok", true, "code", code);
                 } catch (Throwable e) {
-                    if (dest != null) dest.delete();
+                    if (dest != null) { dest.delete(); releaseFile(dest).delete(); }
                     emit("upd-done", "ok", false, "why", String.valueOf(e.getMessage()));
                 } finally {
                     busy = false;
@@ -164,15 +202,30 @@ final class Updater {
         }, "flick-update").start();
     }
 
-    /** null when the file is a newer Flick signed by the same developer; otherwise why not. */
+    static void writeRelease(File apk, String sums, String sig) throws IOException {
+        FileOutputStream o = new FileOutputStream(releaseFile(apk));
+        try { o.write((sig.trim() + "\n" + sums).getBytes(StandardCharsets.UTF_8)); } finally { o.close(); }
+    }
+
+    /**
+     * null when the file is an update Flick released (sums + sig, see checkRelease) and a newer Flick signed by the
+     * same developer; otherwise why not.
+     */
     @SuppressWarnings("deprecation")
-    private String verify(File f, long expectCode) {
+    private String verify(File f, long expectCode, String sums, String sig) {
+        // first: Flick's signed release lists exactly this file (as Flick-<version>.apk)
+        String sha;
+        try { sha = sha256(f); } catch (IOException e) { return "missing"; }
+        String name = releasedName(sums, sha);
+        String rel = checkRelease(sums, sig, name, sha);
+        if (rel != null) return rel;
         PackageManager pm = app.getPackageManager();
         int flags = PackageManager.GET_SIGNATURES;
         if (Build.VERSION.SDK_INT >= 28) flags |= PackageManager.GET_SIGNING_CERTIFICATES;
         PackageInfo arc = pm.getPackageArchiveInfo(f.getPath(), flags);
         if (arc == null) return "not an app";
         if (!app.getPackageName().equals(arc.packageName)) return "not Flick";
+        if (!name.equals(arc.versionName)) return "unexpected version";
         long v = versionCode(arc);
         if (v != expectCode) return "unexpected version";
         PackageInfo me;
@@ -185,6 +238,90 @@ final class Updater {
         if (mine.isEmpty() || theirs.isEmpty()) return "missing signature";
         if (!mine.equals(theirs)) return "different signature";
         return null;
+    }
+
+    // ---------------------------------------------------------------- Flick's release signature
+    /**
+     * Flick's offline release keys (ECDSA P-256, SubjectPublicKeyInfo in base64): the same list as RELEASE_KEYS in
+     * pc/updatecore.js. signing/sign_release.js signs each release with one of them. Not final: tests use their own.
+     */
+    static String[] KEYS = {"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEUGJiEHyLcmPkuREqLXb7MLtKMKoRBQUNuKb8Gjcw7tIMuDVr0cRSM2Xjpu3SWDM4vdpGOJXnYjVG5Tin5P1DZA=="};
+    private static final Pattern SUM = Pattern.compile("([0-9a-fA-F]{64}) [ *](\\S.*?)\\r?");
+    private static final Pattern BUNDLE = Pattern.compile("flick-app-(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})\\.zip");
+    private static final Pattern APK = Pattern.compile("Flick-(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})\\.apk");
+
+    /**
+     * null when sums is a release's SHA256SUMS that one of KEYS signed (sig: SHA256SUMS.sig, base64 DER ECDSA over
+     * "flick-release-v1\nversion <release>\n" + sums) and that lists Flick-<versionName>.apk with this SHA-256;
+     * otherwise why not. <release> is the version whose Windows bundle (flick-app-<release>.zip) the release carries:
+     * the phone app in it can be older, when it didn't change since. versionName null: not listed at all.
+     */
+    static String checkRelease(String sums, String sig, String versionName, String sha256) {
+        if (sums == null || sig == null || sums.isEmpty() || sig.trim().isEmpty()) return "not signed";
+        Map<String, String> list = parseSums(sums);
+        if (list == null) return "not signed: bad SHA256SUMS";
+        Set<String> versions = new LinkedHashSet<String>();
+        for (String n : list.keySet()) { Matcher m = BUNDLE.matcher(n); if (m.matches()) versions.add(m.group(1)); }
+        if (versionName != null) versions.add(versionName);
+        boolean signed = false;
+        for (String v : versions) if (signedBy(v, sums, sig)) { signed = true; break; }
+        if (!signed) return "not signed";
+        String want = versionName == null ? null : list.get("Flick-" + versionName + ".apk");
+        if (want == null || sha256 == null || !want.equalsIgnoreCase(sha256)) return "not signed: not in SHA256SUMS";
+        return null;
+    }
+
+    /** true when sig is a valid signature of this release version's SHA256SUMS by one of KEYS. */
+    static boolean signedBy(String version, String sums, String sig) {
+        byte[] der;
+        try { der = Base64.getDecoder().decode(sig.trim()); } catch (IllegalArgumentException e) { return false; }
+        byte[] msg = ("flick-release-v1\nversion " + version + "\n" + sums).getBytes(StandardCharsets.UTF_8);
+        for (String k : KEYS) {
+            try {
+                PublicKey key = KeyFactory.getInstance("EC").generatePublic(new X509EncodedKeySpec(Base64.getDecoder().decode(k)));
+                java.security.Signature v = java.security.Signature.getInstance("SHA256withECDSA");
+                v.initVerify(key);
+                v.update(msg);
+                if (v.verify(der)) return true;
+            } catch (Throwable e) { /* not this key */ }
+        }
+        return false;
+    }
+
+    /** SHA256SUMS as name -> lowercase SHA-256; null if a line doesn't parse or a name repeats. */
+    static Map<String, String> parseSums(String text) {
+        Map<String, String> out = new HashMap<String, String>();
+        for (String line : text.split("\n")) {
+            if (line.trim().isEmpty()) continue;
+            Matcher m = SUM.matcher(line);
+            if (!m.matches() || out.containsKey(m.group(2))) return null;
+            out.put(m.group(2), m.group(1).toLowerCase(Locale.ROOT));
+        }
+        return out;
+    }
+
+    /** The version in the name SHA256SUMS gives this SHA-256 ("1.9.0" for Flick-1.9.0.apk), or null. */
+    static String releasedName(String sums, String sha256) {
+        Map<String, String> list = sums == null ? null : parseSums(sums);
+        if (list == null || sha256 == null) return null;
+        for (Map.Entry<String, String> e : list.entrySet()) {
+            Matcher m = APK.matcher(e.getKey());
+            if (m.matches() && e.getValue().equalsIgnoreCase(sha256)) return m.group(1);
+        }
+        return null;
+    }
+
+    static String sha256(File f) throws IOException {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            InputStream in = new FileInputStream(f);
+            try {
+                byte[] buf = new byte[64 * 1024];
+                int n;
+                while ((n = in.read(buf)) > 0) md.update(buf, 0, n);
+            } finally { in.close(); }
+            return UpdateFetch.hex(md.digest());
+        } catch (java.security.NoSuchAlgorithmException e) { throw new IOException("no SHA-256"); }
     }
 
     static Set<String> certs(Signature[] sigs) {
