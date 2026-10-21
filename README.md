@@ -1,7 +1,7 @@
 # Flick
 
-Throw files from your Android phone onto your Windows PC with a flick, and drag PC files back to the phone.
-Phone and PC talk directly over your Wi-Fi; nothing goes through the internet.
+Throw files from your Android phone onto your Windows PC with a flick, and send PC files back to the phone.
+Phone and PC talk directly (Wi-Fi, a USB cable, the phone's hotspot or Bluetooth); nothing goes through the internet.
 
 ## What's in here
 
@@ -10,6 +10,8 @@ Phone and PC talk directly over your Wi-Fi; nothing goes through the internet.
 | `pc/` | Windows app (Electron): LAN server (HTTP, WebSocket, UDP discovery), the transparent overlay with the animation themes (Roadster, Liquid, Teleport, Halo), the settings panel, and the service that hands phone updates to the phone |
 | `phone/` | The phone app's interface (HTML, CSS, JS) that runs inside the Android app's WebView |
 | `android/` | Android app (Java, built without Gradle): WebView host, file browser access, transfers, folder bundles, self-updater |
+| `native/` | `flick-bt.c`: the small Windows helper that offers Flick's Bluetooth service (built with MinGW) |
+| `ci/` | The release workflow's phone-app step (`phone_app.sh`) |
 | `installer/` | NSIS script for `Flick-Setup.exe` |
 | `signing/` | How the phone app is signed, plus helper tools (no keys) |
 | `art/` | Icons |
@@ -36,6 +38,19 @@ To try the whole build without publishing: Actions > Release > Run workflow, tic
   downloads the new `Flick-<version>.apk` from it; a paired PC also offers it over Wi-Fi. Either way the phone checks
   the size, SHA-256, version and signing key, and shows **Install**. Android then asks for one more tap to confirm.
 
+## Connections
+
+- **Wi-Fi, USB cable, hotspot:** the phone finds the PC with a UDP broadcast on every network it is on (Wi-Fi, USB
+  tethering, its own hotspot) and uses the fastest one: cable, then hotspot/direct, then Wi-Fi through a router.
+  If a faster link appears while connected (a cable is plugged in), it moves over once nothing is being sent.
+- **Bluetooth:** for when there's no network. The PC runs `bin/flick-bt.exe` (an RFCOMM service with Flick's UUID)
+  when Bluetooth is on in its settings; the phone connects to a paired PC and runs the normal HTTP/WebSocket traffic
+  over it through a small multiplexer (`pc/mux.js`, `android/.../BtMux.java`). Much slower than Wi-Fi.
+- **Quick Share:** `pc/quickshare.js` makes the PC a Quick Share receiver on the local network (mDNS advertisement,
+  UKEY2 key exchange, encrypted Nearby frames). The PC asks before accepting and shows the same code as the phone.
+- **Large files** go over several connections at once (`/api/part` up, HTTP byte ranges down) when both sides speak
+  protocol 2.
+
 ## Building by hand
 
 Both builds run on Linux.
@@ -44,7 +59,8 @@ Both builds run on Linux.
   the private signing key described in `signing/README.md`. `pc/phone-app/Flick.apk` isn't committed: build it, or take
   it from the latest release, before running `./build_win.sh`.
 - `./build_win.sh` builds `build/win/Flick-Setup.exe` and the update bundle (Electron for Windows, rcedit through Wine,
-  NSIS). Tool paths can be set with environment variables; the workflow shows how.
+  NSIS, and a MinGW C compiler for the Bluetooth helper). Tool paths can be set with environment variables; the
+  workflow shows how.
 
 ## Versions
 

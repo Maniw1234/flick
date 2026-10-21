@@ -85,6 +85,11 @@ final class Bridge {
 
     static final String GITHUB_LATEST = "https://api.github.com/repos/Maniw1234/flick/releases/latest";
 
+    // ---------------- Bluetooth (when there's no network) ----------------
+    @JavascriptInterface public void btPermission() { a.runOnUiThread(new Runnable() { @Override public void run() { a.askBluetooth(); } }); }
+    @JavascriptInterface public boolean btPermitted() { return BtLink.permitted(a); }
+    @JavascriptInterface public void btWant(boolean on) { a.btLink().setWanted(on); }
+
     @JavascriptInterface
     public void updateInstall() {
         a.runOnUiThread(new Runnable() { @Override public void run() { a.updater().install(a); } });
@@ -179,7 +184,7 @@ final class Bridge {
     @JavascriptInterface public void upload(String tid, String id, String url) { a.transfers().upload(tid, id, url); }
     @JavascriptInterface public void uploadBundle(String tid, String items, String url) { a.transfers().uploadBundle(tid, items, url); }
     @JavascriptInterface public void abort(String tid) { a.transfers().abort(tid); }
-    @JavascriptInterface public void download(String fid, String url, String name, String size, String mime) { a.transfers().download(fid, url, name, mime); }
+    @JavascriptInterface public void download(String fid, String url, String name, String size, String mime) { a.transfers().download(fid, url, name, size, mime); }
 
     @JavascriptInterface
     public void haptic(final String kind) {

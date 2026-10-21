@@ -38,11 +38,18 @@
     get(k, d) { const v = nc('getPref', k); return v === null || v === undefined || v === '' || v === true ? d : v; },
     set(k, v) { nc('setPref', k, v === null || v === undefined ? '' : String(v)); },
   };
-  const haptic = (k) => nc('haptic', k);
+  // ------------------------------------------------------------------ settings (Settings page, from the ••• menu)
+  const SETTINGS_DEFAULTS = { parallel: true, showSpeed: true, haptics: true, autoUpdate: true, bluetooth: false, phoneName: '' };
+  const settings = (() => {
+    try { return Object.assign({}, SETTINGS_DEFAULTS, JSON.parse(pref.get('settings', '{}')) || {}); } catch (e) { return Object.assign({}, SETTINGS_DEFAULTS); }
+  })();
+  function saveSettings() { pref.set('settings', JSON.stringify(settings)); }
+  const haptic = (k) => { if (settings.haptics !== false) nc('haptic', k); };
 
   const INFO = njson('info') || {};
   const DEVICE = INFO.device || pref.get('device', null) || (() => { const d = 'web-' + rid(); pref.set('device', d); return d; })();
   const DEVNAME = INFO.name || 'Android phone';
+  const phoneName = () => String(settings.phoneName || '').trim().slice(0, 40) || DEVNAME;
   const root = document.documentElement.style;
   function applyInsets(top, bottom) {
     if (typeof top === 'number') root.setProperty('--top', Math.max(0, top) + 'px');
@@ -112,6 +119,11 @@
     folder: '<svg viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2.2h6.5A2.5 2.5 0 0 1 21 9.7v7.8a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>',
     spark: '<svg viewBox="0 0 24 24"><path d="M12 3l1.9 5.6L19.5 10l-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M18.5 16l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z" fill="currentColor"/></svg>',
     refresh: '<svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.4-5.7M20 4v5h-5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    gear: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2.8v2.4M12 18.8v2.4M21.2 12h-2.4M5.2 12H2.8M18.5 5.5l-1.7 1.7M7.2 16.8l-1.7 1.7M18.5 18.5l-1.7-1.7M7.2 7.2L5.5 5.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
+    wifi: '<svg viewBox="0 0 24 24"><path d="M2.5 9a14 14 0 0 1 19 0M5.8 12.6a9 9 0 0 1 12.4 0M9.1 16.1a4.3 4.3 0 0 1 5.8 0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="19.2" r="1.3" fill="currentColor"/></svg>',
+    usb: '<svg viewBox="0 0 24 24"><path d="M12 21V5M9 7.5l3-4 3 4M12 16l-4.5-3V10M12 13.5l4.5-2.5V8.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="20" r="1.6" fill="currentColor"/><rect x="6.2" y="8.2" width="2.6" height="2.4" rx=".4" fill="currentColor"/><circle cx="16.5" cy="7.4" r="1.3" fill="currentColor"/></svg>',
+    hotspot: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="1.8" fill="currentColor"/><path d="M8.2 15.8a5.4 5.4 0 0 1 0-7.6M15.8 8.2a5.4 5.4 0 0 1 0 7.6M5.3 18.7a9.5 9.5 0 0 1 0-13.4M18.7 5.3a9.5 9.5 0 0 1 0 13.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
+    bt: '<svg viewBox="0 0 24 24"><path d="M7 7.5l10 9-5 4.5V3l5 4.5-10 9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     check: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8.3 12.3l2.6 2.6 5-5.3" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     update: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.6" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7.7v8.2M8.6 12.6l3.4 3.4 3.4-3.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   };
@@ -223,7 +235,7 @@
     $('pair').classList.toggle('on', name === 'pair');
     $('main').classList.toggle('on', name === 'main');
     glowOn(name === 'pair');
-    nc('discover', name === 'pair' || !st.connected);
+    nc('discover', !document.hidden);          // also while connected: a faster link (a USB cable) is picked up
     nc('keepAwake', name === 'main' && st.connected);
     if (name === 'main') requestAnimationFrame(() => { measureHeader(); layout(false); });
     renderUpd();
@@ -262,18 +274,28 @@
 
   function pairHint(html) { $('pairHint').innerHTML = html || ''; }
 
-  function onPcs(list) {
-    st.pcs = (list || []).filter((p) => p && p.ip && p.port);
+  // faster links first: USB cable, Ethernet, a hotspot or direct link, Wi-Fi, then Bluetooth
+  const LINK_RANK = { usb: 5, ethernet: 4, hotspot: 3, direct: 3, wifi: 2, bluetooth: 1 };
+  const rankOf = (p) => LINK_RANK[(p && p.via) || 'wifi'] || 2;
+  const busyMoving = () => [...st.pending.values()].some((p) => p.phase === 'sent' && !p.uploaded) || V.items.some((x) => x.incoming);
+  function onPcs() {
+    // Bluetooth reports the PC it reached through the same list
+    st.pcs = (st.lanList || []).filter((p) => p && p.ip && p.port).concat(st.btPc ? [st.btPc] : []);
+    const pick = (id) => st.pcs.filter((p) => p.id === id).sort((a, b) => rankOf(b) - rankOf(a))[0];
     if (!st.pc && st.pcs.length) {
       const last = pref.get('lastPc', '');
-      choosePc(st.pcs.find((p) => p.id === last) || st.pcs[0]);
+      choosePc(pick(last) || st.pcs.slice().sort((a, b) => rankOf(b) - rankOf(a))[0]);
     } else if (st.pc) {
-      const same = st.pcs.find((p) => p.id === st.pc.id);
-      if (same && (same.ip !== st.pc.ip || same.port !== st.pc.port || same.name !== st.pc.name)) {
+      const same = pick(st.pc.id);
+      if (same && (same.ip !== st.pc.ip || same.port !== st.pc.port || same.name !== st.pc.name || same.via !== st.pc.via)) {
         const moved = same.ip !== st.pc.ip || same.port !== st.pc.port;
+        const faster = rankOf(same) > rankOf(st.pc);
+        // a faster link to the connected PC (say, a USB cable was just plugged in): move over once nothing is in flight
+        if (moved && st.connected && (!faster || busyMoving())) { setPcName(); return; }
         st.pc = Object.assign({}, st.pc, same);
-        pref.set('lastPcAddr', same.ip + ':' + same.port);
-        if (moved && !st.connected) openLink();
+        if (same.via !== 'bluetooth') pref.set('lastPcAddr', same.ip + ':' + same.port);
+        if (moved && st.connected) { toast('Connected over ' + (LINK_NAMES[same.via] || same.via), 2000); openLink(true); }
+        else if (moved) openLink();
       }
     }
     setPcName();
@@ -281,9 +303,9 @@
 
   function choosePc(pc) {
     if (!pc) return;
-    st.pc = { id: pc.id, name: pc.name, ip: pc.ip, port: pc.port };
+    st.pc = { id: pc.id, name: pc.name, ip: pc.ip, port: pc.port, via: pc.via || 'wifi' };
     pref.set('lastPc', pc.id);
-    pref.set('lastPcAddr', pc.ip + ':' + pc.port);
+    if (pc.via !== 'bluetooth') pref.set('lastPcAddr', pc.ip + ':' + pc.port);
     pref.set('lastPcName', pc.name);
     setPcName();
     pairHint('');
@@ -295,16 +317,34 @@
   };
   $('skipBtn').onclick = () => { showScreen('main'); };
 
-  // manual address
-  $('manualBtn').onclick = () => { $('ask').hidden = false; $('askInput').value = pref.get('manual', ''); setTimeout(() => $('askInput').focus(), 50); };
+  // a small prompt with one text field: the PC address here, the phone's name in Settings
+  let askDone = null;
+  function askText(o) {
+    $('askTitle').textContent = o.title; $('askSub').textContent = o.sub || '';
+    const inp = $('askInput');
+    inp.value = o.value || ''; inp.placeholder = o.placeholder || '';
+    inp.setAttribute('inputmode', o.mode || 'text');
+    $('askOk').textContent = o.ok || 'OK';
+    askDone = o.done;
+    $('ask').hidden = false;
+    setTimeout(() => { inp.focus(); inp.select(); }, 50);
+  }
+  $('manualBtn').onclick = () => askText({
+    title: 'Enter PC address', sub: 'Shown on your PC in the Flick window, e.g. 192.168.1.23', value: pref.get('manual', ''),
+    placeholder: '192.168.1.23', ok: 'Connect', mode: 'decimal', done: connectManual,
+  });
   $('askCancel').onclick = () => { $('ask').hidden = true; };
   $('ask').querySelector('.backdrop').onclick = () => { $('ask').hidden = true; };
   $('askOk').onclick = async () => {
-    const raw = $('askInput').value.trim();
-    if (!raw) return;
+    const v = $('askInput').value;
+    if (askDone && await askDone(v)) $('ask').hidden = true;
+  };
+  async function connectManual(rawIn) {
+    const raw = String(rawIn || '').trim();
+    if (!raw) return false;
     pref.set('manual', raw);
     const m = /^([\w.-]+)(?::(\d+))?$/.exec(raw);
-    if (!m) { toast('That address doesn’t look right'); return; }
+    if (!m) { toast('That address doesn’t look right'); return false; }
     const ip = m[1], port = +(m[2] || 47860);
     $('askOk').textContent = 'Connecting…';
     try {
@@ -314,16 +354,18 @@
       clearTimeout(to);
       const j = await r.json();
       if (!j || j.app !== 'flick') throw new Error('not flick');
-      $('ask').hidden = true;
+      $('askOk').textContent = 'Connect';
       const pc = { id: j.id, name: j.name, ip, port: j.port || port };
       if (!st.pcs.find((p) => p.id === pc.id)) st.pcs.push(pc);
       closeLink();
       choosePc(pc);
+      return true;
     } catch (e) {
       toast('Couldn’t reach a PC at ' + ip, 2800);
     }
     $('askOk').textContent = 'Connect';
-  };
+    return false;
+  }
 
   // ------------------------------------------------------------------ link (WebSocket to the PC)
   let wsGen = 0, reconnectT = 0, pingT = 0, connectT = 0;
@@ -348,7 +390,7 @@
     ws.onopen = () => {
       if (gen !== wsGen) return;
       st.wsOpen = true; st.connecting = false;
-      ws.send(JSON.stringify({ t: 'hello', device: DEVICE, name: DEVNAME, token: pref.get(tokenKey(st.pc.id), null), w: innerWidth, h: innerHeight, dpr: devicePixelRatio, resume: !!resume, v: 1, app: MY_CODE, appName: INFO.version || '' }));
+      ws.send(JSON.stringify({ t: 'hello', device: DEVICE, name: phoneName(), token: pref.get(tokenKey(st.pc.id), null), w: innerWidth, h: innerHeight, dpr: devicePixelRatio, resume: !!resume, v: 1, app: MY_CODE, appName: INFO.version || '', via: st.pc.via || 'wifi' }));
       clearInterval(pingT);
       pingT = setInterval(() => wsSend({ t: 'ping', ts: Date.now() }), 10000);
     };
@@ -409,6 +451,7 @@
       case 'welcome':
         lostSince = 0;
         st.trusted = !!m.trusted;
+        st.pcProto = +m.v || 1;                 // 2+: large files travel in several parts at once
         if (m.side) st.side = m.side;
         if (m.theme) applyTheme(m.theme);
         if (m.pc && m.pc.name && st.pc) { st.pc.name = m.pc.name; pref.set('lastPcName', m.pc.name); setPcName(); }
@@ -440,7 +483,6 @@
         if (m.theme) applyTheme(m.theme);
         if (m.pc && m.pc.name) { st.pc.name = m.pc.name; pref.set('lastPcName', m.pc.name); }
         updateConn();
-        nc('discover', false);
         UPD.pcKnows = 'app' in m;               // PCs before 1.4 can't hand out phone updates
         onAppInfo(m.app);
         if (st.screen === 'pair') {
@@ -509,6 +551,7 @@
   // GitHub: the latest release of github.com/Maniw1234/flick carries Flick-<version>.apk
   function checkGitHub(ask) {
     if (!NV || typeof NV.updateCheckGitHub !== 'function') return false;
+    if (!ask && settings.autoUpdate === false) return false;
     UPD.ghAt = Date.now();
     if (ask) UPD.ghAsk = true;
     nc('updateCheckGitHub');
@@ -906,11 +949,11 @@
   function visibleItems() { return V.items.filter((it) => !st.hidden.has(it.id)); }
 
   function updateCount() {
-    let sending = 0, sent = 0, total = 0;
-    for (const p of st.pending.values()) if (p.phase === 'sent' && !p.uploaded) { sending++; sent += p.sent || 0; total += p.total || 0; }
+    let sending = 0, sent = 0, total = 0, rate = 0;
+    for (const p of st.pending.values()) if (p.phase === 'sent' && !p.uploaded) { sending++; sent += p.sent || 0; total += p.total || 0; rate += p.rate || 0; }
     const n = needsPermission() ? 0 : V.cat === 'dir' ? visibleItems().filter((i) => !i.incoming).length : Math.max(V.total - st.hidden.size, visibleItems().length);
     const pct = total > 0 ? Math.min(99, Math.floor((sent / total) * 100)) : -1;
-    $('count').textContent = sending ? 'Sending' + (pct >= 0 ? ' ' + pct + '%' : '…') : n.toLocaleString() + (n === 1 ? ' item' : ' items');
+    $('count').textContent = sending ? 'Sending' + (pct >= 0 ? ' ' + pct + '%' : '…') + (rate > 0 && settings.showSpeed ? ' · ' + fmtRate(rate) : '') : n.toLocaleString() + (n === 1 ? ' item' : ' items');
     const empty = !V.loading && !needsPermission() && visibleItems().length === 0;
     $('empty').hidden = !empty;
     if (empty) {
@@ -1207,17 +1250,158 @@
     openSheet('', [
       upd ? { label: 'Update to Flick ' + (UPD.app.name || UPD.app.code), icon: 'update', tag: 'Ready', run: startUpdate } : null,
       { label: 'Animation', icon: 'spark', tag: themeOf(st.theme).name, run: themeSheet },
-      { label: 'Phone is on the ' + (st.side === 'right' ? 'right' : 'left') + ' of the PC', icon: 'side', tag: 'Switch', run: () => {
-        st.side = st.side === 'right' ? 'left' : 'right';
-        wsSend({ t: 'set-side', side: st.side });
-        toast('Phone is on the ' + st.side + ' of the PC');
-      } },
       { label: 'Refresh', icon: 'refresh', run: () => refreshStorage(true) },
-      { label: 'Keep Flick-list files after sending', icon: 'keep', tag: st.keep ? 'On' : 'Off', run: () => { st.keep = !st.keep; pref.set('keep', st.keep ? '1' : '0'); toast('Keep files after sending: ' + (st.keep ? 'On' : 'Off')); } },
       V.cat === 'shelf' && V.items.length ? { label: 'Clear the Flick list', icon: 'clear', danger: true, run: () => { for (const it of V.items.slice()) nc('remove', it.id); V.items = []; V.total = 0; layout(true); } } : null,
-      upd ? null : { label: 'Check for updates', icon: 'update', tag: INFO.version || '', run: checkForUpdates },
+      { label: 'Settings', icon: 'gear', run: openSettings },
     ]);
   };
+
+  // ------------------------------------------------------------------ Settings page
+  const LINK_NAMES = { wifi: 'Wi-Fi', usb: 'USB cable', hotspot: 'hotspot', ethernet: 'Ethernet', bluetooth: 'Bluetooth' };
+  function setSide(side) {
+    if (side !== 'left' && side !== 'right') return;
+    st.side = side;
+    wsSend({ t: 'set-side', side });
+  }
+  function openSettings() {
+    renderSettings();
+    const pg = $('settings');
+    pg.hidden = false; pg.classList.remove('closing');
+    $('setBody').scrollTop = 0;
+    haptic('soft');
+  }
+  function closeSettings() {
+    const pg = $('settings');
+    if (pg.hidden) return false;
+    pg.classList.add('closing');
+    setTimeout(() => { pg.hidden = true; pg.classList.remove('closing'); }, 200);
+    return true;
+  }
+  $('setBack').onclick = closeSettings;
+  function toggleEl(on, onChange) {
+    const l = document.createElement('label'); l.className = 'stog';
+    const i = document.createElement('input'); i.type = 'checkbox'; i.checked = !!on;
+    i.onchange = () => { onChange(i.checked); haptic('tick'); };
+    l.appendChild(i); l.appendChild(document.createElement('span'));
+    return l;
+  }
+  function renderSettings() {
+    const body = $('setBody');
+    body.innerHTML = '';
+    const group = (title, rows) => {
+      const g = document.createElement('section'); g.className = 'sgroup';
+      if (title) { const h = document.createElement('h3'); h.textContent = title; g.appendChild(h); }
+      const card = document.createElement('div'); card.className = 'scard';
+      for (const r of rows) {
+        if (!r) continue;
+        const row = document.createElement(r.run ? 'button' : 'div'); row.className = 'srow';
+        const lab = document.createElement('div'); lab.className = 'sl';
+        const b = document.createElement('b'); b.textContent = r.label; lab.appendChild(b);
+        if (r.sub) { const sm = document.createElement('small'); sm.textContent = r.sub; lab.appendChild(sm); }
+        row.appendChild(lab);
+        if (r.value != null) { const v = document.createElement('span'); v.className = 'sv'; v.textContent = r.value; row.appendChild(v); }
+        if (r.toggle) {
+          const get = typeof r.toggle === 'string' ? () => settings[r.toggle] : r.toggle;
+          row.appendChild(toggleEl(get(), (v) => { if (typeof r.toggle === 'string') { settings[r.toggle] = v; saveSettings(); } if (r.set) r.set(v); }));
+        }
+        if (r.seg) {
+          const sg = document.createElement('div'); sg.className = 'sseg';
+          for (const [v, label] of r.seg) {
+            const bt = document.createElement('button'); bt.textContent = label; bt.className = r.get() === v ? 'on' : '';
+            bt.onclick = (e) => { e.stopPropagation(); haptic('tick'); r.set(v); renderSettings(); };
+            sg.appendChild(bt);
+          }
+          row.appendChild(sg);
+        }
+        if (r.action) {
+          const ab = document.createElement('button'); ab.className = 'sbtn' + (r.action.danger ? ' danger' : ''); ab.textContent = r.action.text;
+          ab.onclick = (e) => { e.stopPropagation(); r.action.run(); };
+          row.appendChild(ab);
+        }
+        if (r.run) { row.classList.add('nav'); row.onclick = () => { haptic('soft'); r.run(); }; }
+        card.appendChild(row);
+      }
+      g.appendChild(card);
+      body.appendChild(g);
+    };
+    const via = st.pc && st.pc.via ? LINK_NAMES[st.pc.via] || st.pc.via : 'Wi-Fi';
+    group('Your PC', [
+      st.pc ? {
+        label: st.pc.name || 'PC',
+        sub: st.connected ? 'Connected over ' + via : st.connecting ? 'Connecting…' : 'Not connected',
+        action: st.connected
+          ? { text: 'Disconnect', danger: true, run: () => { st.wantResume = false; closeLink(); closeSettings(); showScreen('pair'); openLinkSoon(); } }
+          : { text: 'Connect', run: () => { closeSettings(); showScreen('pair'); openLinkSoon(); } },
+      } : { label: 'No PC yet', sub: 'Open Flick on your PC, then hold Connect', action: { text: 'Connect', run: () => { closeSettings(); showScreen('pair'); } } },
+      { label: 'Ways to connect', sub: 'Wi-Fi, USB cable, hotspot or Bluetooth', run: waysSheet },
+    ]);
+    group('Transfers', [
+      { label: 'Faster transfers', sub: 'Large files travel over several connections at once', toggle: 'parallel' },
+      { label: 'Show transfer speed', toggle: 'showSpeed', set: () => updateCount() },
+      { label: 'Use Bluetooth when there’s no Wi-Fi', sub: settings.bluetooth ? BT_TEXT[st.btState || 'off'] || BT_TEXT.off : BT_TEXT.off, toggle: 'bluetooth', set: (v) => { btSetting(v); renderSettings(); } },
+      { label: 'Keep files in the Flick list after sending', toggle: () => st.keep, set: (v) => { st.keep = v; pref.set('keep', v ? '1' : '0'); } },
+      { label: 'Files from your PC', value: 'Download/Flick' },
+    ]);
+    group('This phone', [
+      { label: 'Phone name', sub: 'How your PC shows this phone', value: phoneName(), run: renamePhone },
+      { label: 'Animation on your PC', value: themeOf(st.theme).name, run: themeSheet },
+      { label: 'Phone is on the', sub: 'Which side of the PC screen', seg: [['left', 'Left'], ['right', 'Right']], get: () => st.side, set: setSide },
+      { label: 'Vibration', toggle: 'haptics' },
+    ]);
+    group('Updates', [
+      { label: 'Check for updates automatically', sub: 'From GitHub, when Flick opens', toggle: 'autoUpdate' },
+      { label: 'Flick ' + (INFO.version || ''), action: { text: 'Check now', run: checkForUpdates } },
+    ]);
+  }
+  // ------------------------------------------------------------------ Bluetooth (when there's no network between phone and PC)
+  let btWanted = false;
+  const BT_TEXT = {
+    off: 'Much slower than Wi-Fi. Pair this phone with your PC in Bluetooth settings first.',
+    searching: 'Looking for your PC over Bluetooth…', on: 'Connected over Bluetooth',
+    denied: 'Flick needs permission to use Bluetooth', 'radio-off': 'Turn on Bluetooth on this phone', unsupported: 'This phone has no Bluetooth',
+  };
+  function btSetting(on) {
+    if (on) nc('btPermission');
+    btTick();
+  }
+  function btTick() {
+    // only when allowed in Settings, for a PC this phone knows, and only while no network path to it exists
+    const known = !!(st.pc && pref.get('lastPc', ''));
+    const lan = !!(st.pc && (st.lanList || []).some((p) => p.id === st.pc.id));
+    const onBtNow = !!(st.connected && st.pc && st.pc.via === 'bluetooth');
+    const quiet = Date.now() - (st.lanSeenAt || 0) > 6000;
+    const want = !!settings.bluetooth && !document.hidden && known &&
+      (onBtNow ? (busyMoving() || !lan) : (!lan && quiet && !(st.connected && st.pc.via !== 'bluetooth')));
+    if (want !== btWanted) { btWanted = want; nc('btWant', want); }
+  }
+  setInterval(btTick, 3000);
+  function onBt(e) {
+    st.btState = e.state || 'off';
+    st.btPc = e.state === 'on' && e.pc && e.pc.id ? Object.assign({}, e.pc, { via: 'bluetooth' }) : null;
+    onPcs();
+    if (!$('settings').hidden) renderSettings();
+  }
+
+  function renamePhone() {
+    askText({
+      title: 'Phone name', sub: 'Shown on your PC', value: phoneName(), placeholder: DEVNAME, ok: 'Save', mode: 'text',
+      done: (v) => {
+        settings.phoneName = v.trim().slice(0, 40);
+        saveSettings();
+        renderSettings();
+        if (st.connected) openLink(true);       // the PC learns the new name on the next hello
+        return true;
+      },
+    });
+  }
+  function waysSheet() {
+    openSheet('Ways to connect', [
+      { label: 'Same Wi-Fi as your PC', icon: 'wifi', tag: 'Fast', run: () => toast('Put the phone and the PC on the same Wi-Fi, then hold Connect', 3200) },
+      { label: 'USB cable', icon: 'usb', tag: 'Fastest', run: () => toast('Plug the phone into the PC, then turn on USB tethering in Android’s Hotspot & tethering settings', 4200) },
+      { label: 'Your phone’s hotspot', icon: 'hotspot', tag: 'No Wi-Fi needed', run: () => toast('Turn on the phone’s hotspot and join it from the PC; Flick finds the PC by itself', 4200) },
+      { label: 'Bluetooth', icon: 'bt', tag: 'Slow', run: () => { if (!settings.bluetooth) { settings.bluetooth = true; saveSettings(); btSetting(true); } toast('Pair this phone with the PC in Bluetooth settings; Flick uses it when there’s no network', 4200); } },
+    ]);
+  }
 
   // ------------------------------------------------------------------ edge glow (phone side)
   const edge = $('edgeGlow');
@@ -1497,10 +1681,12 @@
     return null;
   }
 
+  // the native side splits large files into this many parts when the PC understands it
+  const parallelArg = () => ((st.pcProto || 1) >= 2 && settings.parallel && !(st.pc && st.pc.via === 'bluetooth') ? '&parallel=4' : '');
   function uploadUrl(tid, it) {
     const tok = pref.get(tokenKey(st.pc.id), '');
     return 'http://' + st.pc.ip + ':' + st.pc.port + '/api/upload?tid=' + encodeURIComponent(tid) + '&device=' + encodeURIComponent(DEVICE) +
-      '&token=' + encodeURIComponent(tok) + '&name=' + encodeURIComponent(it.name) + '&size=' + (it.size || 0);
+      '&token=' + encodeURIComponent(tok) + '&name=' + encodeURIComponent(it.name) + '&size=' + (it.size || 0) + parallelArg();
   }
 
   function startUpload(tid, it) {
@@ -1766,9 +1952,18 @@
   function onUp(e) {
     const p = st.pending.get(e.tid);
     if (!p || !e.total) return;
+    // transfer speed, smoothed over the last second or so
+    const t = performance.now();
+    if (!p.rt) { p.rt = t; p.rs = e.sent; }
+    else if (t - p.rt > 400) {
+      const inst = Math.max(0, e.sent - p.rs) / ((t - p.rt) / 1000);
+      p.rate = p.rate ? p.rate * 0.6 + inst * 0.4 : inst;
+      p.rt = t; p.rs = e.sent;
+    }
     p.sent = e.sent; p.total = e.total;
     updateCount();
   }
+  function fmtRate(r) { return r >= 1e7 ? Math.round(r / 1e6) + ' MB/s' : r >= 1e6 ? (r / 1e6).toFixed(1) + ' MB/s' : Math.max(1, Math.round(r / 1e3)) + ' KB/s'; }
 
   function onUpDone(e) {
     const p = st.pending.get(e.tid);
@@ -1882,7 +2077,7 @@
     })(t0);
     setCardProgress(it.id, 0);
     const tok = pref.get(tokenKey(st.pc.id), '');
-    const url = 'http://' + st.pc.ip + ':' + st.pc.port + m.url + '?device=' + encodeURIComponent(DEVICE) + '&token=' + encodeURIComponent(tok);
+    const url = 'http://' + st.pc.ip + ':' + st.pc.port + m.url + '?device=' + encodeURIComponent(DEVICE) + '&token=' + encodeURIComponent(tok) + parallelArg();
     nc('download', m.fid, url, m.name, String(m.size || 0), m.mime || '');
   }
 
@@ -1917,7 +2112,13 @@
     if (typeof ev === 'string') { try { e = JSON.parse(ev); } catch (x) { return; } }
     switch (e.t) {
       case 'res': { const r = pendingReq.get(e.req); if (r) { pendingReq.delete(e.req); r(e.data); } break; }
-      case 'pcs': onPcs(e.list); break;
+      case 'pcs':
+        st.lanList = e.list || [];
+        if (st.pc && st.lanList.some((p) => p.id === st.pc.id)) st.lanSeenAt = Date.now();
+        onPcs();
+        break;
+      case 'bt': onBt(e); break;
+      case 'bt-perm': btTick(); if (!$('settings').hidden) renderSettings(); break;
       case 'added':
         if (e.items && e.items.length) toast(e.items.length === 1 ? 'Added ' + midName(e.items[0].name) + ' to Flick' : 'Added ' + e.items.length + ' files to Flick', 1600);
         addToShelf(e.items);
@@ -1934,17 +2135,19 @@
       case 'gh': onGitHub(e); break;
       case 'storage': refreshStorage(false); break;
       case 'resume':
+        nc('discover', true);
         refreshStorage(false);
         if (Date.now() - UPD.ghAt > 3600e3) checkGitHub(false);
         if (st.pc && !st.wsOpen && !st.connecting) openLink(st.trusted);
         break;
-      case 'pause': break;
+      case 'pause': nc('discover', false); break;
       default: break;
     }
   };
   window.__back = function () {
     if (!$('ask').hidden) { $('ask').hidden = true; return true; }
     if (sheetOpen) { closeSheet(); return true; }
+    if (closeSettings()) return true;
     if (D && D.phase === 'drag') { dragEnd(); return true; }
     if (SEL.on) { setSelecting(false); return true; }
     if (st.screen === 'main' && V.cat === 'dir' && V.stack.length) { goBack(); return true; }

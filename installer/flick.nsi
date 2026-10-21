@@ -92,6 +92,7 @@ Section "Uninstall"
   ; updates Flick downloaded by itself (per user, see updater.js)
   SetShellVarContext current
   RMDir /r "$LOCALAPPDATA\Flick\app"
+  Delete "$APPDATA\Microsoft\Windows\SendTo\Flick (phone).lnk"
   SetShellVarContext all
   Delete "$SMPROGRAMS\Flick.lnk"
   Delete "$DESKTOP\Flick.lnk"

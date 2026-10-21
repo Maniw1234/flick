@@ -26,6 +26,12 @@
       </div>
     </section>
 
+    <section class="send" id="sendRow" hidden>
+      <button class="btn" id="sendFiles">Send files to phone</button>
+      <div class="sendsub">Or drop files on this window. In File Explorer, right-click a file and choose Send to &gt; Flick (phone).</div>
+    </section>
+    <div class="note" id="note" hidden></div>
+    <div class="drop" id="drop" hidden><div>Drop to send to your phone</div></div>
     <section class="card intro" id="intro" hidden>
       <div class="intro-title">Welcome to Flick</div>
       <ol>
@@ -92,9 +98,23 @@
           <option value="custom">Choose folder…</option>
         </select>
       </div>
+      <div class="row"><div class="lbl">Open files after they arrive</div><label class="tog"><input type="checkbox" id="openAfter"><span></span></label></div>
+      <div class="row"><div class="lbl">Show transfer speed</div><label class="tog"><input type="checkbox" id="showSpeed"><span></span></label></div>
       <div class="row"><div class="lbl">Sounds</div><label class="tog"><input type="checkbox" id="sound"><span></span></label></div>
       <div class="row"><div class="lbl">Send PC files by dragging them to the screen edge</div><label class="tog"><input type="checkbox" id="edgeSend"><span></span></label></div>
+      <div class="row" id="sendToRow"><div class="lbl">Add Flick to File Explorer’s Send to menu</div><label class="tog"><input type="checkbox" id="sendTo"><span></span></label></div>
       <div class="row" id="startupRow"><div class="lbl">Start Flick with Windows</div><label class="tog"><input type="checkbox" id="startup"><span></span></label></div>
+    </section>
+    <h2>Connections</h2>
+    <section class="card">
+      <div class="row"><div class="lbl">Wi-Fi, USB cable and phone hotspot<div class="sub0">Used by themselves, fastest first. For the fastest transfers, plug in the phone and turn on USB tethering.</div></div></div>
+      <div class="row"><div class="lbl">Bluetooth<div class="sub0" id="btSub">For when there’s no network. Much slower.</div></div><label class="tog"><input type="checkbox" id="bluetooth"><span></span></label></div>
+      <div class="row"><div class="lbl">Quick Share<div class="sub0" id="qsSub">Show this PC in Android’s own Quick Share menu.</div></div><label class="tog"><input type="checkbox" id="quickShare"><span></span></label></div>
+    </section>
+    <h2>Updates</h2>
+    <section class="card">
+      <div class="row"><div class="lbl">Update Flick automatically<div class="sub0">New versions come from GitHub and install when Flick isn’t busy.</div></div><label class="tog"><input type="checkbox" id="autoUpdate"><span></span></label></div>
+      <div class="row"><div class="lbl" id="verLine">Flick</div><button class="btn ghost" id="checkNow">Check now</button></div>
     </section>
 
     <h2>This PC</h2>
@@ -131,6 +151,19 @@
       <div class="pbtns">
         <button class="btn ghost" id="deny">Don't allow</button>
         <button class="btn" id="allow">Allow</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="qs" hidden>
+    <div class="sheet">
+      <svg class="pair-ico" viewBox="0 0 48 48"><rect x="15" y="6" width="18" height="36" rx="4"/><path d="M24 14v13M18.5 21.5L24 27l5.5-5.5"/></svg>
+      <div class="ptitle"><span id="qsFrom">A phone</span> wants to send <span id="qsWhat">a file</span></div>
+      <div class="psub">Quick Share code <b class="pin" id="qsPin">0000</b>. Accept only if the phone shows the same code.</div>
+      <div class="qslist" id="qsList"></div>
+      <div class="pbtns">
+        <button class="btn ghost" id="qsDeny">Decline</button>
+        <button class="btn" id="qsAllow">Accept</button>
       </div>
     </div>
   </div>

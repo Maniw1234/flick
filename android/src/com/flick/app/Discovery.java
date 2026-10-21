@@ -122,6 +122,49 @@ final class Discovery implements Runnable {
         }
     }
 
+    // ---- which kind of link a reply came over: the local interface whose subnet holds the PC's address
+    static String linkFor(InetAddress remote) {
+        try {
+            for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                if (!ni.isUp() || ni.isLoopback()) continue;
+                for (InterfaceAddress ia : ni.getInterfaceAddresses()) {
+                    InetAddress a = ia.getAddress();
+                    if (a instanceof Inet4Address && sameSubnet(a, remote, ia.getNetworkPrefixLength())) return typeOf(ni.getName());
+                }
+            }
+        } catch (Throwable e) { /* unknown */ }
+        return "wifi";
+    }
+
+    static boolean sameSubnet(InetAddress a, InetAddress b, int prefix) {
+        byte[] x = a.getAddress(), y = b.getAddress();
+        if (x.length != y.length || prefix <= 0) return false;
+        for (int i = 0; i < x.length && prefix > 0; i++, prefix -= 8) {
+            int mask = prefix >= 8 ? 0xff : (0xff << (8 - prefix)) & 0xff;
+            if ((x[i] & mask) != (y[i] & mask)) return false;
+        }
+        return true;
+    }
+
+    static String typeOf(String iface) {
+        String n = iface == null ? "" : iface.toLowerCase(java.util.Locale.ROOT);
+        if (n.startsWith("rndis") || n.startsWith("usb") || n.startsWith("ncm")) return "usb";
+        if (n.startsWith("ap") || n.startsWith("swlan") || n.startsWith("softap") || n.startsWith("wigig") || n.equals("wlan1")) return "hotspot";
+        if (n.startsWith("p2p")) return "direct";
+        if (n.startsWith("eth")) return "ethernet";
+        if (n.startsWith("bt-pan") || n.startsWith("bnep")) return "bluetooth";
+        return "wifi";
+    }
+
+    /** Faster links first: a cable beats a direct radio link, which beats Wi-Fi through a router. */
+    static int rank(String via) {
+        if ("usb".equals(via)) return 5;
+        if ("ethernet".equals(via)) return 4;
+        if ("hotspot".equals(via) || "direct".equals(via)) return 3;
+        if ("wifi".equals(via)) return 2;
+        return 1;
+    }
+
     private void handle(DatagramPacket p) {
         try {
             String txt = new String(p.getData(), p.getOffset(), p.getLength(), "UTF-8");
@@ -129,34 +172,52 @@ final class Discovery implements Runnable {
             if (!"flick!".equals(m.optString("t"))) return;
             String id = m.optString("id", "");
             if (id.length() == 0) return;
+            String ip = p.getAddress().getHostAddress();
             JSONObject pc = new JSONObject();
             pc.put("id", id);
             pc.put("name", m.optString("name", "PC"));
-            pc.put("ip", p.getAddress().getHostAddress());
+            pc.put("ip", ip);
             pc.put("port", m.optInt("port", 47860));
             pc.put("known", m.optBoolean("known", false));
+            pc.put("v", m.optInt("v", 1));
+            pc.put("via", linkFor(p.getAddress()));
             pc.put("seen", SystemClock.elapsedRealtime());
-            synchronized (found) { found.put(id, pc); }
+            // one entry per PC and address: the same PC can be reachable over a cable and Wi-Fi at once
+            synchronized (found) { found.put(id + "@" + ip, pc); }
         } catch (Throwable e) { /* ignore junk */ }
     }
 
+    /** Each PC once, at its fastest address; every address it was seen at is listed under "links". */
     private String snapshot(long now) {
-        JSONArray a = new JSONArray();
+        Map<String, JSONObject> best = new LinkedHashMap<String, JSONObject>();
+        Map<String, JSONArray> links = new LinkedHashMap<String, JSONArray>();
         synchronized (found) {
             Iterator<Map.Entry<String, JSONObject>> it = found.entrySet().iterator();
             while (it.hasNext()) {
                 JSONObject pc = it.next().getValue();
                 if (now - pc.optLong("seen") > 7000) { it.remove(); continue; }
-                try {
-                    JSONObject o = new JSONObject();
-                    o.put("id", pc.optString("id"));
-                    o.put("name", pc.optString("name"));
-                    o.put("ip", pc.optString("ip"));
-                    o.put("port", pc.optInt("port"));
-                    o.put("known", pc.optBoolean("known"));
-                    a.put(o);
-                } catch (Throwable e) { /* ignore */ }
+                String id = pc.optString("id");
+                JSONObject cur = best.get(id);
+                if (cur == null || rank(pc.optString("via")) > rank(cur.optString("via"))) best.put(id, pc);
+                JSONArray l = links.get(id);
+                if (l == null) { l = new JSONArray(); links.put(id, l); }
+                try { l.put(new JSONObject().put("ip", pc.optString("ip")).put("via", pc.optString("via"))); } catch (Throwable e) { /* ignore */ }
             }
+        }
+        JSONArray a = new JSONArray();
+        for (JSONObject pc : best.values()) {
+            try {
+                JSONObject o = new JSONObject();
+                o.put("id", pc.optString("id"));
+                o.put("name", pc.optString("name"));
+                o.put("ip", pc.optString("ip"));
+                o.put("port", pc.optInt("port"));
+                o.put("known", pc.optBoolean("known"));
+                o.put("v", pc.optInt("v", 1));
+                o.put("via", pc.optString("via", "wifi"));
+                o.put("links", links.get(pc.optString("id")));
+                a.put(o);
+            } catch (Throwable e) { /* ignore */ }
         }
         return a.toString();
     }

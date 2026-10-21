@@ -307,6 +307,7 @@
   on('fx:theme', (m) => { if (m && m.theme) { S.theme = m.theme; setTheme(m.theme); } });
   on('fx:hold', (m) => {
     AP.hold = clamp((m && m.p) || 0, 0, 1);
+    AP.holdAt = now();
     if (m && m.ph) phoneScreen.h = m.ph;
     kick();
   });
@@ -353,7 +354,7 @@
     if (m.size) c.size = m.size;
     if (m.files) c.info.files = m.files;
   });
-  on('fx:progress', (m) => { const c = m && cards.get(m.tid); if (c) c.progress = m.p; });
+  on('fx:progress', (m) => { const c = m && cards.get(m.tid); if (c) { c.progress = m.p; c.rate = m.rate || 0; } });
   on('fx:saved', (m) => {
     const c = m && cards.get(m.tid);
     if (!c) return;
@@ -362,8 +363,8 @@
     kick();
   });
   on('fx:failed', (m) => { const c = m && cards.get(m.tid); if (c) { c.state = 'fail'; c.t0 = now(); if (theme.fail) theme.fail(E, c); } kick(); });
-  on('fx:edge-hover', (m) => { AP.hover = m && m.on ? 1 : 0; if (m && typeof m.y === 'number') AP.hoverY = m.y; kick(); });
-  on('fx:preview', (m) => { AP.hover = m && m.on ? 0.8 : 0; AP.hoverY = S.anchor * S.H; kick(); });
+  on('fx:edge-hover', (m) => { AP.hover = m && m.on ? 1 : 0; AP.hoverAt = now(); AP.hoverCap = 8000; if (m && typeof m.y === 'number') AP.hoverY = m.y; kick(); });
+  on('fx:preview', (m) => { AP.hover = m && m.on ? 0.8 : 0; AP.hoverAt = now(); AP.hoverCap = 120000; AP.hoverY = S.anchor * S.H; kick(); });
   on('fx:outgoing', (m) => {
     if (!m) return;
     const id = 'out-' + (m.fid || Math.random());
@@ -423,7 +424,7 @@
   }
 
   // ------------------------------------------------------------------ frame loop
-  let raf = 0, last = 0, clock = 0, idleSince = 0, idleSent = true;
+  let raf = 0, last = 0, clock = 0, idleSince = 0, idleSent = true, themeBusySince = 0;
   function kick() {
     idleSince = 0;
     idleSent = false;
@@ -530,7 +531,9 @@
     switch (c.state) {
       case 'track': {
         const m = c.msg;
-        if (!m) { c.visible = false; break; }
+        if (!m) { c.visible = false; if (t - c.t0 > 60000) { c.remove(); return; } break; }
+        // the phone stopped reporting this drag (and never dropped or canceled it): let it go
+        if (t - c.msgT > 45000) { c.state = 'cancel'; c.t0 = t; break; }
         c.visible = true;
         const age = Math.min(t - c.msgT, 34);
         const pw = m.pw || 400, ph = m.ph || 860;
@@ -542,7 +545,7 @@
         break;
       }
       case 'flight': {
-        if (theme.fly(E, c, (t - c.t0) / 1000, dt)) {
+        if (theme.fly(E, c, (t - c.t0) / 1000, dt) || t - c.t0 > 6000) {
           c.state = 'rest'; c.t0 = t;
           if (theme.landed) theme.landed(E, c);
           if (c.saved) c.pendingIcon = true;
@@ -606,7 +609,18 @@
       c.bar.style.transform = `translate3d(${c.pose.x - c.w / 2}px, ${c.pose.y + c.h / 2 + 8}px, 0)`;
       c.bar.firstChild.style.transform = `scaleX(${clamp(c.progress, 0, 1)})`;
       c.bar.style.opacity = '1';
-    } else if (c.bar) c.bar.style.opacity = '0';
+      // transfer speed under the line (large files only: it needs a moment to be meaningful)
+      if (c.rate > 0) {
+        if (!c.rateEl) { c.rateEl = document.createElement('div'); c.rateEl.className = 'rate'; hud.appendChild(c.rateEl); (c.extraEls = c.extraEls || []).push(c.rateEl); }
+        const r = c.rate;
+        c.rateEl.textContent = (r >= 1e7 ? Math.round(r / 1e6) : (r / 1e6).toFixed(1)) + ' MB/s';
+        c.rateEl.style.transform = `translate3d(${c.pose.x}px, ${c.pose.y + c.h / 2 + 15}px, 0) translateX(-50%)`;
+        c.rateEl.style.opacity = '1';
+      }
+    } else {
+      if (c.bar) c.bar.style.opacity = '0';
+      if (c.rateEl) c.rateEl.style.opacity = '0';
+    }
   }
   function genericCancel(c, ts) {
     const u = clamp(ts / 0.32, 0, 1);
@@ -667,7 +681,16 @@
       if (theme.drawOver) theme.drawOver(E, AP);
     }
 
-    const busy = cards.size || puffs.length || glows.length || segs.length || AP.p > 0.003 || AP.hold > 0 || AP.hover > 0 || (theme.busy && theme.busy(E));
+    // a hold or hover the PC/phone stopped reporting fades out instead of staying on screen
+    if (AP.hold > 0 && t - (AP.holdAt || 0) > 4000) AP.hold = 0;
+    if (AP.hover > 0 && t - (AP.hoverAt || 0) > (AP.hoverCap || 8000)) AP.hover = 0;
+    // an animation's own effects never outlive the cards they belong to by more than a few seconds
+    let themeBusy = !!(theme.busy && theme.busy(E));
+    if (themeBusy && !cards.size) {
+      if (!themeBusySince) themeBusySince = t;
+      else if (t - themeBusySince > 8000) { if (theme.reset) theme.reset(E); themeBusy = false; themeBusySince = 0; }
+    } else themeBusySince = 0;
+    const busy = cards.size || puffs.length || glows.length || segs.length || AP.p > 0.003 || AP.hold > 0 || AP.hover > 0 || themeBusy;
     if (busy) { idleSince = 0; raf = requestAnimationFrame(frame); return; }
     if (!idleSince) idleSince = t;
     if (t - idleSince > 300) {

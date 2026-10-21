@@ -15,7 +15,8 @@
       document.documentElement.style.setProperty('--accent', s.accent);
       document.documentElement.style.setProperty('--on-accent', s.onAccent || '#000');
     }
-    $('statusText').textContent = s.connected ? `Connected to ${s.phone}` : 'Waiting for your phone';
+    const VIA = { wifi: 'Wi-Fi', usb: 'USB cable', hotspot: 'hotspot', direct: 'a direct link', ethernet: 'Ethernet', bluetooth: 'Bluetooth' };
+    $('statusText').textContent = s.connected ? `Connected to ${s.phone}` + (s.via && VIA[s.via] ? ` over ${VIA[s.via]}` : '') : 'Waiting for your phone';
     $('dot').classList.toggle('on', !!s.connected);
     $('hint').textContent = s.connected
       ? 'Drag a file off the edge of your phone toward this screen.'
@@ -33,6 +34,23 @@
     const custom = $('saveDir').querySelector('option[value=custom]');
     custom.textContent = s.saveDir === 'desktop' || s.saveDir === 'downloads' ? 'Choose folder…' : s.saveDirLabel;
     $('sound').checked = !!s.sound;
+    $('openAfter').checked = !!s.openAfter;
+    $('showSpeed').checked = !!s.showSpeed;
+    $('sendTo').checked = !!s.sendTo;
+    $('sendToRow').hidden = !s.isWin;
+    $('autoUpdate').checked = s.autoUpdate !== false;
+    $('bluetooth').checked = !!s.bluetooth;
+    $('quickShare').checked = !!s.quickShare;
+    const status = (el, on, st, offText) => {
+      const txt = { off: offText, starting: 'Starting…', on: on, 'no-radio': 'This PC has no Bluetooth (or it’s turned off).', error: 'Couldn’t start. See the log.', unsupported: 'Needs Windows.',
+        'no-mdns': 'Phones can’t see this PC: another app is using the network port Quick Share needs (5353).' };
+      el.textContent = txt[st] || offText;
+      el.className = 'sub0' + (st === 'on' ? ' ok' : st === 'no-radio' || st === 'error' || st === 'no-mdns' ? ' warn' : '');
+    };
+    status($('btSub'), 'On. Pair your phone with this PC in Windows Bluetooth settings, then turn on Bluetooth in Flick on the phone.', s.btState, 'For when there’s no network. Much slower.');
+    status($('qsSub'), 'On. In any app on the phone, tap Share > Quick Share and pick ' + (s.name || 'this PC') + '.', s.qsState, 'Show this PC in Android’s own Quick Share menu.');
+    $('verLine').textContent = 'Flick ' + s.version;
+    $('sendRow').hidden = !s.connected;
     $('edgeSend').checked = !!s.edgeSend;
     $('startup').checked = !!s.startup;
     $('startupRow').hidden = !s.isWin;
@@ -96,6 +114,31 @@
   });
   api.on('panel:pair-cancel', (d) => { if (d && d.device === pairDevice) { $('pair').hidden = true; pairDevice = null; } });
 
+  // Quick Share: someone's phone wants to send files
+  let qsId = null;
+  const fmt = (n) => (n >= 1e9 ? (n / 1e9).toFixed(1) + ' GB' : n >= 1e6 ? (n / 1e6).toFixed(1) + ' MB' : n >= 1e3 ? Math.round(n / 1e3) + ' KB' : n + ' bytes');
+  api.on('panel:qs', (m) => {
+    qsId = m.id;
+    $('qsFrom').textContent = m.from || 'A phone';
+    const n = m.files.length, t = m.texts.length;
+    $('qsWhat').textContent = n ? (n === 1 ? m.files[0].name : n + ' files') : t === 1 ? (m.texts[0].type === 2 ? 'a link' : 'some text') : t + ' items';
+    $('qsPin').textContent = m.pin || '';
+    const list = $('qsList');
+    list.innerHTML = '';
+    for (const f of m.files.slice(0, 50)) {
+      const r = document.createElement('div');
+      const a = document.createElement('span'); a.textContent = f.name;
+      const b = document.createElement('span'); b.textContent = fmt(f.size || 0);
+      r.appendChild(a); r.appendChild(b); list.appendChild(r);
+    }
+    list.hidden = n < 2;
+    $('qs').hidden = false;
+    $('qsAllow').focus();
+  });
+  api.on('panel:qs-done', (m) => { if (!m || m.id === qsId) { $('qs').hidden = true; qsId = null; } });
+  $('qsAllow').onclick = () => { if (qsId) api.send('panel:qs-answer', { id: qsId, accept: true }); $('qs').hidden = true; qsId = null; };
+  $('qsDeny').onclick = () => { if (qsId) api.send('panel:qs-answer', { id: qsId, accept: false }); $('qs').hidden = true; qsId = null; };
+
   $('allow').onclick = () => { if (pairDevice) api.send('panel:pair-answer', { device: pairDevice, allow: true }); $('pair').hidden = true; pairDevice = null; };
   $('deny').onclick = () => { if (pairDevice) api.send('panel:pair-answer', { device: pairDevice, allow: false }); $('pair').hidden = true; pairDevice = null; };
   $('close').onclick = () => act('hide');
@@ -113,6 +156,27 @@
   $('anchor').oninput = (e) => { set('anchor', parseFloat(e.target.value)); document.querySelector('.scene .phone').style.top = (14 + (parseFloat(e.target.value) - 0.5) * 30) + 'px'; };
   $('size').oninput = (e) => set('size', parseFloat(e.target.value));
   $('sound').onchange = (e) => set('sound', e.target.checked);
+  $('openAfter').onchange = (e) => set('openAfter', e.target.checked);
+  $('showSpeed').onchange = (e) => set('showSpeed', e.target.checked);
+  $('sendTo').onchange = (e) => set('sendTo', e.target.checked);
+  $('autoUpdate').onchange = (e) => set('autoUpdate', e.target.checked);
+  $('bluetooth').onchange = (e) => set('bluetooth', e.target.checked);
+  $('quickShare').onchange = (e) => set('quickShare', e.target.checked);
+  $('checkNow').onclick = () => act('checkUpdates');
+  $('sendFiles').onclick = () => act('sendFiles');
+  api.on('panel:note', (n) => { const el = $('note'); el.textContent = (n && n.text) || ''; el.hidden = !el.textContent; clearTimeout(el._t); el._t = setTimeout(() => { el.hidden = true; }, 15000); });
+  // drop files anywhere on this window to send them to the phone
+  let dragDepth = 0;
+  const hasFiles = (e) => e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files');
+  window.addEventListener('dragenter', (e) => { if (!hasFiles(e)) return; e.preventDefault(); dragDepth++; $('drop').hidden = false; });
+  window.addEventListener('dragover', (e) => { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+  window.addEventListener('dragleave', () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) $('drop').hidden = true; });
+  window.addEventListener('drop', (e) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault(); dragDepth = 0; $('drop').hidden = true;
+    const paths = [...e.dataTransfer.files].map((f) => api.pathFor(f)).filter(Boolean);
+    if (paths.length) act('sendPaths', paths);
+  });
   $('edgeSend').onchange = (e) => set('edgeSend', e.target.checked);
   $('startup').onchange = (e) => set('startup', e.target.checked);
   $('display').onchange = (e) => set('displayId', e.target.value ? Number(e.target.value) : null);
@@ -122,5 +186,5 @@
   };
   $('name').onchange = (e) => set('name', e.target.value);
   $('name').onkeydown = (e) => { if (e.key === 'Enter') e.target.blur(); };
-  window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('pair').hidden) act('hide'); });
+  window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('pair').hidden && $('qs').hidden) act('hide'); });
 })();

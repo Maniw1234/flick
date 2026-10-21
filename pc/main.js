@@ -31,9 +31,22 @@ function log(...a) {
   if (TEST_MODE) process.stdout.write(line);
 }
 
+// An unexpected error must never put an error box on the user's screen: note it in the log and carry on.
+let inFault = false;
+function fault(kind, e) {
+  if (inFault || (e && e.code === 'EPIPE')) return;   // never loop on a broken log pipe
+  inFault = true;
+  try { log(kind, (e && e.stack) || String(e)); } catch (x) { /* ignore */ }
+  inFault = false;
+}
+process.on('uncaughtException', (e) => fault('uncaught', e));
+process.on('unhandledRejection', (e) => fault('unhandled', e));
+if (process.stdout && process.stdout.on) process.stdout.on('error', () => {});
+
 const DEFAULTS = {
   id: null, name: null, side: 'right', anchor: 0.5, size: 1, saveDir: 'desktop', sound: true,
   startup: true, edgeSend: true, devices: {}, firstRun: true, displayId: null, theme: 'roadster',
+  openAfter: false, showSpeed: true, sendTo: true, autoUpdate: true, bluetooth: false, quickShare: false,
 };
 let store = Object.assign({}, DEFAULTS);
 try { store = Object.assign({}, DEFAULTS, JSON.parse(fs.readFileSync(SETTINGS, 'utf8'))); } catch (e) { /* first run */ }
@@ -166,11 +179,45 @@ function ensureShown(withShot) {
     captureShot().then(go, go);
   } else reveal();
 }
+let lastFx = 0;
 function fx(type, data) {
   if (!overlay) return;
+  lastFx = Date.now();
   overlay.webContents.send('fx:' + type, data);
   ensureShown(!!SHOT_FIRST[type]);
 }
+
+// Nothing may stay on screen without a reason: a drag the phone never finished, a transfer that stopped sending, or
+// an overlay that is up with nothing going on is cleared within a minute.
+function watchdog() {
+  const now = Date.now();
+  for (const t of [...transfers.values()]) {
+    if (t.done) continue;
+    const quiet = now - (t.seen || t.t0);
+    if (t.state === 'lifted' && quiet > 60000) {
+      log('transfer', t.tid, 'lifted with no news for', Math.round(quiet / 1000) + 's: cancel');
+      fx('cancel', { tid: t.tid });
+      if (server) server.abortUpload(t.tid);
+      clearTimeout(t.failT);
+      discard(t);
+    } else if (t.state === 'dropped' && t.upload !== 'done' && quiet > 45000) {
+      log('transfer', t.tid, 'stalled for', Math.round(quiet / 1000) + 's: fail');
+      if (t.qs && qs) { qs.cancel(t.tid.slice(3), 'stalled'); if (!transfers.has(t.tid)) continue; }   // its failure path cleans up
+      fx('failed', { tid: t.tid });
+      if (!t.qs && server) { server.pushToPhone({ t: 'failed', tid: t.tid, why: 'stalled' }); server.abortUpload(t.tid); }
+      clearTimeout(t.failT);
+      discard(t);
+    }
+  }
+  const active = [...transfers.values()].some((t) => !t.done && (t.state === 'lifted' || t.state === 'dropped'));
+  if (overlay && overlayShown && !active && now - lastFx > 20000) {
+    log('overlay up with nothing going on: cleared');
+    overlay.webContents.send('fx:reset');
+    overlay.hide();
+    overlayShown = false;
+  }
+}
+setInterval(watchdog, 5000).unref();
 
 ipcMain.on('fx:ready', () => { overlayReady = true; if (overlay) overlay.webContents.send('fx:config', overlayConfig()); });
 ipcMain.on('fx:idle', () => {
@@ -296,11 +343,57 @@ async function thumbFor(p) {
 ipcMain.on('catcher:drop', async (_e, d) => {
   hoverOn = false;
   if (!server || !server.connected) return;
-  const paths = ((d && d.paths) || []).filter((p) => { try { return fs.statSync(p).isFile(); } catch (e) { return false; } }).slice(0, 20);
-  if (!paths.length) { fx('edge-hover', { on: false }); server.pushToPhone({ t: 'edge', on: false }); return; }
   const sy = catcher ? catcher.getBounds().y + ((d && d.y) || 0) : overlayBounds().y + store.anchor * overlayBounds().height;
-  let oy = overlayYFromScreenY(sy);
   fx('edge-hover', { on: false });
+  const n = await sendPathsToPhone((d && d.paths) || [], sy);
+  if (!n) server.pushToPhone({ t: 'edge', on: false });
+});
+
+// files (folders are opened up, up to MAX_SEND files) in the order given
+const MAX_SEND = 100;
+function expandPaths(list) {
+  const out = [];
+  const walk = (p, depth) => {
+    if (out.length >= MAX_SEND) return;
+    let st;
+    try { st = fs.statSync(p); } catch (e) { return; }
+    if (st.isFile()) { out.push(p); return; }
+    if (!st.isDirectory() || depth > 6) return;
+    let names = [];
+    try { names = fs.readdirSync(p); } catch (e) { return; }
+    for (const n of names.sort()) { if (!n.startsWith('.')) walk(path.join(p, n), depth + 1); }
+  };
+  for (const p of list) walk(String(p), 0);
+  return out;
+}
+
+// Files waiting for the phone (sent from Explorer while no phone was connected); they go out when it connects.
+let sendQueue = [];
+function queueForPhone(paths) {
+  const files = expandPaths(paths);
+  if (!files.length) return;
+  if (server && server.connected) { sendPathsToPhone(files); return; }
+  sendQueue = sendQueue.concat(files).slice(0, MAX_SEND);
+  sendQueue.at = Date.now();
+  log('queued', files.length, 'file(s) for the phone');
+  showPanel();
+  if (panel) panel.webContents.send('panel:note', { text: 'Connect your phone and ' + (files.length === 1 ? path.basename(files[0]) : files.length + ' files') + ' will be sent.' });
+}
+function flushSendQueue() {
+  if (!sendQueue.length || !server || !server.connected) return;
+  const fresh = Date.now() - (sendQueue.at || 0) < 10 * 60 * 1000;
+  const q = sendQueue; sendQueue = [];
+  if (panel) panel.webContents.send('panel:note', { text: '' });
+  if (fresh) setTimeout(() => sendPathsToPhone(q), 1200);
+}
+
+async function sendPathsToPhone(list, screenY) {
+  if (!server || !server.connected) return 0;
+  const paths = expandPaths(list);
+  if (!paths.length) return 0;
+  const sy = typeof screenY === 'number' ? screenY : overlayBounds().y + store.anchor * overlayBounds().height;
+  let oy = overlayYFromScreenY(sy);
+  const shown = Math.min(paths.length, 12);        // the first dozen fly across the screen; the rest just go
   for (let i = 0; i < paths.length; i++) {
     const p = paths[i];
     const name = path.basename(p);
@@ -311,15 +404,172 @@ ipcMain.on('catcher:drop', async (_e, d) => {
     const kind = kindOf(name);
     const aspect = th ? th.w / th.h : 0.72;
     const cw = 150, ch = Math.round(Math.max(110, Math.min(220, cw / Math.max(0.55, Math.min(1.8, aspect)))));
-    const y = oy + i * 22;
-    fx('outgoing', { fid: offer.fid, name, thumb: th && th.url, kind, badge: kind === 'doc' ? (ext || 'file').toUpperCase().slice(0, 4) : '', y, card: { w: cw, h: ch } });
+    const y = oy + Math.min(i, shown) * 22;
+    if (i < shown) fx('outgoing', { fid: offer.fid, name, thumb: th && th.url, kind, badge: kind === 'doc' ? (ext || 'file').toUpperCase().slice(0, 4) : '', y, card: { w: cw, h: ch } });
     server.pushToPhone({
       t: 'incoming', fid: offer.fid, name, size: offer.size, mime, kind, ext,
-      thumb: th && th.url, aspect, y: phoneYFromOverlayY(y), url: '/api/file/' + encodeURIComponent(offer.fid), delay: i * 90,
+      thumb: th && th.url, aspect, y: phoneYFromOverlayY(y), url: '/api/file/' + encodeURIComponent(offer.fid), delay: Math.min(i, shown) * 90,
     });
     log('offer', name, offer.size);
   }
-});
+  return paths.length;
+}
+
+// ------------------------------------------------------------ extra ways in: Bluetooth and Quick Share (see bt.js, quickshare.js)
+let btState = 'off', qsState = 'off';
+let bt = null;
+function applyBluetooth() {
+  if (!server || !server.http) return;
+  if (store.bluetooth && IS_WIN) {
+    if (!bt) {
+      const { BtBridge } = require('./bt');
+      bt = new BtBridge({ exe: path.join(__dirname, 'bin', 'flick-bt.exe'), http: server.http, log });
+      bt.on('state', (st) => { btState = st; log('bluetooth', st); pushPanelState(); });
+    }
+    bt.start();
+  } else {
+    if (bt) bt.stop();
+    btState = store.bluetooth ? 'unsupported' : 'off';
+    pushPanelState();
+  }
+}
+// Quick Share: the PC appears in Android's own Quick Share menu (quickshare.js). Incoming shares are asked about
+// in the panel (with the code the phone shows), fly in like a Flick transfer, and are saved to the same folder.
+let qs = null;
+const qsTransfers = new Map();   // share id -> transfer id
+function applyQuickShare() {
+  if (store.quickShare) {
+    if (!qs) {
+      const { QuickShare } = require('./quickshare');
+      qs = new QuickShare({ name: (server && server.name) || store.name || 'Flick PC', tmpDir: path.join(app.getPath('temp'), 'flick-quickshare'), log });
+      qs.on('state', (st) => { qsState = st; pushPanelState(); });
+      qs.on('request', onQsRequest);
+      qs.on('accepted', onQsAccepted);
+      qs.on('progress', (m) => onQsProgress(m));
+      qs.on('done', (m) => onQsDone(m).catch((e) => log('quick share save failed', e.message)));
+      qs.on('failed', onQsFailed);
+    }
+    qs.start();
+  } else {
+    if (qs) { qs.stop(); qs = null; }
+    qsState = 'off';
+    pushPanelState();
+  }
+}
+let qsAsking = null;
+const qsOffers = new Map();      // share id -> what the phone offered (names, types) for the fly-in card
+function onQsRequest(m) {
+  log('quick share request from', m.from, m.files.length, 'file(s)', m.texts.length, 'text(s)');
+  // the panel asks about one share at a time: an older unanswered one is declined so its phone isn't left waiting
+  if (qsAsking && qsAsking.id !== m.id) answerQs(qsAsking.id, false);
+  qsAsking = m;
+  qsOffers.set(m.id, m);
+  showPanel();
+  if (panel) {
+    panel.setAlwaysOnTop(true, 'floating');
+    panel.show(); panel.focus(); panel.flashFrame(true);
+    panel.webContents.send('panel:qs', m);
+  }
+  // nobody answered: decline, so the phone doesn't wait forever
+  clearTimeout(onQsRequest.t);
+  onQsRequest.t = setTimeout(() => { if (qsAsking && qsAsking.id === m.id) answerQs(m.id, false, 'timeout'); }, 58000);
+}
+function answerQs(id, accept, why) {
+  if (!qs) return;
+  if (qsAsking && qsAsking.id === id) {
+    qsAsking = null;
+    if (panel) { panel.setAlwaysOnTop(false); panel.flashFrame(false); panel.webContents.send('panel:qs-done', { id }); }
+  }
+  if (!accept) qsOffers.delete(id);
+  qs.answer(id, accept, why);
+}
+ipcMain.on('panel:qs-answer', (_e, { id, accept }) => answerQs(id, !!accept));
+function onQsAccepted(m) {
+  const tid = 'qs-' + m.id;
+  qsTransfers.set(m.id, tid);
+  const t = tState(tid);
+  const offer = qsOffers.get(m.id);
+  qsOffers.delete(m.id);
+  const files = (offer && offer.files) || [];
+  t.name = m.files === 1 && files[0] ? files[0].name : m.files + (m.files === 1 ? ' file' : ' files');
+  log('quick share accepted:', t.name, Math.round(m.total / 1024) + ' KB');
+  t.state = 'dropped'; t.upload = 'uploading'; t.seen = Date.now(); t.qs = true;
+  // fly in from the phone's side of the screen, like a throw
+  const ps = phoneScreen(), w = 150, h = 150;
+  fx('lift', { tid, name: t.name, kind: m.files === 1 && files[0] && /^image\//.test(files[0].mime) ? 'image' : 'doc', badge: '', thumb: null, thumbs: [], count: Math.max(1, m.files), folder: false, size: m.total, card: { w, h } });
+  const x = store.side === 'right' ? -w * 0.55 : ps.w - w * 0.45;
+  setTimeout(() => fx('drop', { tid, x, y: ps.h / 2 - h / 2, w, h, r: 0, vx: store.side === 'right' ? -2.6 : 2.6, vy: 0, pw: ps.w, ph: ps.h }), 140);
+}
+function onQsProgress(m) {
+  const tid = qsTransfers.get(m.id);
+  const t = tid && transfers.get(tid);
+  if (!t || !m.total) return;
+  const now = Date.now();
+  if (!t.rt) { t.rt = now; t.rs = m.got; } else if (now - t.rt > 400) { const inst = Math.max(0, m.got - t.rs) / ((now - t.rt) / 1000); t.rate = t.rate ? t.rate * 0.6 + inst * 0.4 : inst; t.rt = now; t.rs = m.got; }
+  t.seen = now;
+  fx('progress', { tid, p: m.got / m.total, rate: store.showSpeed ? t.rate || 0 : 0 });
+}
+async function onQsDone(m) {
+  const tid = qsTransfers.get(m.id);
+  qsTransfers.delete(m.id);
+  const t = tid && transfers.get(tid);
+  const dir = saveDirPath();
+  fs.mkdirSync(dir, { recursive: true });
+  const placed = [];
+  for (const f of m.files) {
+    const dest = uniquePath(dir, sanitizeName(f.name));
+    await placeItem(f.tmpPath, dest);
+    const now = new Date(); fs.utimes(dest, now, now, () => {});
+    placed.push(dest);
+  }
+  for (const x of m.texts) {
+    if (!x.value) continue;
+    // links and text are put on the clipboard (never opened by themselves)
+    require('electron').clipboard.writeText(x.value);
+    if (panel) panel.webContents.send('panel:note', { text: (m.from || 'Your phone') + ' sent ' + (x.type === 2 ? 'a link' : 'some text') + ', now on your clipboard: ' + x.value.slice(0, 200) });
+  }
+  log('quick share saved', placed.length, 'file(s) from', m.from);
+  if (store.openAfter && placed.length === 1) setTimeout(() => shell.openPath(placed[0]), 900);
+  if (t) {
+    t.done = true;
+    const name = placed.length === 1 ? path.basename(placed[0]) : placed.length ? placed.length + ' items' : 'Link copied';
+    fx('saved', { tid, name, where: placed.length ? saveDirLabel() : 'Clipboard' });
+    setTimeout(() => transfers.delete(tid), 5000);
+  }
+}
+function onQsFailed(m) {
+  log('quick share failed', m.why);
+  qsOffers.delete(m.id);
+  if (qsAsking && qsAsking.id === m.id) { qsAsking = null; if (panel) { panel.setAlwaysOnTop(false); panel.webContents.send('panel:qs-done', { id: m.id }); } }
+  const tid = qsTransfers.get(m.id);
+  qsTransfers.delete(m.id);
+  if (tid && transfers.get(tid)) { fx('failed', { tid }); transfers.delete(tid); }
+}
+
+// Explorer's right-click "Send to" menu gets "Flick (phone)" (a shortcut that starts Flick with --send <files>)
+function sendToShortcut() { return path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'SendTo', 'Flick (phone).lnk'); }
+function applySendTo() {
+  if (!IS_WIN) return;
+  const lnk = sendToShortcut();
+  try {
+    if (store.sendTo) {
+      shell.writeShortcutLink(lnk, fs.existsSync(lnk) ? 'replace' : 'create', {
+        target: process.execPath, args: '--send', description: 'Send to your phone with Flick', icon: process.execPath, iconIndex: 0,
+      });
+    } else if (fs.existsSync(lnk)) fs.unlinkSync(lnk);
+  } catch (e) { log('send-to shortcut', e.message); }
+}
+// Files on the command line after --send. Windows may reorder the arguments, so: every absolute path that exists,
+// except Flick itself.
+function sendArgs(argv) {
+  if (!argv.includes('--send')) return [];
+  const self = [path.resolve(app.getAppPath()), path.resolve(process.execPath), path.resolve(argv[0] || '')].map((p) => p.toLowerCase());
+  return argv.slice(1).filter((a) => {
+    if (!a || a.startsWith('-') || !path.isAbsolute(a)) return false;
+    if (self.includes(path.resolve(a).toLowerCase())) return false;
+    try { fs.statSync(a); return true; } catch (e) { return false; }
+  });
+}
 
 // ------------------------------------------------------------ panel (status + settings)
 function createPanel() {
@@ -373,6 +623,9 @@ function panelState() {
     update: { state: updateInfo.state, version: updateInfo.version || '' },
     side: store.side, anchor: store.anchor, size: store.size, saveDir: store.saveDir, saveDirLabel: saveDirLabel(), saveDirPath: saveDirPath(),
     sound: store.sound, startup: store.startup, edgeSend: store.edgeSend, isWin: IS_WIN, theme: themeName(),
+    openAfter: store.openAfter, showSpeed: store.showSpeed, sendTo: store.sendTo, autoUpdate: store.autoUpdate,
+    bluetooth: store.bluetooth, btState: btState, quickShare: store.quickShare, qsState: qsState,
+    via: s && s.connected ? s.via || '' : '',
     devices: Object.entries(store.devices || {}).map(([id, d]) => ({ id, name: d.name, added: d.added })),
     displays: displays().map((d, i) => ({ id: d.id, label: `Display ${i + 1} (${d.size.width}×${d.size.height})`, primary: d.id === screen.getPrimaryDisplay().id })),
     displayId: store.displayId, firstRun: store.firstRun,
@@ -391,7 +644,7 @@ ipcMain.on('panel:set', (_e, { key, value }) => {
   switch (key) {
     case 'name': {
       const v = String(value || '').trim().slice(0, 40);
-      if (v) { store.name = v; if (server) server.setName(v); }
+      if (v) { store.name = v; if (server) server.setName(v); if (qs) qs.setName(v); }
       break;
     }
     case 'side': if (value === 'left' || value === 'right') { store.side = value; } break;
@@ -403,6 +656,12 @@ ipcMain.on('panel:set', (_e, { key, value }) => {
     case 'saveDir': if (value === 'desktop' || value === 'downloads') store.saveDir = value; break;
     case 'theme': if (THEMES.includes(value)) { store.theme = value; setTimeout(() => fx('demo', {}), 120); } break;
     case 'startup': store.startup = !!value; applyStartup(); break;
+    case 'openAfter': store.openAfter = !!value; break;
+    case 'showSpeed': store.showSpeed = !!value; break;
+    case 'sendTo': store.sendTo = !!value; applySendTo(); break;
+    case 'autoUpdate': store.autoUpdate = !!value; break;
+    case 'bluetooth': store.bluetooth = !!value; applyBluetooth(); break;
+    case 'quickShare': store.quickShare = !!value; applyQuickShare(); break;
     default: return;
   }
   saveStore();
@@ -419,6 +678,7 @@ ipcMain.on('panel:set', (_e, { key, value }) => {
 ipcMain.on('panel:action', async (_e, { what, arg }) => {
   switch (what) {
     case 'hide': if (panel) panel.hide(); sendPreview(false); break;
+    case 'show': showPanel(); break;
     case 'quit': app.isQuitting = true; app.quit(); break;
     case 'openFolder': shell.openPath(saveDirPath()); break;
     case 'chooseFolder': {
@@ -433,7 +693,14 @@ ipcMain.on('panel:action', async (_e, { what, arg }) => {
     case 'dismissIntro': store.firstRun = false; saveStore(); pushPanelState(); break;
     case 'openLog': shell.openPath(LOG); break;
     case 'openRelease': shell.openExternal(updateInfo.page && /^https:\/\/github\.com\//.test(updateInfo.page) ? updateInfo.page : 'https://github.com/Maniw1234/flick/releases/latest'); break;
-    case 'checkUpdates': runUpdateCheck(); break;
+    case 'checkUpdates': runUpdateCheck(true); break;
+    case 'sendFiles': {
+      if (!server || !server.connected) break;
+      const r = await dialog.showOpenDialog(panel, { title: 'Send to your phone', properties: ['openFile', 'multiSelections'] });
+      if (!r.canceled && r.filePaths.length) sendPathsToPhone(r.filePaths);
+      break;
+    }
+    case 'sendPaths': if (Array.isArray(arg)) queueForPhone(arg.slice(0, MAX_SEND)); break;
     default: break;
   }
 });
@@ -541,8 +808,9 @@ const BOOT = global.FLICK_BOOT || null;     // set by boot.js: which copy of the
 let updater = null, updateBusy = false, restartT = null;
 let updateInfo = { state: 'idle' };
 
-async function runUpdateCheck() {
+async function runUpdateCheck(manual) {
   if (!updater || updateBusy || process.env.FLICK_NO_UPDATES === '1') return;
+  if (!manual && store.autoUpdate === false) return;
   updateBusy = true;
   try {
     updateInfo = await updater.check();
@@ -669,6 +937,7 @@ async function finalize(t) {
     }
     const now = new Date(); fs.utimes(dest, now, now, () => {});
     log('saved', dest);
+    if (store.openAfter) setTimeout(() => shell.openPath(dest), 900);
     fx('saved', { tid: t.tid, name: path.basename(dest), where: saveDirLabel() });
     if (server) server.pushToPhone({ t: 'saved', tid: t.tid, name: path.basename(dest), where: saveDirLabel() });
   } catch (e) {
@@ -694,7 +963,8 @@ function wireServer() {
     fx('hold', { p, ph: phoneScreen().h });
   });
   server.on('connected', (s) => {
-    log('connected', s.name);
+    log('connected', s.name, s.via ? 'over ' + s.via : '');
+    flushSendQueue();
     fx('connect', { name: s.name });
     pushPanelState();
     ensureCatcher();
@@ -731,17 +1001,18 @@ function wireServer() {
     const t = tState(m.tid);
     t.name = (m.file && m.file.name) || t.name;
     t.state = 'lifted';
+    t.seen = Date.now();
     fx('lift', liftInfo(m, t));
   });
-  server.on('move', (m) => fx('move', m));
+  server.on('move', (m) => { const t = transfers.get(m.tid); if (t) t.seen = Date.now(); fx('move', m); });
   server.on('drop', (m) => {
     const t = tState(m.tid);
     t.state = 'dropped';
+    t.seen = Date.now();
     fx('drop', m);
     if (t.upload === 'done') finalize(t);
     else if (t.upload === 'failed') { fx('failed', { tid: t.tid }); }
-    clearTimeout(t.timer);
-    t.timer = setTimeout(() => { if (!t.done && t.upload !== 'done') { fx('failed', { tid: t.tid }); server.pushToPhone({ t: 'failed', tid: t.tid, why: 'timeout' }); discard(t); } }, 10 * 60 * 1000);
+    clearTimeout(t.timer);   // a dropped transfer now lives as long as bytes keep arriving (see watchdog)
   });
   server.on('send', (m) => { // programmatic send (from the phone menu): fly in from the phone edge
     const t = tState(m.tid);
@@ -761,25 +1032,47 @@ function wireServer() {
     fx(m.failed && wasDropped ? 'failed' : 'cancel', { tid: m.tid });
     if (t.upload === 'done') discard(t);
   });
-  server.on('upload-start', ({ tid, name }) => { const t = tState(tid); t.upload = 'uploading'; if (name && t.name === 'file') t.name = name; });
-  server.on('upload-progress', ({ tid, received, total }) => { const t = transfers.get(tid); if (t && t.state === 'dropped' && total) fx('progress', { tid, p: received / total }); });
+  server.on('upload-start', ({ tid, name }) => {
+    const t = tState(tid);
+    t.upload = 'uploading'; t.seen = Date.now();
+    clearTimeout(t.failT);
+    if (name && t.name === 'file') t.name = name;
+  });
+  server.on('upload-progress', ({ tid, received, total }) => {
+    const t = transfers.get(tid);
+    if (!t) return;
+    const now = Date.now();
+    if (!t.rt) { t.rt = now; t.rs = received; }
+    else if (now - t.rt > 400) { const inst = Math.max(0, received - t.rs) / ((now - t.rt) / 1000); t.rate = t.rate ? t.rate * 0.6 + inst * 0.4 : inst; t.rt = now; t.rs = received; }
+    t.seen = now;
+    if (t.state === 'dropped' && total) fx('progress', { tid, p: received / total, rate: store.showSpeed ? t.rate || 0 : 0 });
+  });
   server.on('bundle-manifest', ({ tid, files, bytes }) => {
     fx('info', { tid, size: bytes, files });
   });
-  server.on('upload-done', ({ tid, tmpPath, name, bundle }) => {
+  server.on('upload-done', ({ tid, tmpPath, name, bundle, size, ms }) => {
     const t = tState(tid);
-    t.upload = 'done'; t.tmpPath = tmpPath; if (name) t.name = name;
+    if (size && ms) log('received', size, 'bytes in', (ms / 1000).toFixed(1) + 's', (size / Math.max(1, ms) / 1000).toFixed(1) + ' MB/s');
+    t.upload = 'done'; t.tmpPath = tmpPath; t.seen = Date.now(); if (name) t.name = name;
+    clearTimeout(t.failT);
     if (bundle) t.bundle = bundle;
     if (t.state === 'dropped') finalize(t);
     else if (t.state === 'canceled') discard(t);
     else { clearTimeout(t.timer); t.timer = setTimeout(() => { if (t.state === 'lifted') discard(t); }, 120000); }
   });
   server.on('upload-failed', ({ tid, why }) => {
-    const t = tState(tid);
-    t.upload = 'failed';
+    const t = transfers.get(tid);
     log('upload failed', tid, why);
-    if (t.state === 'dropped') { fx('failed', { tid }); server.pushToPhone({ t: 'failed', tid, why: 'upload' }); }
-    transfers.delete(tid);
+    if (!t) return;
+    t.upload = 'failed';
+    // the phone retries once by itself (same transfer); only give up if no new attempt starts soon
+    clearTimeout(t.failT);
+    t.failT = setTimeout(() => {
+      if (transfers.get(tid) !== t || t.upload !== 'failed' || t.done) return;
+      if (t.state === 'dropped') { fx('failed', { tid }); server.pushToPhone({ t: 'failed', tid, why: 'upload' }); }
+      else if (t.state === 'lifted') fx('cancel', { tid });
+      transfers.delete(tid);
+    }, 15000);
   });
   server.on('set-theme', (name) => {
     if (!THEMES.includes(name)) return;
@@ -796,9 +1089,18 @@ function wireServer() {
 }
 
 // ------------------------------------------------------------ app
-app.on('second-instance', () => showPanel());
+app.on('second-instance', (_e, argv) => {
+  const files = sendArgs(argv || []);
+  if (files.length) queueForPhone(files);
+  else showPanel();
+});
 app.on('window-all-closed', (e) => { /* keep running in tray */ });
-app.on('before-quit', () => { app.isQuitting = true; try { server && server.stop(); } catch (e) { /* ignore */ } });
+app.on('before-quit', () => {
+  app.isQuitting = true;
+  try { if (bt) bt.stop(); } catch (e) { /* ignore */ }
+  try { if (qs) qs.stop(); } catch (e) { /* ignore */ }
+  try { server && server.stop(); } catch (e) { /* ignore */ }
+});
 
 app.whenReady().then(async () => {
   // 1.0.0 could name the PC "Comment's PC" (Windows account without a full name): fix it automatically
@@ -821,7 +1123,12 @@ app.whenReady().then(async () => {
   screen.on('display-added', () => { placeOverlay(); ensureCatcher(); });
   screen.on('display-removed', () => { placeOverlay(); ensureCatcher(); });
 
-  if (!HIDDEN_START || store.firstRun) showPanel();
+  applySendTo();
+  applyBluetooth();
+  applyQuickShare();
+  const startFiles = sendArgs(process.argv);
+  if (startFiles.length) setTimeout(() => queueForPhone(startFiles), 1500);
+  else if (!HIDDEN_START || store.firstRun) showPanel();
   if (TEST_MODE) startTestControl();
 });
 
@@ -842,7 +1149,7 @@ function startTestControl() {
           transfers: [...transfers.values()].map((t) => ({ tid: t.tid, state: t.state, upload: t.upload, done: !!t.done })),
           panel: !!(panel && panel.isVisible()), catcher: !!catcher, catcherBounds: catcher && catcher.getBounds(),
           overlayBounds: overlay && overlay.getBounds(), saveDir: saveDirPath(), name: server && server.name,
-          version: VERSION, boot: BOOT, update: updateInfo,
+          version: VERSION, boot: BOOT, update: updateInfo, qsPort: qs && qs.port, qsState, btState,
         }));
       }
       if (u.pathname === '/eval') {
@@ -855,7 +1162,8 @@ function startTestControl() {
         return res.end('ok');
       }
       if (u.pathname === '/action') {
-        ipcMain.emit('panel:action', {}, { what: u.searchParams.get('what') });
+        const arg = u.searchParams.get('arg');
+        ipcMain.emit('panel:action', {}, { what: u.searchParams.get('what'), arg: arg ? JSON.parse(arg) : undefined });
         return res.end('ok');
       }
       if (u.pathname === '/catcher-drop') {

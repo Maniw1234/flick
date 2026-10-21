@@ -154,6 +154,7 @@ public class MainActivity extends Activity {
         Updater u = Updater.peek();
         if (u != null) u.detach(this);
         if (discovery != null) discovery.setActive(false);
+        if (btLink != null) btLink.setWanted(false);
         if (web != null) { web.destroy(); web = null; }
         super.onDestroy();
     }
@@ -280,6 +281,33 @@ public class MainActivity extends Activity {
 
     // ------------------------------------------------------------ storage access
     private static final int REQ_STORAGE = 42;
+    private static final int REQ_BT = 43;
+    private BtLink btLink;
+
+    synchronized BtLink btLink() {
+        if (btLink == null) {
+            btLink = new BtLink(this, new BtLink.Listener() {
+                @Override
+                public void onBt(String state, org.json.JSONObject pc) {
+                    try {
+                        org.json.JSONObject o = new org.json.JSONObject();
+                        o.put("t", "bt");
+                        o.put("state", state);
+                        if (pc != null) o.put("pc", pc);
+                        emit(o.toString());
+                    } catch (Throwable e) { /* ignore */ }
+                }
+            });
+        }
+        return btLink;
+    }
+
+    /** Android 12+ asks once before Flick may use paired Bluetooth devices. */
+    void askBluetooth() {
+        if (Build.VERSION.SDK_INT >= 31 && !BtLink.permitted(this)) {
+            requestPermissions(new String[]{android.Manifest.permission.BLUETOOTH_CONNECT}, REQ_BT);
+        }
+    }
     private java.util.concurrent.ExecutorService ioPool;
 
     synchronized java.util.concurrent.ExecutorService io() {
@@ -316,6 +344,7 @@ public class MainActivity extends Activity {
     public void onRequestPermissionsResult(int req, String[] perms, int[] res) {
         super.onRequestPermissionsResult(req, perms, res);
         if (req == REQ_STORAGE) emitEvent("storage");
+        if (req == REQ_BT) emitEvent("bt-perm");
     }
 
     // ------------------------------------------------------------ services

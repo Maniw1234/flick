@@ -12,6 +12,7 @@ RCEDIT=${RCEDIT:-/home/claude/tools/rcedit/rcedit-x64.exe}
 NSISDIR=${NSISDIR:-/home/claude/tools/nsis/nsis}
 MAKENSIS=${MAKENSIS:-$NSISDIR/linux/makensis}
 export WINEPREFIX=${WINEPREFIX:-/home/claude/tools/wine/prefix}
+MINGW_CC=${MINGW_CC:-$(ls -d /home/claude/tools/llvm-mingw/llvm-mingw-*/bin 2>/dev/null | head -1)/x86_64-w64-mingw32-gcc}
 VERSION=$(node -p "require('$PC/package.json').version")
 ELECTRON=$(unzip -p "$EZIP" version)
 
@@ -25,7 +26,10 @@ rm -f "$APP/resources/default_app.asar"
 
 echo "== copy app"
 mkdir -p "$APP/resources/app"
-cp -r "$PC"/{boot.js,main.js,server.js,ws.js,bundle.js,apkinfo.js,updater.js,updatecore.js,preload.js,package.json,overlay,panel,catcher,assets,phone-app} "$APP/resources/app/"
+cp -r "$PC"/{boot.js,main.js,server.js,ws.js,bundle.js,apkinfo.js,updater.js,updatecore.js,mux.js,bt.js,pb.js,mdns.js,quickshare.js,preload.js,package.json,overlay,panel,catcher,assets,phone-app} "$APP/resources/app/"
+# the Bluetooth bridge (a small native helper, see native/flick-bt.c)
+mkdir -p "$APP/resources/app/bin"
+"$MINGW_CC" -O2 -s -Wall -o "$APP/resources/app/bin/flick-bt.exe" "$ROOT/native/flick-bt.c" -lws2_32
 # the phone app ships inside the PC app, so phones can update over Wi-Fi from here
 node -e "const i=require('$PC/apkinfo').apkInfo('$APP/resources/app/phone-app/Flick.apk'); if (i.package !== 'com.flick.app') process.exit(1); console.log('phone app', i.name, '(' + i.code + ')')"
 # record which Electron this code was built for (an update for another Electron needs the full installer)

@@ -58,7 +58,7 @@ jobs:
         if: steps.v.outputs.new == 'true'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends nsis wine64 xvfb zip unzip > /dev/null
+          sudo apt-get install -y -qq --no-install-recommends nsis wine64 xvfb zip unzip gcc-mingw-w64-x86-64 > /dev/null
           mkdir -p "$RUNNER_TEMP/tools" && cd "$RUNNER_TEMP/tools"
           EV=$(node -p "require('$GITHUB_WORKSPACE/pc/package.json').electronVersion")
           curl -fsSL -o electron-win32-x64.zip "https://github.com/electron/electron/releases/download/v$EV/electron-v$EV-win32-x64.zip"
@@ -79,7 +79,7 @@ jobs:
         run: |
           WINE=$(command -v wine64 || command -v wine || echo /usr/lib/wine/wine64)
           EZIP="$RUNNER_TEMP/tools/electron-win32-x64.zip" RCEDIT="$RUNNER_TEMP/tools/rcedit-x64.exe" WINE="$WINE" \
-          WINEPREFIX="$RUNNER_TEMP/wine" NSISDIR=/usr/share/nsis MAKENSIS=makensis STRICT=1 ./build_win.sh
+          WINEPREFIX="$RUNNER_TEMP/wine" NSISDIR=/usr/share/nsis MAKENSIS=makensis MINGW_CC=x86_64-w64-mingw32-gcc STRICT=1 ./build_win.sh
 
       - name: Publish the release
         if: steps.v.outputs.new == 'true' && steps.v.outputs.check != 'true'
