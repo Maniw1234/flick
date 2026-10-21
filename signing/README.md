@@ -9,11 +9,19 @@ anyone else from passing off a fake Flick update (for example over the Wi-Fi upd
   Scheme v3 rotation lineage (old public key → new private key). On Android 13+ the phone then trusts only the new key.
   1.4.0 installs over 1.3 as a normal update, and no app data is lost.
 
-The private key is NOT in this repository, and not in GitHub's secrets either. It lives in `Flick-signing-key.zip`
-(keep it private and backed up). Because of that, GitHub can't sign the phone app: it is built and signed by hand
-with `build_apk.sh`, which writes the signed `pc/phone-app/Flick.apk` that is committed and shipped inside the PC app.
-So even someone who took over the GitHub account couldn't make a phone update your phone would accept.
-`build_apk.sh` looks for these files in `$FLICK_KEYS` (default `/home/claude/tools/keys`):
+The private key is not in this repository. It lives in `Flick-signing-key.zip` (the backup: keep it private, it
+also holds the password) and in the GitHub secret `FLICK_SIGNING_KEY` (Settings > Secrets and variables > Actions),
+which is the same zip, base64-encoded. GitHub Actions signs the phone app with it when a release changes the phone app
+(`ci/phone_app.sh`), and checks every phone app it ships with `signing/verify_apk.sh`.
+
+To set the secret again from the backup on Windows, run this in PowerShell and paste the clipboard as the secret's value:
+
+    [Convert]::ToBase64String([IO.File]::ReadAllBytes("$HOME\Downloads\Flick\Flick-signing-key.zip")) | Set-Clipboard
+
+Anyone who controls the GitHub account can now ship a phone update that phones accept (as they already could for the
+PC app), so keep two-factor sign-in on.
+
+To build by hand, `build_apk.sh` looks for these files in `$FLICK_KEYS` (default `/home/claude/tools/keys`):
 
     flick-release.p12          private key (alias "flick")
     password.txt               its password

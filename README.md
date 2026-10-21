@@ -17,13 +17,14 @@ Phone and PC talk directly over your Wi-Fi; nothing goes through the internet.
 ## Releasing a new version
 
 1. Raise `"version"` in `pc/package.json` and add a `## <version>` section to `CHANGES.md`.
-2. If the phone app changed, rebuild it with `./build_apk.sh <versionCode> <versionName>`, where
-   versionCode = major×10000 + minor×100 + patch. That writes the signed `pc/phone-app/Flick.apk`.
-3. Push to `main`.
+2. Push to `main`.
 
 GitHub Actions (`.github/workflows/release.yml`) then builds the Windows app and its installer and publishes the
 release with `Flick-Setup.exe`, `flick-app-<version>.zip` (the update bundle), the phone app and `SHA256SUMS`.
-A push without a new version number doesn't release anything.
+If `android/`, `phone/` or `build_apk.sh` changed since the last release, it also builds the phone app as the new
+version and signs it with the `FLICK_SIGNING_KEY` secret (`signing/README.md`); otherwise the last release's phone app
+is reused, so phones aren't asked to update for nothing. A push without a new version number doesn't release anything.
+To try the whole build without publishing: Actions > Release > Run workflow, tick "Only build and check".
 
 ## How updates reach your devices
 
@@ -40,7 +41,8 @@ A push without a new version number doesn't release anything.
 Both builds run on Linux.
 
 - `./build_apk.sh <versionCode> <versionName>` builds the phone app (javac, dx or d8, aapt2, uber-apk-signer). It needs
-  the private signing key described in `signing/README.md`, which is deliberately not on GitHub.
+  the private signing key described in `signing/README.md`. `pc/phone-app/Flick.apk` isn't committed: build it, or take
+  it from the latest release, before running `./build_win.sh`.
 - `./build_win.sh` builds `build/win/Flick-Setup.exe` and the update bundle (Electron for Windows, rcedit through Wine,
   NSIS). Tool paths can be set with environment variables; the workflow shows how.
 

@@ -8,3 +8,6 @@ node_modules/
 *.keystore
 *.lineage
 password.txt
+
+# the phone app the PC app carries: built by build_apk.sh or by the release workflow (ci/phone_app.sh)
+pc/phone-app/

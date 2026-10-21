@@ -4,14 +4,22 @@
 #   2. push to main
 #
 # Installed copies of Flick on Windows check these releases and update themselves (pc/updater.js); phones then get
-# the phone app inside it over Wi-Fi from the PC. The phone app (pc/phone-app/Flick.apk) is built and signed
-# outside GitHub, so its signing key never lives here (see signing/README.md).
+# the phone app inside it over Wi-Fi from the PC. The phone app is rebuilt and signed here only when it changed since
+# the last release (ci/phone_app.sh), with the key in the FLICK_SIGNING_KEY secret (see signing/README.md).
+#
+# Actions > Release > Run workflow with "Only build and check" ticked builds everything, including a signed phone app,
+# and publishes nothing.
 name: Release
 
 on:
   push:
     branches: [main]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      check:
+        description: Only build and check (always signs the phone app; publishes nothing)
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -28,13 +36,19 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # history and tags: to tell whether the phone app changed since the last release
 
       - name: New version?
         id: v
+        env:
+          CHECK: ${{ inputs.check }}
         run: |
           V=$(node -p "require('./pc/package.json').version")
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          if gh release view "v$V" > /dev/null 2>&1; then
+          if [ "$CHECK" = true ]; then
+            { echo "check=true"; echo "new=true"; } >> "$GITHUB_OUTPUT"; echo "check run: building v$V, publishing nothing"
+          elif gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$V" --silent 2> /dev/null; then
             echo "new=false" >> "$GITHUB_OUTPUT"; echo "v$V is already released: nothing to do"
           else
             echo "new=true" >> "$GITHUB_OUTPUT"; echo "building v$V"
@@ -49,6 +63,16 @@ jobs:
           EV=$(node -p "require('$GITHUB_WORKSPACE/pc/package.json').electronVersion")
           curl -fsSL -o electron-win32-x64.zip "https://github.com/electron/electron/releases/download/v$EV/electron-v$EV-win32-x64.zip"
           curl -fsSL -o rcedit-x64.exe "https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe"
+          curl -fsSL -o uber-apk-signer.jar "https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar"
+          echo "e1299fd6fcf4da527dd53735b56127e8ea922a321128123b9c32d619bba1d835  uber-apk-signer.jar" | sha256sum -c -
+
+      - name: Phone app (rebuilt and signed only if it changed since the last release)
+        if: steps.v.outputs.new == 'true'
+        env:
+          FLICK_SIGNING_KEY: ${{ secrets.FLICK_SIGNING_KEY }}
+          SIGNER: ${{ runner.temp }}/tools/uber-apk-signer.jar
+          FORCE_PHONE_BUILD: ${{ steps.v.outputs.check == 'true' && '1' || '0' }}
+        run: ci/phone_app.sh "${{ steps.v.outputs.version }}"
 
       - name: Build the Windows app, its update bundle and the installer
         if: steps.v.outputs.new == 'true'
@@ -58,7 +82,7 @@ jobs:
           WINEPREFIX="$RUNNER_TEMP/wine" NSISDIR=/usr/share/nsis MAKENSIS=makensis STRICT=1 ./build_win.sh
 
       - name: Publish the release
-        if: steps.v.outputs.new == 'true'
+        if: steps.v.outputs.new == 'true' && steps.v.outputs.check != 'true'
         run: |
           V="${{ steps.v.outputs.version }}"
           OUT=build/release && mkdir -p "$OUT"
