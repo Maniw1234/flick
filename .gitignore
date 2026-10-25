@@ -1,0 +1,14 @@
+# build output (installers, APKs, unpacked Electron)
+build/
+node_modules/
+
+# signing secrets never belong in the repo (see signing/README.md)
+*.p12
+*.jks
+*.keystore
+*.lineage
+*.pem
+password.txt
+
+# the phone app the PC app carries: built by build_apk.sh or by the release workflow (ci/phone_app.sh)
+pc/phone-app/

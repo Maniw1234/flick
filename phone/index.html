@@ -1,0 +1,124 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="features/features.css">
+</head>
+<body>
+  <!-- neon edge glow (pairing) -->
+  <div id="glow"><div class="gwrap"><div class="gmask"><div class="gspin"></div></div></div><div class="gmask thin"><div class="gspin"></div></div></div>
+
+  <!-- pairing screen -->
+  <section id="pair" class="screen on">
+    <div class="ptext">
+      <div class="l1" id="pairL1">Hold phone next to</div>
+      <div class="l2" id="pcName">Looking for your PC…</div>
+      <div class="l3" id="pairL3">Then press and hold Connect.</div>
+    </div>
+    <button id="connect" aria-label="Connect">
+      <svg class="ring" viewBox="0 0 100 100"><circle class="track" cx="50" cy="50" r="46"/><circle class="arc" cx="50" cy="50" r="46"/></svg>
+      <svg class="ico" viewBox="0 0 48 48">
+        <circle cx="24" cy="24" r="4.2" fill="currentColor"/>
+        <path d="M15.5 15.5a12 12 0 0 0 0 17M32.5 15.5a12 12 0 0 1 0 17" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"/>
+        <path d="M10 10a19.8 19.8 0 0 0 0 28M38 10a19.8 19.8 0 0 1 0 28" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"/>
+      </svg>
+    </button>
+    <div class="pfoot">
+      <div class="phint" id="pairHint"></div>
+      <div class="plinks">
+        <button class="plink" id="otherPc" hidden>Not your PC?</button>
+        <button class="plink" id="manualBtn">Enter PC address</button>
+        <button class="plink" id="skipBtn">Browse files</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- main screen -->
+  <section id="main" class="screen">
+    <div id="scroller"><div id="grid"></div>
+      <div id="empty" hidden>
+        <div class="eicon"><svg viewBox="0 0 64 64"><rect x="10" y="14" width="44" height="36" rx="8" fill="none" stroke="currentColor" stroke-width="3"/><path d="M10 40l12-11 9 8 8-6 15 12" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/><circle cx="42" cy="25" r="4" fill="currentColor"/></svg></div>
+        <div class="etitle" id="emptyTitle">Nothing here yet</div>
+        <div class="esub" id="emptySub">Tap <b>+</b> to add photos and files, or use <b>Share → Flick</b> from any app.</div>
+      </div>
+      <div id="perm" hidden>
+        <div class="picon"><svg viewBox="0 0 64 64"><path d="M8 18a5 5 0 0 1 5-5h12l5 6h21a5 5 0 0 1 5 5v22a5 5 0 0 1-5 5H13a5 5 0 0 1-5-5z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/><path d="M24 36l6 6 11-12" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+        <div class="ptitle2">See all your phone’s files</div>
+        <div class="psub2" id="permSub">Allow Flick to show the photos, videos and files on this phone, just like the Files app.</div>
+        <button id="permBtn">Allow access</button>
+      </div>
+    </div>
+    <header id="hdr">
+      <div class="hrow">
+        <button id="backBtn" class="hback" hidden aria-label="Back"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <button id="selClose" class="hback" hidden aria-label="Cancel selection"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"/></svg></button>
+        <div class="htext"><div class="htitle" id="htitle">Recent</div><div class="hsub" id="hsub"></div></div>
+        <button id="selAll" class="hsel" hidden>Select all</button>
+      </div>
+      <div class="chips" id="chips"></div>
+    </header>
+    <div id="toolbar">
+      <div class="pill">
+        <button class="tb" id="pcBtn" aria-label="Connection"><svg viewBox="0 0 28 28"><rect x="5" y="6.5" width="18" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M2.5 21.5h23" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><i class="cdot" id="cdot"></i></button>
+        <button class="tb" id="addBtn" aria-label="Add"><svg viewBox="0 0 28 28"><path d="M14 6v16M6 14h16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>
+        <span class="count" id="count">0 items</span>
+      </div>
+      <button class="round" id="moreBtn" aria-label="More"><svg viewBox="0 0 28 28"><circle cx="7.5" cy="14" r="2.1" fill="currentColor"/><circle cx="14" cy="14" r="2.1" fill="currentColor"/><circle cx="20.5" cy="14" r="2.1" fill="currentColor"/></svg></button>
+    </div>
+    <div id="selBar" hidden>
+      <button id="selSend"><svg viewBox="0 0 24 24"><path d="M4 12h13M12 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg><span id="selSendText">Send</span></button>
+    </div>
+    <!-- wireless update from the PC -->
+    <div id="upd" hidden>
+      <img class="uicon" src="appicon.png" alt="">
+      <div class="utext"><div class="ut" id="updTitle"></div><div class="us" id="updSub"></div></div>
+      <button class="ubtn" id="updBtn"></button>
+      <button class="uclose" id="updClose" aria-label="Not now"><svg viewBox="0 0 24 24"><path d="M7 7l10 10M17 7L7 17" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg></button>
+      <div class="ubar"><i id="updBar"></i></div>
+    </div>
+  </section>
+
+  <div id="edgeGlow"><div class="e1"></div><div class="e2"></div></div>
+  <div id="dragLayer"></div>
+  <canvas id="fx"></canvas>
+  <div id="flash"></div>
+  <div id="toast"></div>
+
+  <div id="sheet" hidden>
+    <div class="backdrop"></div>
+    <div class="panel"><div class="grab"></div><div class="stitle" id="sheetTitle"></div><div class="items" id="sheetItems"></div></div>
+  </div>
+
+  <section id="settings" hidden>
+    <header class="shdr">
+      <button class="hback" id="setBack" aria-label="Back"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <div class="stitle2">Settings</div>
+    </header>
+    <div class="sscroll" id="setBody"></div>
+  </section>
+
+  <div id="ask" hidden>
+    <div class="backdrop"></div>
+    <div class="box">
+      <div class="atitle" id="askTitle">Enter PC address</div>
+      <div class="asub" id="askSub">Shown on your PC in the Flick window, e.g. 192.168.1.23</div>
+      <input id="askInput" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="192.168.1.23">
+      <div class="abtns"><button id="askCancel">Cancel</button><button id="askOk" class="primary">Connect</button></div>
+    </div>
+  </div>
+
+  <!-- the features: each file queues a start function; app.js starts them once its API (FlickApp) exists -->
+  <script src="features/core.js"></script>
+  <script src="features/clipboard.js"></script>
+  <script src="features/links.js"></script>
+  <script src="features/ring.js"></script>
+  <script src="features/remote.js"></script>
+  <script src="features/history.js"></script>
+  <script src="features/sync.js"></script>
+  <script src="features/pcs.js"></script>
+  <script src="features/settings.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

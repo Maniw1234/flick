@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1d1828"/><stop offset="1" stop-color="#07070b"/>
+    </linearGradient>
+    <linearGradient id="neon" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ff9f0a"/><stop offset=".3" stop-color="#ff2d72"/><stop offset=".62" stop-color="#ff5ec4"/><stop offset="1" stop-color="#8f5cff"/>
+    </linearGradient>
+    <linearGradient id="photo" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffb35c"/><stop offset=".55" stop-color="#ff6a7d"/><stop offset="1" stop-color="#7a4bd6"/>
+    </linearGradient>
+    <radialGradient id="bloom" cx=".5" cy=".5" r=".5">
+      <stop offset="0" stop-color="#fff" stop-opacity="1"/><stop offset=".35" stop-color="#ffe3f1" stop-opacity=".75"/><stop offset="1" stop-color="#ff5ec4" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="blur18" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="18"/></filter>
+    <filter id="blur6" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="6"/></filter>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="0" dy="14" stdDeviation="14" flood-color="#000" flood-opacity=".55"/></filter>
+    <clipPath id="clip"><rect width="512" height="512" rx="114"/></clipPath>
+  </defs>
+  <g clip-path="url(#clip)">
+    <rect width="512" height="512" fill="url(#bg)"/>
+    <rect x="318" y="40" width="26" height="432" rx="13" fill="url(#neon)" filter="url(#blur18)" opacity=".95"/>
+    <rect x="325" y="56" width="12" height="400" rx="6" fill="url(#neon)"/>
+    <rect x="328" y="70" width="6" height="372" rx="3" fill="#fff" opacity=".85" filter="url(#blur6)"/>
+    <circle cx="331" cy="262" r="120" fill="url(#bloom)" opacity=".9"/>
+    <g transform="rotate(-11 236 262)" filter="url(#shadow)">
+      <rect x="112" y="170" width="248" height="184" rx="30" fill="#fff"/>
+      <rect x="124" y="182" width="224" height="160" rx="20" fill="url(#photo)"/>
+      <path d="M124 300 L188 246 L232 286 L268 258 L348 322 L348 322 Q348 342 328 342 L144 342 Q124 342 124 322 Z" fill="#2b1d4a" opacity=".55"/>
+      <circle cx="300" cy="222" r="18" fill="#fff4d6" opacity=".95"/>
+    </g>
+  </g>
+</svg>
