@@ -8,9 +8,12 @@ phone's hotspot or Bluetooth), encrypted; nothing goes through the internet.
 ## Install
 
 1. On the PC, from the latest [release](https://github.com/Maniw1234/flick/releases/latest):
-   - **Windows** 10 or 11, 64-bit: download `Flick-Setup.exe` and run it.
+   - **Windows** 10 or 11, 64-bit: download `Flick-Setup.exe` and run it. Flick isn't code-signed, so Windows may show
+     "Windows protected your PC" the first time: click **More info**, then **Run anyway** (once). Your browser may also
+     warn that the file isn't commonly downloaded: keep it.
    - **Mac** (macOS 13 or newer): `Flick-mac-arm64.dmg` for Apple silicon (M1 and newer), `Flick-mac-x64.dmg` for an
-     Intel Mac. Open it and drag Flick to Applications. Flick isn't notarized by Apple (there's no paid Apple Developer
+     Intel Mac. Open it and drag Flick to Applications. Or install it with [Homebrew](https://brew.sh):
+     `brew install --cask maniw1234/flick/flick`. Flick isn't notarized by Apple (there's no paid Apple Developer
      account), so macOS refuses to open it the first time: open System Settings > Privacy & Security, scroll down to
      the message about Flick and click **Open Anyway** (once). When macOS asks whether Flick may find devices on the
      local network, allow it: Flick can't reach the phone without it.
