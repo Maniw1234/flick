@@ -5,7 +5,7 @@
   "description": "Flick - throw files from your phone onto your PC screen",
   "main": "boot.js",
   "author": "Flick",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "electronVersion": "44.9.1",
   "electronSha256": "41bd7900bd42d0f49110a81617876137041fbbf473466920248ddb076349ef91",
   "electronSha256MacArm64": "ff597552c9c7b0b16c39a7fb93a346ee7148afbd372ebcf0c18415482c49fbea",

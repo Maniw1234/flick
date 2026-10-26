@@ -211,3 +211,7 @@ version for every system (`electronVersion` in `pc/package.json`, with the check
 ## Versions
 
 See `CHANGES.md`.
+
+## License
+
+MIT. See `LICENSE`.
