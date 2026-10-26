@@ -59,6 +59,11 @@ final class Bg {
 
     /** A transfer Flick made by itself (auto-send, tile, widget, sync) goes into the history; the page is told. */
     static void historyAdd(Context c, String dir, String name, long size, String path, String kind, String how, boolean ok, PcClient.Target t) {
+        historyAdd(c, dir, name, size, path, kind, how, ok, t, null);
+    }
+
+    /** historyAdd() with why it didn't go: "declined" or "timeout" (see declined()), or null. */
+    static void historyAdd(Context c, String dir, String name, long size, String path, String kind, String how, boolean ok, PcClient.Target t, String why) {
         try {
             JSONObject e = new JSONObject();
             e.put("dir", dir);
@@ -70,6 +75,7 @@ final class Bg {
             if (kind != null && kind.length() > 0) e.put("kind", kind);
             e.put("how", how);
             e.put("ok", ok);
+            if (why != null) e.put("why", why);
             history(c).add(e);
             Page.historyChanged();
         } catch (Throwable x) { Log.w(TAG, "history: " + x); }
@@ -170,9 +176,24 @@ final class Bg {
             if (f.is(PcClient.Failure.OLD)) return "Update Flick on " + pc + " first";
             if (f.is(PcClient.Failure.LOCAL)) return "Couldn't read the file";
             if (f.is(PcClient.Failure.ABORTED)) return "Stopped";
+            String no = declined(e);
+            if ("declined".equals(no)) return pc + " declined it";
+            if ("timeout".equals(no)) return "Not accepted on " + pc + " in time";
             return pc + " couldn't take it";
         }
         return "Couldn't send it to " + pc;
+    }
+
+    /**
+     * "declined" when the PC's user said no to a file (the PC is set to "Ask each time" for this phone), "timeout" when
+     * nobody answered there within a minute; null for any other outcome. Sending it again would only ask again.
+     */
+    static String declined(Throwable e) {
+        if (!(e instanceof PcClient.Failure)) return null;
+        PcClient.Failure f = (PcClient.Failure) e;
+        if (!f.is(PcClient.Failure.REFUSED) || f.code != 409) return null;
+        String m = String.valueOf(f.getMessage());
+        return m.endsWith(": declined") ? "declined" : m.endsWith(": timeout") ? "timeout" : null;
     }
 
     static void log(String msg) { Log.i(TAG, msg); }

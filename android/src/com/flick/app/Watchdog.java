@@ -1,5 +1,6 @@
 package com.flick.app;
 
+import java.io.Closeable;
 import java.io.FilterInputStream;
 import java.io.FilterOutputStream;
 import java.io.IOException;
@@ -30,12 +31,12 @@ final class Watchdog {
     /** One watched connection. Use watch() on the body's stream, idle() once the body is through, close() at the end. */
     static final class Guard {
         private final AtomicBoolean abort;
-        private final HttpURLConnection c;
+        private final Object c;                 // an HttpURLConnection, or anything Closeable (a socket)
         private volatile boolean moving;        // the body is going through (before and after it the timeouts apply)
         private volatile long last;
         private volatile String ended;          // why abort() or the watchdog disconnected it
 
-        private Guard(AtomicBoolean abort, HttpURLConnection c) { this.abort = abort; this.c = c; }
+        private Guard(AtomicBoolean abort, Object c) { this.abort = abort; this.c = c; }
 
         /** The stream the request body is written to: every write is progress; the stall clock starts now. */
         OutputStream watch(OutputStream o) {
@@ -69,12 +70,20 @@ final class Watchdog {
         private void kill(String why) {
             if (ended != null) return;
             ended = why;
-            try { c.disconnect(); } catch (Throwable e) { /* ignore */ }
+            try {
+                if (c instanceof HttpURLConnection) ((HttpURLConnection) c).disconnect();
+                else if (c instanceof Closeable) ((Closeable) c).close();
+            } catch (Throwable e) { /* ignore */ }
         }
     }
 
     /** Starts watching c, which belongs to the transfer whose abort flag is abort (may be null: no abort for it). */
-    static Guard guard(AtomicBoolean abort, HttpURLConnection c) {
+    static Guard guard(AtomicBoolean abort, HttpURLConnection c) { return watch(abort, c); }
+
+    /** The same for a connection made by hand (Wire): closing it is how it's cut. */
+    static Guard guard(AtomicBoolean abort, Closeable c) { return watch(abort, c); }
+
+    private static Guard watch(AtomicBoolean abort, Object c) {
         Guard g = new Guard(abort, c);
         LIVE.add(g);
         synchronized (Watchdog.class) {

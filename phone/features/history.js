@@ -8,7 +8,8 @@
     in: '<svg viewBox="0 0 24 24"><path d="M17 7L7 17M14.5 17H7V9.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
     bad: '<svg viewBox="0 0 24 24"><path d="M12 6.5v7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><circle cx="12" cy="17.3" r="1.35" fill="currentColor"/></svg>',
   };
-  const HOW = { auto: 'Auto-send', tile: 'Quick Settings', widget: 'Widget', share: 'Shared', sync: 'Folder sync' };
+  const HOW = { auto: 'Auto-send', tile: 'Quick Settings', widget: 'Widget', share: 'Shared', sync: 'Folder sync', browse: 'Browse phone' };
+  const WHY = { declined: 'Declined', timeout: 'Not accepted in time' };    // a PC set to "Ask each time"
 
   // ---- entries for what this page sends and receives
   const queue = [];
@@ -98,7 +99,7 @@
     top.append(h('b', '', e.name), h('span', 'ftime', timeOf(+e.time || 0)));
     tx.appendChild(top);
     const sm = h('small', 'fwrap');
-    if (bad) sm.appendChild(h('span', 'fbad', (e.dir === 'in' ? 'Didn’t arrive' : 'Didn’t send') + ' · '));
+    if (bad) sm.appendChild(h('span', 'fbad', (WHY[e.why] || (e.dir === 'in' ? 'Didn’t arrive' : 'Didn’t send')) + ' · '));
     const bits = [e.kind === 'folder' ? 'Folder' : A.fmtSize(e.size), (e.dir === 'in' ? 'From ' : 'To ') + (e.pcName || 'your PC')];
     if (HOW[e.how]) bits.push(HOW[e.how]);
     if (e.libId && !e.path && gone.has(e.libId)) bits.push('No longer in Flick');

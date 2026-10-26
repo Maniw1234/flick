@@ -1,5 +1,74 @@
 # Changes
 
+## 1.1.0
+
+- Fixed: on Android 17 (Galaxy Z Fold 8 and other phones with One UI 9), Flick closed as soon as it was opened.
+- **Large files are checked end to end.** A large file travels in several parts at once; the phone now also sends
+  the whole file's checksum, and the PC confirms the file it put together matches before it counts as received. A
+  file that arrived damaged is sent again instead of being saved. (Works once both the phone and the PC have the new
+  version.)
+- Fixed: when the phone retried a transfer, the attempt it replaced could be left waiting for an answer that never
+  came.
+- Flick on the PC closes connections that take longer than 20 seconds to send a request, and closes WebSocket
+  connections that break the protocol.
+- Leftover temporary files from transfers that never finished are also cleaned up while Flick runs, not only when it
+  starts.
+- If Flick on the phone closes unexpectedly, the next time it opens it shows what went wrong, with a Copy button to
+  pass it on.
+- **Flick for Mac and Linux.** The PC app now runs on macOS 13 or newer (`Flick-mac-arm64.dmg` for Apple silicon,
+  `Flick-mac-x64.dmg` for Intel Macs) and on 64-bit Linux (`Flick-linux-x86_64.AppImage`, or `Flick-linux-x64.tar.gz`),
+  and updates itself there too. On a Mac, Flick lives in the menu bar: drop files on it or on its Dock icon, or choose
+  Open With > Flick in Finder, to send them to the phone. On Linux, Flick is in the applications menu and in your file
+  manager's Open With. Bluetooth stays Windows only; the phone's media remote needs Accessibility permission on a Mac
+  and playerctl on Linux.
+- Windows: right-click files or a folder in File Explorer and choose **Send with Flick** (on Windows 11 under Show
+  more options). Installing this version adds it.
+- **Sends keep going when you close Flick.** Close the app or swipe it away while files are going to the PC and they
+  keep going in the background, with their progress in the notification. If the Wi-Fi drops, the PC goes to sleep or
+  Android stops the app anyway, the send waits and carries on from where it stopped (not from the start) as soon as
+  the PC can be reached again, for up to 6 hours. The PC shows "Paused, waiting for the phone" meanwhile.
+- **Transfers page** on the phone (tap "Sending…" in the toolbar, or ••• > Transfers): every send with its progress,
+  speed and time left, and Pause, Resume, Cancel and Try again.
+- **Faster.** The phone sends straight to the PC over the encrypted link (no detour through the app's local proxy), in
+  up to 6 parts at once for large files, and the PC checks each part as it arrives instead of reading the whole file
+  back at the end. Large files from the PC come straight too. Settings > Speed test shows how fast your connection
+  is right now, and what your Wi-Fi is doing.
+- **Skip files already on the PC** (Settings, on by default): a photo or video the PC already has isn't sent again;
+  the PC says "Already on this PC".
+- **Every PC is remembered, with every address it has.** The phone finds a PC it paired with again by itself, at home
+  or at work, even on networks where it was found by typing its address; when the PC used last isn't around but
+  another paired one is, it switches to that one. PCs are also found over mDNS. Paired PCs connect when Flick opens,
+  without holding Connect (Settings > Connect automatically).
+- **Share with a browser, from another Wi-Fi.** "On another Wi-Fi?" in the share view makes a Wi-Fi network on the PC
+  (Windows Mobile hotspot, or a Wi-Fi Direct network; on Linux, NetworkManager's hotspot): scan the first code to join
+  it, then the second to open the page.
+- **Browse your phone from the PC.** Browse your phone in the Flick window shows the phone's photos, videos,
+  downloads, documents and folders; pick files and click Copy to PC. Works while Flick is open on the phone, or closed
+  with "Stay connected in the background". Off until you turn on "Let your PC browse this phone" in the phone's
+  Settings; the PC can only look and copy.
+- **Clipboard history.** The last 20 texts, links and pictures copied between phone and PC, on each side: in the Flick
+  window (Copy, Send to phone) and on the phone (••• > Clipboard history: tap to copy, Send to PC). Kept only on that
+  device, never anything marked as private. Clear it, or turn it off in Settings.
+- **Ask before saving.** For each phone, the PC can Always accept (as before) or Ask each time: files from that phone
+  then wait for Accept or Decline, with their name, count and size. Declined, or not accepted within a minute, the
+  phone says so.
+- **Send feedback** from the phone (Settings > Send feedback) or the PC (at the bottom of the Flick window): a bug or
+  an idea, an optional email address and, if you leave it ticked, the device info shown under it. Without a
+  connection it is sent later.
+- **List view.** The switch next to search shows files as rows with a small picture, name, size, date and type, and
+  Flick remembers it. Rows work like the grid: tap, press and hold to select, or drag one off the edge to send it.
+- **Sort and search.** Sort any tab by name, date, size or type, either way round; each tab keeps its own order.
+  Search finds files in the folder or category you're in as you type.
+- **Preview.** Tap Preview in a file's menu, or spread two fingers on it, to see it full screen: zoom into photos,
+  play videos, swipe to the next one, and tap Send or flick the file up to send it to your PC.
+- **Pinned folders.** Pin a folder from its menu and it gets its own tab after Documents. Press and hold the tab to
+  move or unpin it.
+- **Tips.** After you pair, four short tips show how to flick files, send several at once, send from the PC and find
+  Settings. Show tips again in Settings brings them back.
+- **Lock Flick.** In Settings, Flick can ask for your fingerprint, face or PIN when it opens and when you come back
+  after more than 30 seconds. Transfers keep running while it's locked, and the tiles and the widget keep working.
+- Fixed: a file sent from the PC never arrived if the phone was scrolled far down a long list when it was sent.
+
 ## 1.0.0
 
 The first release.

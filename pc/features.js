@@ -10,10 +10,13 @@ const { SyncStore } = require('./sync');
 const { ClipWatch } = require('./clip');
 const { MediaKeys } = require('./keys');
 const { cleanUrl } = require('./phoneapi');
+const { ClipHistory } = require('./cliphist');
+const { PhoneBrowse } = require('./browse');
+const { AcceptGate } = require('./ask');
 
 const FEATURES_CODE = 20000;    // phone app version code (hello `app`) from which a phone has these features
 const RING_SEC = 30;
-const SETTINGS = ['clipSync', 'openLinks', 'phoneNotify'];   // on unless turned off (store[k] !== false)
+const SETTINGS = ['clipSync', 'openLinks', 'phoneNotify', 'clipHistory'];   // on unless turned off (store[k] !== false)
 const QUIET_WHAT = { screenshot: 'Screenshot', photo: 'Photo' };
 
 class Features {
@@ -45,19 +48,32 @@ class Features {
     this.sync.on('changed', () => this._push());
     this.sync.on('stored', (x) => this.record({ dir: 'in', path: x.path, size: x.size, device: x.device, deviceName: x.phone, how: 'sync' }));
     this.sync.on('sent', (x) => this.record({ dir: 'out', path: x.path, size: x.size, device: x.device, deviceName: x.phone, how: 'sync' }));
-    this.keys = new MediaKeys({ exe: path.join(o.appDir, 'bin', 'flick-keys.exe'), log: this.log });
+    this.keys = new MediaKeys({ exe: path.join(o.appDir, 'bin', process.platform === 'win32' ? 'flick-keys.exe' : 'flick-keys'), log: this.log, onTrouble: (why) => this._remoteTrouble(why) });
     this.clip = new ClipWatch({
       clipboard: this.el.clipboard, ClipboardItem: this.el.ClipboardItem, nativeImage: this.el.nativeImage, log: this.log,
       wanted: () => this._on('clipSync') && this._hasFeatures(this.server.eventTarget()),
-      send: (m) => this.server.sendEvent(this.server.eventTarget(), m),
+      send: (m) => { const d = this.server.eventTarget(); const ok = this.server.sendEvent(d, m); if (ok) this._clipKeep('out', d, m); return ok; },
       onLink: () => o.updateTray(),
+    });
+    // the last 20 clipboards that went through Flick (cliphist.js), on this PC only
+    this.cliph = new ClipHistory(path.join(o.userDir, 'cliphist'), { log: this.log, onChange: () => this._soon('c', () => { this._pushClips(); this._push(); }, 80), thumb: (png) => this._thumb(png) });
+    // "Ask each time" per phone (ask.js): the questions show in the window, in front of whatever the user is doing
+    this.ask = new AcceptGate({ store: this.store, saveStore: o.saveStore, log: this.log, ms: o.askMs });
+    this.ask.on('change', (a) => { this.o.panelSend('panel:ask', this.ask.list()); if (o.front) o.front(this.ask.asks.length > 0, !!a); });
+    // Browse phone (browse.js)
+    this.browse = new PhoneBrowse({
+      server: this.server, log: this.log, panelSend: o.panelSend, saveReceived: o.saveReceived, record: (e) => this.record(e),
+      hasFeatures: (d) => this._hasFeatures(d), nameOf: (d) => this._name(d), panelInFront: () => this._panelInFront(),
+      notify: (n) => this.toast(n), showItem: (p) => { try { this.el.shell.showItemInFolder(p); } catch (e) { /* ignore */ } },
     });
 
     const s = this.server;
     s.sync = this.sync;
+    s.browse = this.browse;          // phoneapi.js hands /api/browse to it
     s.quietSave = (f) => this._quiet(f);
     this._apply();
     for (const ev of ['connected', 'disconnected', 'active', 'stream', 'phone-hello', 'devices-changed']) s.on(ev, () => this._phonesChanged());
+    s.on('devices-changed', (devs) => { for (const d of Object.keys(this.store.acceptMode || {})) if (!devs || !devs[d]) this.ask.forget(d); });
     s.on('clip-in', (m) => this._clipIn(m));
     s.on('link-in', (m) => this._linkIn(m));
     s.on('notify-in', (m) => this._notifyIn(m));
@@ -103,6 +119,7 @@ class Features {
     this._clipCheck();
     this._push();
     this.o.updateTray();
+    this.browse.phonesChanged();
   }
 
   // the clipboard is looked at only while a phone that has these features is reachable
@@ -122,12 +139,14 @@ class Features {
     const pairs = Object.entries(this.sync.pairs).map(([id, p]) => ({ id, phone: p.phone || 'Phone', name: p.name, folder: p.folder, last: p.last || p.created || 0 }))
       .sort((a, b) => b.last - a.last);
     const h = this.history.items[0];
+    const c = this.cliph.items[0];
     return {
       phones, target: phones.find((x) => x.active) || null,
       ringing: this.ringing ? { device: this.ringing.device, name: this.ringing.name, until: this.ringing.until } : null,
-      clipSync: this._on('clipSync'), openLinks: this._on('openLinks'), phoneNotify: this._on('phoneNotify'),
+      clipSync: this._on('clipSync'), openLinks: this._on('openLinks'), phoneNotify: this._on('phoneNotify'), clipHistory: this._on('clipHistory'),
       apps, pairs, seenFeat: !!this.store.seenFeat || phones.some((x) => x.feat),
-      last: h ? { name: h.name, dir: h.dir, deviceName: h.deviceName, time: h.time, ok: h.ok } : null, count: this.history.items.length,
+      last: h ? { name: h.name, dir: h.dir, deviceName: h.deviceName, time: h.time, ok: h.ok, why: h.why || '' } : null, count: this.history.items.length,
+      clips: this.cliph.items.length, clipLast: c ? { kind: c.kind, preview: c.preview || '', time: c.time } : null,
     };
   }
 
@@ -185,6 +204,7 @@ class Features {
     let ok = false;
     try { ok = await this.clip.put(m.kind, m.kind === 'text' ? m.text : m.png); } catch (e) { this.log('clipboard write failed: ' + e.message); }
     if (!ok) return;
+    if (!m.priv) this._clipKeep('in', m.device, m);     // one the phone marked as private is never kept
     this._note('Copied from ' + m.name + '. ' + (m.kind === 'text' ? 'The text' : 'The picture') + ' is on your clipboard.');
     // the content itself isn't shown in the notification (it may be a password)
     if (!this._panelInFront()) this.toast({ title: 'Copied from ' + m.name, body: (m.kind === 'text' ? 'Text' : 'A picture') + ' is on your clipboard.', silent: true });
@@ -223,8 +243,35 @@ class Features {
     }
   }
 
+  // The phone's remote can't tell whether this computer can press media keys: the first key that can't be pressed
+  // says here what it takes (once per reason while Flick runs)
+  _remoteTrouble(why) {
+    if (this.remoteSaid === why) return;
+    this.remoteSaid = why;
+    const text = why === 'untrusted' ? 'To use your phone as a media remote, allow Flick in System Settings > Privacy & Security > Accessibility.'
+      : why === 'playerctl' ? 'To use your phone as a media remote, install playerctl (for example: sudo apt install playerctl).'
+        : 'The media remote doesn’t work on this computer.';
+    this._note(text);
+    if (!this._panelInFront()) this.toast({ title: 'Media remote', body: text, silent: true });
+  }
+
   // a file sent without the gesture: saved like any received file, a notification, a history entry
   async _quiet(f) {
+    if (f.kind === 'pull') {
+      const c = this.browse.claim(f);
+      if (c && c.refuse) throw Object.assign(new Error(c.refuse), { status: 409, why: c.refuse });   // that copy was stopped
+      if (c) return this.browse.pulled(f, c);       // a file Browse phone asked for: saved, no notification of its own
+      f.kind = 'share';                              // nothing here asked for it: like any file sent quietly
+    }
+    if (this.ask.mode(f.device) === 'ask') {
+      // "Ask each time": nothing is saved before the user accepts (the phone waits for the answer to its upload)
+      this.server.sendEvent(f.device, { t: 'asking', name: f.name });
+      const a = await this.ask.ask({ device: f.device, deviceName: f.phone, name: f.name, count: 1, size: f.size, kind: 'quiet', tid: f.tid });
+      if (!a.yes) {
+        this.history.add({ dir: 'in', name: f.name, size: f.size, device: f.device, deviceName: f.phone, how: f.kind === 'share' ? 'share' : 'auto', ok: false, why: a.why });
+        throw Object.assign(new Error(a.why), { status: 409, why: a.why });
+      }
+    }
     const r = await this.o.saveReceived(f.tmpPath, f.name);
     this.history.add({ dir: 'in', name: r.name, path: r.path, size: f.size, device: f.device, deviceName: f.phone, how: f.kind === 'share' ? 'share' : 'auto' });
     if (this.store.openAfter) setTimeout(() => this.o.openAfterArrival(r.path), 900);
@@ -282,6 +329,55 @@ class Features {
     return this.history.add(Object.assign({}, e, { device, deviceName: e.deviceName || (device ? this._name(device) : ''), size: size || 0, folder }));
   }
 
+  // ---------- clipboard history (cliphist.js) ----------
+  // m: a clipboard message ({kind:'text', text} or {kind:'image', png: Buffer | base64}) that went to or came from device
+  _clipKeep(dir, device, m) {
+    if (!this._on('clipHistory') || !m) return;
+    const c = m.kind === 'image' ? { kind: 'image', png: Buffer.isBuffer(m.png) ? m.png : Buffer.from(String(m.png || ''), 'base64') } : { kind: 'text', text: m.text };
+    this.cliph.add(c, { dir, device, deviceName: device ? this._name(device) : '' });
+  }
+
+  // a small picture for the list (the clipboard's own picture can be a whole screenshot)
+  _thumb(png) {
+    const ni = this.el.nativeImage;
+    if (!ni || typeof ni.createFromBuffer !== 'function') return null;
+    const im = ni.createFromBuffer(png);
+    if (!im || im.isEmpty()) return null;
+    const { width, height } = im.getSize();
+    const r = Math.min(1, 96 / Math.max(width, height, 1));
+    const t = r < 1 ? im.resize({ width: Math.max(1, Math.round(width * r)), height: Math.max(1, Math.round(height * r)), quality: 'good' }) : im;
+    const jpg = t.toJPEG(82);
+    return jpg && jpg.length ? 'data:image/jpeg;base64,' + jpg.toString('base64') : null;
+  }
+
+  _pushClips() { this.o.panelSend('panel:clips', { on: this._on('clipHistory'), items: this.cliph.list(), target: this._clipTarget() }); }
+
+  // where "Send to phone" goes: the phone in use, if it takes the clipboard
+  _clipTarget() {
+    const d = this.server.eventTarget();
+    return d ? { device: d, name: this._name(d), ok: this._hasFeatures(d) } : null;
+  }
+
+  async _clipCopy(id) {
+    const c = await this.cliph.get(id);
+    if (!c) { this._note('That item isn’t there any more.'); this._pushClips(); return; }
+    let ok = false;
+    // put on the clipboard as if it came from the phone: it isn't sent back by itself
+    try { ok = await this.clip.put(c.kind, c.kind === 'text' ? c.text : c.png); } catch (e) { this.log('clipboard write failed: ' + e.message); }
+    this._note(ok ? (c.kind === 'text' ? 'Copied. The text is on your clipboard.' : 'Copied. The picture is on your clipboard.') : 'Couldn’t copy that.');
+  }
+
+  async _clipSend(id) {
+    const d = this.server.eventTarget();
+    if (d && !this._hasFeatures(d)) { this._note('Update Flick on ' + this._name(d) + ' to send it the clipboard.'); return; }
+    const c = await this.cliph.get(id);
+    if (!c) { this._note('That item isn’t there any more.'); this._pushClips(); return; }
+    const msg = c.kind === 'text' ? { t: 'clip', kind: 'text', text: c.text } : { t: 'clip', kind: 'image', png: c.png.toString('base64') };
+    if (!d || !this.server.sendEvent(d, msg)) { this._note('Your phone isn’t reachable. Open Flick on it, or turn on “Stay connected in the background” there.'); return; }
+    this._note('Sent to ' + this._name(d) + '.');
+    if (this._on('clipHistory')) this.cliph.add(c, { dir: 'out', device: d, deviceName: this._name(d) });
+  }
+
   /** Files a browser sent from the "Share with a browser" page (webshare.js 'incoming-done'). */
   watchWeb(web) {
     if (!web) return;
@@ -310,7 +406,7 @@ class Features {
       fs.promises.access(it.path).then(then, () => { this._note('That file isn’t there any more.'); this._pushHistory(); });
     };
     switch (m.what) {
-      case 'hello': this._push(true); this._pushHistory(); break;
+      case 'hello': this._push(true); this._pushHistory(); this._pushClips(); this.o.panelSend('panel:ask', this.ask.list()); this.browse.resend(); break;
       case 'use': if (this.server.use(str(m.device))) this._push(true); break;
       case 'ring': this.ring(str(m.device)); break;
       case 'ring-stop': this.ringStop(); break;
@@ -319,8 +415,30 @@ class Features {
         this.store[m.key] = !!m.value;
         this.o.saveStore();
         this._apply();
+        if (m.key === 'clipHistory' && !m.value) this.cliph.clear();      // off: nothing is kept, not even what was
         this._push(true);
+        this._pushClips();
         break;
+      // clipboard history
+      case 'c-hello': this._pushClips(); break;
+      case 'c-copy': this._clipCopy(str(m.id)); break;
+      case 'c-send': this._clipSend(str(m.id)); break;
+      case 'c-remove': this.cliph.remove(str(m.id)); break;
+      case 'c-clear': this.cliph.clear(); break;
+      // "Always accept" / "Ask each time", and the answer to a question
+      case 'accept': if (this.server.devices[str(m.device)] && this.ask.setMode(str(m.device), m.mode === 'ask' ? 'ask' : 'always')) this.o.pushState(); break;
+      case 'ask-answer': this.ask.answer(str(m.id), m.yes === true); break;
+      // Browse phone
+      case 'b-open': this.browse.open(str(m.cat)); break;
+      case 'b-close': this.browse.close(); break;
+      case 'b-cat': this.browse.cat(str(m.cat)); break;
+      case 'b-dir': this.browse.dir(str(m.path)); break;
+      case 'b-up': this.browse.up(); break;
+      case 'b-more': this.browse.more(); break;
+      case 'b-refresh': this.browse.refresh(); break;
+      case 'b-copy': this.browse.pull(Array.isArray(m.paths) ? m.paths.filter((p) => typeof p === 'string') : []); break;
+      case 'b-stop': this.browse.stop(); break;
+      case 'b-show': this.browse.show(); break;
       case 'mute': {
         const a = this.store.notifyApps && this.store.notifyApps[str(m.pkg)];
         if (a) { a.muted = !!m.on; this.o.saveStore(); this._push(true); }
@@ -342,6 +460,8 @@ class Features {
     this.history.flush();
     this.clip.stop();
     this.keys.stop();
+    this.ask.stop();
+    this.browse.shutdown();
   }
 
   // ---------- test control (FLICK_TEST only: main.js routes /f/... here) ----------
@@ -374,6 +494,11 @@ class Features {
         })().catch((e) => res.end(JSON.stringify({ error: e.message })));
         return undefined;
       case '/f/action': this._action(JSON.parse(q.get('json') || '{}')); return res.end('ok');
+      case '/f/more': {          // clipboard history, questions, Browse phone
+        const b = this.browse.view ? Object.assign({}, this.browse.view, { sent: undefined }) : null;
+        return res.end(JSON.stringify({ clips: this.cliph.list(), asks: this.ask.list(), acceptMode: this.store.acceptMode || {}, browse: b, job: this.browse._jobState(),
+          pending: [...this.browse.pending.values()].map((p) => p.op), thumbs: this.browse.thumbs.size }));
+      }
       default: res.statusCode = 404; return res.end();
     }
   }

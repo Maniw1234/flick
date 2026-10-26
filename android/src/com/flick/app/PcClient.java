@@ -100,7 +100,8 @@ final class PcClient {
     // time limits (tests shorten them)
     static volatile int CONNECT_MS = 5000;            // to the local proxy port
     static volatile int READ_MS = 15000;              // a JSON answer
-    static volatile int SEND_READ_MS = 60000;         // the answer after a file's bytes went through
+    static volatile int SEND_READ_MS = 90000;         // the answer after a file's bytes went through (a PC set to "Ask each
+                                                      // time" answers once its user did, or after 60 s)
     static volatile int EVENTS_READ_MS = 65000;       // the PC pings every 20 s: three missed pings and the line is dead
     static volatile int DISCOVER_MS = 3000;
     static volatile long LOOK_GAP_MS = 60000;         // one discovery per PC per minute, unless asked
@@ -262,7 +263,12 @@ final class PcClient {
 
     /** A file sent without the fling gesture (auto-send, tile, widget): POST /api/upload?quiet=1&kind=… */
     JSONObject upload(Target t, Source src, String name, String kind, AtomicBoolean abort) throws Failure {
-        String q = "tid=" + newTid() + "&name=" + enc(name) + "&size=" + src.length() + "&quiet=1&kind=" + enc(kind);
+        return upload(t, src, name, kind, abort, newTid());
+    }
+
+    /** upload() with the transfer id the PC gave (Browse: pl<job>-<n>, so the PC knows which of its requests it is). */
+    JSONObject upload(Target t, Source src, String name, String kind, AtomicBoolean abort, String tid) throws Failure {
+        String q = "tid=" + enc(tid) + "&name=" + enc(name) + "&size=" + src.length() + "&quiet=1&kind=" + enc(kind);
         return send(t, "/api/upload", q, src, abort);
     }
 

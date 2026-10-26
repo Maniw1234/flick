@@ -1,10 +1,11 @@
 'use strict';
 // Protocol 5: what a phone reaches without the fling gesture. The background link (/api/events: one ndjson
 // stream per phone, for its LinkService), its clipboard, links, notifications, the answer to files it sends quietly
-// (auto-send, tile, widget) and two-way folder sync (sync.js does the files). server.js hands requests here after its
+// (auto-send, tile, widget), two-way folder sync (sync.js does the files) and the phone's answers to Browse phone
+// (/api/browse, browse.js). server.js hands requests here after its
 // host/origin check; every route needs the phone's device + token like /api/upload (_trustedReq: a phone that signed in
 // over a secure link is refused on a plain one). What arrives is passed on as server events for features.js:
-//   'clip-in' {device, name, kind, text | png}   'link-in' {device, name, url}   'notify-in' {device, name, key, pkg, app,
+//   'clip-in' {device, name, kind, text | png, priv}   'link-in' {device, name, url}   'notify-in' {device, name, key, pkg, app,
 //   title, text, time, removed}   'media' {device, key}   'ring-found' {device}   'stream' {device, open}
 const JSON_MAX = 6 * 1024 * 1024;             // JSON bodies
 const CLIP_MAX = 9 * 1024 * 1024;             // POST /api/clip: a 6 MB PNG as base64 inside JSON
@@ -15,11 +16,12 @@ const NOTE_STR_MAX = 2048;                    // each string of a notification
 const STREAM_BACKLOG = 16 * 1024 * 1024;      // a stream nobody reads is closed rather than buffered without end
 const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const MEDIA_KEYS = new Set(['play', 'next', 'prev', 'vol-up', 'vol-down', 'mute']);
-const QUIET_KINDS = new Set(['screenshot', 'photo', 'share']);
+const QUIET_KINDS = new Set(['screenshot', 'photo', 'share', 'pull']);   // pull: a file Browse phone asked for (browse.js)
 
 const ROUTES = {
   '/api/events': 'GET', '/api/clip': 'POST', '/api/link': 'POST', '/api/notify': 'POST',
   '/api/sync/pair': 'POST', '/api/sync/list': 'GET', '/api/sync/get': 'GET', '/api/sync/put': 'POST', '/api/sync/unpair': 'POST',
+  '/api/browse': 'POST',
 };
 
 /** An http(s) link a phone or the user gave, normalized, or null. */
@@ -65,6 +67,7 @@ class PhoneApi {
       case '/api/sync/get': p = this._syncGet(req, res, device, q); break;
       case '/api/sync/put': p = this._syncPut(req, res, device, q); break;
       case '/api/sync/unpair': p = this._sync(req, res).then((sy) => { if (sy) { sy.unpair(device, q.get('pair')); this.s._json(res, 200, { ok: true }); } }); break;
+      case '/api/browse': p = this._post(req, res, JSON_MAX, (b) => (this.s.browse ? this.s.browse.reply(device, b) : { code: 503, error: 'off' })); break;
       default: return false;
     }
     Promise.resolve(p).catch((e) => {
@@ -176,10 +179,12 @@ class PhoneApi {
   /** A clipboard from a phone: { ok } or { code, error }. */
   clipIn(device, b) {
     if (!this.feat.clip) return { code: 409, error: 'off' };
+    // priv: the phone sent a clipboard an app marked as private because the user asked it to: never kept in a history
+    const priv = b.private === true;
     if (b.kind === 'text') {
       if (typeof b.text !== 'string' || !b.text) return { code: 400, error: 'empty' };
       if (Buffer.byteLength(b.text, 'utf8') > CLIP_TEXT_MAX) return { code: 413, error: 'too big' };
-      this.s.emit('clip-in', { device, name: this.nameOf(device), kind: 'text', text: b.text });
+      this.s.emit('clip-in', { device, name: this.nameOf(device), kind: 'text', text: b.text, priv });
       return { ok: true };
     }
     if (b.kind === 'image') {
@@ -189,7 +194,7 @@ class PhoneApi {
       const png = Buffer.from(b64, 'base64');
       if (png.length > CLIP_PNG_MAX) return { code: 413, error: 'too big' };
       if (png.length < 8 || !png.subarray(0, 8).equals(PNG_SIG)) return { code: 400, error: 'not png' };
-      this.s.emit('clip-in', { device, name: this.nameOf(device), kind: 'image', png });
+      this.s.emit('clip-in', { device, name: this.nameOf(device), kind: 'image', png, priv });
       return { ok: true };
     }
     return { code: 400, error: 'bad kind' };
@@ -255,6 +260,8 @@ class PhoneApi {
     }
     if (!r) {
       require('fs').rm(f.tmpPath, { force: true }, () => {});
+      // declined on the PC ("Ask each time"), or nobody answered: the phone is told which (409 declined | timeout)
+      if (err && err.status === 409) return this.s._json(res, 409, { ok: false, error: String(err.why || 'declined') });
       this.s.emit('log', 'a file sent quietly could not be saved: ' + (err ? err.message : 'nothing saves it'));
       return this.s._json(res, err ? 500 : 503, { ok: false, error: err ? 'save' : 'not ready' });
     }

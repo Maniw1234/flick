@@ -46,7 +46,7 @@
     set(k, v) { nc('setPref', k, v === null || v === undefined ? '' : String(v)); },
   };
   // ------------------------------------------------------------------ settings (Settings page, from the ••• menu)
-  const SETTINGS_DEFAULTS = { parallel: true, showSpeed: true, haptics: true, autoUpdate: true, bluetooth: false, phoneName: '' };
+  const SETTINGS_DEFAULTS = { parallel: true, showSpeed: true, haptics: true, autoUpdate: true, bluetooth: false, phoneName: '', skipDup: true, autoConnect: true };
   const settings = (() => {
     try { return Object.assign({}, SETTINGS_DEFAULTS, JSON.parse(pref.get('settings', '{}')) || {}); } catch (e) { return Object.assign({}, SETTINGS_DEFAULTS); }
   })();
@@ -74,6 +74,7 @@
     side: 'right',           // where the PHONE sits relative to the PC
     hidden: new Set(),       // items hidden while being sent
     pending: new Map(),      // tid -> {item, phase}
+    jobs: new Map(),         // tid -> the app's view of a send (protocol 7 PCs): it goes on with Flick closed
     keep: pref.get('keep', '0') === '1',
     screen: 'pair',
   };
@@ -287,6 +288,33 @@
 
   function pairHint(html) { $('pairHint').innerHTML = html || ''; }
 
+  // ---- every PC this phone paired with, and the addresses it was seen at: discovery asks there directly too, so a PC
+  // found once (even by typing its address) is found again without it, at home, at work, anywhere
+  const KNOWN_KEY = 'knownPcs';
+  function knownPcs() { try { const k = JSON.parse(pref.get(KNOWN_KEY, '{}')); return k && typeof k === 'object' ? k : {}; } catch (e) { return {}; } }
+  function rememberPc(pc, addrs) {
+    if (!pc || !pc.id || pc.via === 'bluetooth') return;
+    const k = knownPcs();
+    const e = k[pc.id] || { addrs: [] };
+    e.name = pc.name || e.name;
+    e.last = Date.now();
+    const ips = [pc.ip].concat(addrs || []).filter((a) => /^\d{1,3}(\.\d{1,3}){3}$/.test(String(a || '')));
+    e.addrs = ips.concat((e.addrs || []).filter((a) => !ips.includes(a))).slice(0, 8);
+    k[pc.id] = e;
+    const ids = Object.keys(k).sort((a, b) => (k[b].last || 0) - (k[a].last || 0));
+    for (const id of ids.slice(12)) delete k[id];       // the 12 used last
+    pref.set(KNOWN_KEY, JSON.stringify(k));
+    tellKnown();
+  }
+  function forgetPc(id) { const k = knownPcs(); if (!k[id]) return; delete k[id]; pref.set(KNOWN_KEY, JSON.stringify(k)); tellKnown(); }
+  // discovery asks the addresses of PCs this phone is paired with (not ones it only saw)
+  function tellKnown() {
+    const k = knownPcs(), ips = [];
+    for (const id of Object.keys(k)) if (pref.get(tokenKey(id), '')) for (const a of k[id].addrs || []) if (!ips.includes(a)) ips.push(a);
+    nc('discoverKnown', JSON.stringify(ips.slice(0, 24)));
+  }
+  const pairedPc = (p) => !!(p && p.id && pref.get(tokenKey(p.id), ''));
+
   // faster links first: USB cable, Ethernet, a hotspot or direct link, Wi-Fi, then Bluetooth
   const LINK_RANK = { usb: 5, ethernet: 4, hotspot: 3, direct: 3, wifi: 2, bluetooth: 1 };
   const rankOf = (p) => LINK_RANK[(p && p.via) || 'wifi'] || 2;
@@ -295,11 +323,23 @@
     // Bluetooth reports the PC it reached through the same list
     st.pcs = (st.lanList || []).filter((p) => p && p.ip && p.port).concat(st.btPc ? [st.btPc] : []);
     const pick = (id) => st.pcs.filter((p) => p.id === id).sort((a, b) => rankOf(b) - rankOf(a))[0];
+    // PCs this phone is paired with first, then the faster link
+    const best = () => st.pcs.slice().sort((a, b) => pairedPc(b) - pairedPc(a) || rankOf(b) - rankOf(a))[0];
     if (!st.pc && st.pcs.length) {
       const last = pref.get('lastPc', '');
-      choosePc(pick(last) || st.pcs.slice().sort((a, b) => rankOf(b) - rankOf(a))[0]);
+      choosePc(pick(last) || best());
     } else if (st.pc) {
       const same = pick(st.pc.id);
+      if (same) st.pcSeenAt = Date.now();
+      // The PC in use isn't around but another paired one is (home → work): use that one, without anyone typing an
+      // address. Only while not connected, and once the PC in use had a moment to answer.
+      const other = !same && best();
+      if (other && pairedPc(other) && !st.connected && !st.wsOpen && !busyMoving()) {
+        const wait = 2500 - Math.min(Date.now() - (st.pcChosenAt || 0), Date.now() - (st.pcSeenAt || 0));
+        if (wait <= 0) { closeLink(); choosePc(other); return; }
+        clearTimeout(st.switchT);
+        st.switchT = setTimeout(onPcs, wait + 50);          // look again then (discovery may stay quiet meanwhile)
+      }
       if (same && (same.ip !== st.pc.ip || same.port !== st.pc.port || same.name !== st.pc.name || same.via !== st.pc.via || (+same.tls || 0) !== (+st.pc.tls || 0))) {
         // a PC that turned out to take encrypted links (it just updated) is reconnected like one that moved
         const moved = same.ip !== st.pc.ip || same.port !== st.pc.port || (+same.tls || 0) !== (+st.pc.tls || 0);
@@ -317,6 +357,7 @@
 
   function choosePc(pc) {
     if (!pc) return;
+    st.pcChosenAt = Date.now();
     st.pc = { id: pc.id, name: pc.name, ip: pc.ip, port: pc.port, via: pc.via || 'wifi', v: +pc.v || 1, tls: +pc.tls || 0 };
     st.linkBlocked = '';
     pref.set('lastPc', pc.id);
@@ -497,7 +538,7 @@
     clearInterval(pingT);
     updateConn();
     for (const [tid, p] of st.pending) {
-      if (p.phase === 'lifted') st.pending.delete(tid);
+      if (p.phase === 'lifted') { st.pending.delete(tid); if (p.job) nc('sendCancel', tid); }
       // the file already reached the PC; the "saved" note just can't arrive now
       else if (p.phase === 'sent' && p.uploaded) { st.pending.delete(tid); for (const it of itemsOf(p)) if (it.path || st.keep) restoreItem(it); }
     }
@@ -539,7 +580,7 @@
 
   // The hold finished: connect now, or as soon as the link to the PC is up (never fail just because it's still linking).
   function requestConnect() {
-    st.replaced = false; st.pairAsked = true;
+    st.replaced = false; st.pairAsked = true; st.noAuto = false;
     if (st.wsOpen && sendConnectUser()) return;
     st.connectWanted = Date.now();
     pairHint('Connecting to <b>' + esc(st.pc ? st.pc.name : 'your PC') + '</b>…');
@@ -640,6 +681,9 @@
         if (!m.trusted && (st.link.pinned || st.link.chan === 'bluetooth') && m.why !== 'auth' && m.why !== 'confirm' && !st.pcProved) pref.set(tokenKey(st.pc.id), '');
         if (st.connectWanted && Date.now() - st.connectWanted < 10000) { st.connectWanted = 0; st.pairAsked = true; clearTimeout(connectT); sendConnectUser(); }
         else if (st.wantResume && st.trusted && !st.connected && !st.replaced) wsSend({ t: 'connect' });   // pick the session back up
+        // a PC this phone is paired with: connected without holding Connect (Settings › Connect automatically), unless
+        // the user disconnected or another phone took this PC over
+        else if (settings.autoConnect !== false && st.trusted && hasToken() && !st.connected && !st.replaced && !st.noAuto) wsSend({ t: 'connect' });
         // paired without the code (a token but no pinned certificate): confirm once, whatever this PC claims
         else if (!st.trusted && (m.why === 'confirm' || (hasToken() && st.link.chan !== 'bluetooth' && !st.link.pinned))) needConfirm();
         else if (st.screen === 'pair' && !st.linkBlocked && !st.pairWait) pairHint('');
@@ -681,6 +725,10 @@
         lostSince = 0; st.lostToast = false;
         st.connected = true; st.trusted = true; st.awaitingApproval = false; st.connectWanted = 0;
         clearTimeout(connectT);
+        // sends that wait for this PC (cut off earlier, or from before Flick was closed) carry on where it is now
+        if (st.pc && st.pc.ip && st.pc.port) nc('sendRelink', st.pc.id, st.pc.ip, st.pc.port, st.pc.via || 'wifi');
+        // found here: next time too, even where discovery can't see it (every address the PC has)
+        rememberPc(st.pc, m.pc && Array.isArray(m.pc.addrs) ? m.pc.addrs : []);
         if (m.side) st.side = m.side;
         if (m.theme) applyTheme(m.theme);
         if (m.pc && m.pc.name) { st.pc.name = m.pc.name; pref.set('lastPcName', m.pc.name); }
@@ -1034,6 +1082,7 @@
     }
     $('hsub').innerHTML = sub;
     if (SEL.on) renderSelection();
+    renderHacts();                           // the order this view keeps (sort)
     runHooks('view');                        // the folder picker follows the view
   }
 
@@ -1046,6 +1095,7 @@
 
   function resetView(cat, title) {
     if (SEL.on) setSelecting(false);
+    if (SRCH.on) endSearch(true);            // a search belongs to the view it was started in
     V.gen++;
     V.cat = cat; V.title = title; V.items = []; V.more = false; V.total = 0; V.offset = 0; V.loading = false;
     st.hidden.clear();
@@ -1056,6 +1106,7 @@
   }
 
   function openCat(cat) {
+    if (String(cat).indexOf('pin:') === 0) { openPin(cat); return; }   // a pinned folder's tab
     const meta = CATS.find((c) => c.v === cat) || CATS[0];
     pref.set('lastView', cat);
     if (cat === 'downloads' || cat === 'storage') {
@@ -1074,7 +1125,7 @@
     loadMore();
   }
 
-  function sortShelf(list) { return list.sort((a, b) => (b.added || 0) - (a.added || 0)); }
+  function sortShelf(list) { return sortList(list.sort((a, b) => (b.added || 0) - (a.added || 0))); }
 
   function openDir(path, title) {
     V.stack.push({ path: V.path, title: V.title, scroll: scroller.scrollTop });
@@ -1113,7 +1164,7 @@
     if (gen !== V.gen) return;
     V.loading = false;
     if (!data || data.error) { V.items = []; afterLoad(); toast(data ? 'Can’t open this folder' : 'This folder took too long to open', 2400); return; }
-    V.items = data.items || [];
+    V.items = sortList(data.items || []);
     V.total = V.items.length;
     if (data.name && V.stack.length === 0 && V.rootCat === 'storage') V.title = data.name;
     afterLoad();
@@ -1125,7 +1176,7 @@
     if (V.loading) return;
     const gen = V.gen;
     V.loading = true; renderHeader();
-    const data = await nreqT(120000, 'queryAsync', V.cat, V.offset, PAGE);
+    const data = await catPage(V.offset);       // in the view's order, only matches while searching
     if (gen !== V.gen) return;
     V.loading = false;
     if (!data) { afterLoad(); return; }
@@ -1182,14 +1233,24 @@
     return Math.round(w / 0.76);
   }
 
-  function visibleItems() { return V.items.filter((it) => !st.hidden.has(it.id)); }
+  function visibleItems() { return V.items.filter((it) => !st.hidden.has(it.id) && shown(it)); }
 
   function updateCount() {
-    let sending = 0, sent = 0, total = 0, rate = 0;
-    for (const p of st.pending.values()) if (p.phase === 'sent' && !p.uploaded) { sending++; sent += p.sent || 0; total += p.total || 0; rate += p.rate || 0; }
-    const n = needsPermission() ? 0 : V.cat === 'dir' ? visibleItems().filter((i) => !i.incoming).length : Math.max(V.total - st.hidden.size, visibleItems().length);
+    let sending = 0, sent = 0, total = 0, rate = 0, waiting = 0;
+    for (const [tid, p] of st.pending) if (p.phase === 'sent' && !p.uploaded && !st.jobs.has(tid)) { sending++; sent += p.sent || 0; total += p.total || 0; rate += p.rate || 0; }
+    for (const j of st.jobs.values()) {
+      if (!j.committed) continue;
+      if (j.state === 'running' || j.state === 'queued') { sending++; sent += +j.sent || 0; total += +j.total || 0; rate += +j.rate || 0; }
+      else if (j.state === 'waiting') waiting++;
+    }
+    $('count').classList.toggle('busy', sending + waiting > 0);
+    if (!sending && waiting) { $('count').textContent = 'Waiting for ' + (([...st.jobs.values()].find((j) => j.state === 'waiting') || {}).pcName || 'your PC') + '…'; return void updateEmpty(); }
+    const n = needsPermission() ? 0 : V.cat === 'dir' || SRCH.f ? visibleItems().filter((i) => !i.incoming).length : Math.max(V.total - st.hidden.size, visibleItems().length);
     const pct = total > 0 ? Math.min(99, Math.floor((sent / total) * 100)) : -1;
     $('count').textContent = sending ? 'Sending' + (pct >= 0 ? ' ' + pct + '%' : '…') + (rate > 0 && settings.showSpeed ? ' · ' + fmtRate(rate) : '') : n.toLocaleString() + (n === 1 ? ' item' : ' items');
+    updateEmpty();
+  }
+  function updateEmpty() {
     const empty = !V.loading && !needsPermission() && visibleItems().length === 0;
     $('empty').hidden = !empty;
     if (empty) {
@@ -1198,7 +1259,7 @@
         dir: ['This folder is empty', ''], photos: ['No photos', ''], videos: ['No videos', ''], docs: ['No documents', ''],
         audio: ['No audio files', ''], apks: ['No APK files', ''], recent: ['Nothing recent', ''],
       };
-      const m = msgs[V.cat] || msgs.recent;
+      const m = SRCH.q ? ['No results', 'Nothing here matches “' + esc(SRCH.q) + '”'] : msgs[V.cat] || msgs.recent;
       $('emptyTitle').textContent = m[0];
       $('emptySub').innerHTML = m[1];
     }
@@ -1242,9 +1303,10 @@
     c.appendChild(th);
     const meta = document.createElement('div');
     meta.className = 'meta';
-    const n = document.createElement('div'); n.className = 'name'; n.textContent = midName(it.name);
+    const n = document.createElement('div'); n.className = 'name'; n.textContent = VIEW.list ? it.name : midName(it.name);
     const i = document.createElement('div'); i.className = 'info';
     i.textContent = it.dir ? (it.count === 1 ? '1 item' : (it.count || 0) + ' items') : it.incoming ? 'Receiving…' : fmtSize(it.size) + ' · ' + fmtWhen(it.mtime || it.added);
+    if (VIEW.list) i.textContent = rowInfo(it);       // list rows: size, date and type
     meta.appendChild(n); meta.appendChild(i);
     {
       const more = document.createElement('button'); more.className = 'more';
@@ -1272,6 +1334,7 @@
     const cols = [0, 0];
     geo = visibleItems();
     layoutGen++; maxCardH = 0;
+    if (VIEW.list) { listLayout(W); return; }  // rows, one under the other
     for (const it of geo) {
       const c = cols[0] <= cols[1] + 1 ? 0 : 1;
       const th = thumbH(it, colW);
@@ -1408,6 +1471,7 @@
       openSheet(it.name, [
         { label: 'Send folder to ' + pcName, icon: 'send', run: () => sendItems([it]) },
         { label: 'Open', icon: 'folder', run: () => openDir(it.path, it.name) },
+        pinEntry(it.path, it.name),
         select,
       ]);
       return;
@@ -1416,6 +1480,7 @@
       const parent = it.path.replace(/\/[^/]*$/, '');
       openSheet(it.name, [
         { label: 'Send to ' + pcName, icon: 'send', run: () => sendItems([it]) },
+        previewEntry(it),
         { label: 'Open', icon: 'open', run: () => { if (nc('openPath', it.path) === false) toast('Couldn’t open this file'); } },
         { label: 'Share', icon: 'share', run: () => nc('sharePath', it.path) },
         V.cat !== 'dir' || V.path !== parent ? { label: 'Show in folder', icon: 'folder', run: () => showInFolder(parent) } : null,
@@ -1425,6 +1490,7 @@
     }
     openSheet(it.name, [
       { label: 'Send to ' + pcName, icon: 'send', run: () => sendItems([it]) },
+      previewEntry(it),
       { label: 'Open', icon: 'open', run: () => { if (nc('open', it.id) === false) toast('Couldn’t open this file'); } },
       { label: 'Share', icon: 'share', run: () => nc('share', it.id) },
       { label: 'Save to phone', icon: 'save', run: () => saveCopy(it) },
@@ -1459,7 +1525,7 @@
     const n = SEL.ids.size;
     $('htitle').textContent = n === 1 ? '1 selected' : n.toLocaleString() + ' selected';
     $('hsub').textContent = st.connected ? 'Drag to your PC, or tap Send' : 'Connect to your PC to send';
-    const all = V.items.filter((it) => !it.incoming);
+    const all = V.items.filter((it) => !it.incoming && shown(it));
     $('selAll').textContent = all.length && all.every((it) => SEL.ids.has(it.id)) ? 'Select none' : 'Select all';
     const send = $('selSend');
     send.classList.toggle('off', !st.connected);
@@ -1467,7 +1533,7 @@
   }
   $('selClose').onclick = () => { haptic('soft'); setSelecting(false); };
   $('selAll').onclick = () => {
-    const all = V.items.filter((it) => !it.incoming);
+    const all = V.items.filter((it) => !it.incoming && shown(it));   // (while searching: what the search shows)
     const every = all.every((it) => SEL.ids.has(it.id));
     if (every) SEL.ids.clear(); else for (const it of all) SEL.ids.add(it.id);
     haptic('tick');
@@ -1489,7 +1555,7 @@
     if (runHooks('pcTap')) return;           // several paired PCs: a sheet to switch
     if (st.connected) {
       openSheet('Connected to ' + st.pc.name, [
-        { label: 'Disconnect', icon: 'off', danger: true, run: () => { st.wantResume = false; closeLink(); showScreen('pair'); openLinkSoon(); } },
+        { label: 'Disconnect', icon: 'off', danger: true, run: () => { st.wantResume = false; st.noAuto = true; closeLink(); showScreen('pair'); openLinkSoon(); } },
       ]);
     } else {
       showScreen('pair');
@@ -1530,6 +1596,7 @@
       upd ? { label: 'Update to Flick ' + (UPD.app.name || UPD.app.code), icon: 'update', tag: 'Ready', run: startUpdate } : null,
       { label: 'Animation', icon: 'spark', tag: themeOf(st.theme).name, run: themeSheet },
       ...runHooksList('menu'),               // the features' entries
+      V.cat === 'dir' ? pinEntry(V.path, V.title, true) : null,
       { label: 'Refresh', icon: 'refresh', run: () => refreshStorage(true) },
       V.cat === 'shelf' && V.items.length ? { label: 'Clear the Flick list', icon: 'clear', danger: true, run: () => {
         V.total = 0;
@@ -1613,14 +1680,18 @@
         label: st.pc.name || 'PC',
         sub: st.connected ? 'Connected over ' + via : st.connecting ? 'Connecting…' : 'Not connected',
         action: st.connected
-          ? { text: 'Disconnect', danger: true, run: () => { st.wantResume = false; closeLink(); closeSettings(); showScreen('pair'); openLinkSoon(); } }
+          ? { text: 'Disconnect', danger: true, run: () => { st.wantResume = false; st.noAuto = true; closeLink(); closeSettings(); showScreen('pair'); openLinkSoon(); } }
           : { text: 'Connect', run: () => { closeSettings(); showScreen('pair'); openLinkSoon(); } },
       } : { label: 'No PC yet', sub: 'Open Flick on your PC, then hold Connect', action: { text: 'Connect', run: () => { closeSettings(); showScreen('pair'); } } },
+      { label: 'Connect automatically', sub: 'When Flick opens near a PC it’s paired with, no need to hold Connect', toggle: 'autoConnect' },
       { label: 'Ways to connect', sub: 'Wi-Fi, USB cable, hotspot or Bluetooth', run: waysSheet },
     ]);
     runHooks('settings', body);             // the Features section
     group('Transfers', [
       { label: 'Faster transfers', sub: 'Large files travel over several connections at once', toggle: 'parallel' },
+      { label: 'Skip files already on the PC', sub: 'A photo or video your PC already has isn’t sent again', toggle: 'skipDup' },
+      (st.pcProto || 1) >= 7 && st.connected && NV && typeof NV.speedTest === 'function'
+        ? { label: 'Speed test', sub: st.speedSub || 'How fast files go to ' + (st.pc ? st.pc.name : 'your PC') + ' right now', action: { text: st.speedBusy ? 'Testing…' : 'Test', run: speedTest } } : null,
       { label: 'Show transfer speed', toggle: 'showSpeed', set: () => updateCount() },
       { label: 'Use Bluetooth when there’s no Wi-Fi', sub: settings.bluetooth ? BT_TEXT[st.btState || 'off'] || BT_TEXT.off : BT_TEXT.off, toggle: 'bluetooth', set: (v) => { btSetting(v); renderSettings(); } },
       { label: 'Keep files in the Flick list after sending', toggle: () => st.keep, set: (v) => { st.keep = v; pref.set('keep', v ? '1' : '0'); } },
@@ -1636,7 +1707,26 @@
       { label: 'Check for updates automatically', sub: 'From GitHub, when Flick opens', toggle: 'autoUpdate' },
       { label: 'Flick ' + (INFO.version || ''), action: { text: 'Check now', run: checkForUpdates } },
     ]);
+    runHooks('settings-end', body);         // the last sections (Send feedback)
   }
+  // Settings › Speed test: bytes to the PC and back over several connections, and what the phone's Wi-Fi says
+  async function speedTest() {
+    if (st.speedBusy || !st.pc) return;
+    st.speedBusy = true; st.speedSub = 'Testing for about 6 seconds…'; renderSettings();
+    const r = await nreqT(30000, 'speedTest', st.pc.id, st.pc.ip, st.pc.port, st.pc.via || 'wifi');
+    st.speedBusy = false;
+    if (!r || !r.ok) st.speedSub = r && r.why === 'unpaired' ? 'Connect to your PC first' : 'Couldn’t reach ' + (st.pc ? st.pc.name : 'your PC');
+    else {
+      const w = r.wifi, mb = (b) => fmtRate(+b || 0);
+      let s = 'To the PC ' + mb(r.up) + ' (1 GB in about ' + Math.max(1, Math.round(1073741824 / Math.max(1, +r.up || 1))) + ' s) · From the PC ' + mb(r.down);
+      if (r.via === 'wifi' && w && w.band) s += ' · Wi-Fi ' + w.band + (w.mbps > 0 ? ' at ' + w.mbps + ' Mbit/s' : '');
+      if (r.via === 'wifi' && w && w.band === '2.4 GHz') s += '. A 5 GHz or 6 GHz network is much faster.';
+      else if (r.via === 'wifi' && +r.up < 30e6) s += '. Faster: a 5 or 6 GHz network close to the router, with the PC on a cable.';
+      st.speedSub = s;
+    }
+    if (!$('settings').hidden) renderSettings();
+  }
+
   // ------------------------------------------------------------------ Bluetooth (when there's no network between phone and PC)
   let btWanted = false;
   const BT_TEXT = {
@@ -1960,7 +2050,18 @@
       ((st.pcProto || 1) >= 3 ? parallelArg() : '');
   }
   // one file goes as it is; several items, or any folder, go as one bundle (folders keep their insides)
-  function startSend(tid, items) {
+  // A PC that keeps what arrived (protocol 7): the send is handed to the app, where it goes on with Flick closed,
+  // waits while the PC can't be reached, and carries on from where it stopped (sendStart; see Sends/Outbox).
+  function startSend(tid, items, committed) {
+    const p = st.pending.get(tid);
+    if ((st.pcProto || 1) >= 7 && NV && typeof NV.sendStart === 'function' && st.pc) {
+      const spec = {
+        pc: { id: st.pc.id, name: st.pc.name, ip: st.pc.ip, port: st.pc.port, via: st.pc.via || 'wifi' },
+        items: items.map((x) => (x.path ? { path: x.path, name: x.name, dir: !!x.dir } : { id: x.id, name: x.name })),
+        committed: !!committed, skipDup: settings.skipDup !== false, parallel: !!settings.parallel,
+      };
+      if (nc('sendStart', tid, JSON.stringify(spec)) === 'ok') { if (p) p.job = true; return; }
+    }
     if (items.length === 1 && !items[0].dir) { startUpload(tid, items[0]); return; }
     const list = items.map((x) => (x.path ? { path: x.path, name: x.name, dir: !!x.dir } : { id: x.id, name: x.name }));
     nc('uploadBundle', tid, JSON.stringify(list), bundleUrl(tid));
@@ -1979,8 +2080,11 @@
   const parallelArg = () => ((st.pcProto || 1) >= 2 && settings.parallel && !(st.pc && st.pc.via === 'bluetooth') ? '&parallel=4' : '');
   function uploadUrl(tid, it) {
     const tok = pref.get(tokenKey(st.pc.id), '');
+    const par = parallelArg();
+    // protocol 6: the PC checks a file sent in parts against its SHA-256, which the native side sends once they're in
     return linkBase() + '/api/upload?tid=' + encodeURIComponent(tid) + '&device=' + encodeURIComponent(DEVICE) +
-      '&token=' + encodeURIComponent(tok) + '&name=' + encodeURIComponent(it.name) + '&size=' + (it.size || 0) + parallelArg();
+      '&token=' + encodeURIComponent(tok) + '&name=' + encodeURIComponent(it.name) + '&size=' + (it.size || 0) + par +
+      (par && (st.pcProto || 1) >= 6 ? '&verify=1' : '');
   }
 
   function startUpload(tid, it) {
@@ -2010,13 +2114,15 @@
     const thumb = el.querySelector('.thumb');
     const r = thumb.getBoundingClientRect();
     const fx = tch ? tch.clientX : c.x0, fy = tch ? tch.clientY : c.y0;
+    const fr = VIEW.list ? rowCard(it) : r;          // a list row travels as a card the size of the grid's
     D = {
-      it, items, el, f: makeStackFloat(items, r), w: r.width, h: r.height, how: how || 'swipe', fx0: fx, fy0: fy,
+      it, items, el, f: makeStackFloat(items, fr), w: fr.width, h: fr.height, how: how || 'swipe', fx0: fx, fy0: fy,
       offX: c.x0 - r.left, offY: c.y0 - r.top, x: r.left, y: r.top, fx, fy,
       r: 0, s: 1, sT: 1.065, vx: 0, vy: 0, samples: [{ t: now(), x: fx, y: fy }],
       tid: rid(), t0: now(), raf: 0, last: 0, phase: 'drag', sentMove: 0,
     };
     D.x = fx - D.offX; D.y = fy - D.offY;
+    if (VIEW.list) rowLift(D, r);                    // (it grows out of the row's thumbnail, under the finger)
     for (const x of items) { const e2 = cards.get(x.id); if (e2) e2.classList.add('lifted'); }
     if (items.length > 1) gather(items.slice(1), () => (D ? { x: D.x, y: D.y, w: D.w, h: D.h } : { x: r.left, y: r.top, w: r.width, h: r.height }));
     haptic('lift');
@@ -2048,6 +2154,7 @@
   function dragFrame(t) {
     if (!D) return;
     const dt = Math.min(48, t - (D.last || t)); D.last = t;
+    if (D.row) rowFrame(D, dt);                      // a list row's card: from its thumbnail to the finger (rowLift)
     if (D.phase === 'drag') {
       D.s = damp(D.s, D.sT, dt, 55);
       const v = velocity();
@@ -2062,10 +2169,11 @@
       const u = clamp((t - D.backT) / 330, 0, 1);
       const e = 1 - Math.pow(1 - u, 3) + Math.sin(u * Math.PI) * 0.04;
       D.x = lerp(D.bx0, D.bx1, e); D.y = lerp(D.by0, D.by1, e);
-      D.s = lerp(D.bs0, 1, easeOut(u)); D.r = lerp(D.br0, 0, easeOut(u));
+      D.s = lerp(D.bs0, D.bs1 || 1, easeOut(u)); D.r = lerp(D.br0, 0, easeOut(u));
+      if (D.row) rowBack(D, u);                      // shrinks back into the row's thumbnail
       if (u >= 1) { unlift(D.items); D.f.remove(); D = null; return; }
     }
-    D.f.style.transform = 'translate3d(' + D.x.toFixed(1) + 'px,' + D.y.toFixed(1) + 'px,0) rotate(' + D.r.toFixed(2) + 'deg) scale(' + D.s.toFixed(4) + ')';
+    D.f.style.transform = 'translate3d(' + (D.x + (D.gx || 0)).toFixed(1) + 'px,' + (D.y + (D.gy || 0)).toFixed(1) + 'px,0) rotate(' + D.r.toFixed(2) + 'deg) scale(' + D.s.toFixed(4) + ')';
 
     if (D.phase === 'drag' && st.connected && D.sending) {
       const dist = st.side === 'right' ? D.x : innerWidth - (D.x + D.w);
@@ -2111,7 +2219,7 @@
       D.phase = 'exit'; D.evx = evx; D.evy = evy; D.exitT = now();
       wsSend({ t: 'drop', tid: D.tid, x: Math.round(D.x * 10) / 10, y: Math.round(D.y * 10) / 10, w: D.w, h: D.h, r: Math.round(D.r * 10) / 10, s: D.s, vx: evx, vy: evy, pw: innerWidth, ph: innerHeight });
       const p = st.pending.get(D.tid);
-      if (p) p.phase = 'sent';
+      if (p) { p.phase = 'sent'; if (p.job) nc('sendCommit', D.tid); }
       haptic('confirm');
       const gone = releaseFx({ x: D.x + D.w * (1 - D.s) / 2, y: D.y + D.h * (1 - D.s) / 2, w: D.w * D.s, h: D.h * D.s }, D.r * Math.PI / 180, D.sampleImg);
       // files that stay on the phone keep their place in the grid (an empty slot until the PC has them)
@@ -2126,7 +2234,7 @@
     } else {
       if (st.pending.has(D.tid)) {
         wsSend({ t: 'cancel', tid: D.tid });
-        nc('abort', D.tid);
+        if (st.pending.get(D.tid).job) nc('sendCancel', D.tid); else nc('abort', D.tid);
         st.pending.delete(D.tid);
       }
       if (!st.connected && (D.x < 0 || D.x + D.w > innerWidth)) toast('Not connected to your PC');
@@ -2140,26 +2248,30 @@
       const r = D.el.querySelector('.thumb').getBoundingClientRect();
       D.phase = 'back'; D.backT = now();
       D.bx0 = D.x; D.by0 = D.y; D.bx1 = r.left; D.by1 = r.top; D.bs0 = D.s; D.br0 = D.r;
+      if (D.row) rowHome(D, r);
       EG.target = 0; egKick();
       haptic('soft');
     }
   }
 
-  // send without dragging (⋯ menu, or the Send button while selecting): the stack flies off toward the PC by itself
-  function sendItems(items) {
+  // send without dragging (⋯ menu, or the Send button while selecting): the stack flies off toward the PC by itself.
+  // o.from: the rect it starts from; o.quiet: the caller shows it leaving (the preview)
+  function sendItems(items, o) {
+    o = o || {};
     items = (items || []).filter((x) => x && !x.incoming);
     if (!items.length) return;
     if (!st.connected) { toast('Not connected to your PC'); return; }
     const it = items[0];
     const el = cards.get(it.id);
-    let r = el ? el.querySelector('.thumb').getBoundingClientRect() : null;
+    let r = o.from || (el ? el.querySelector('.thumb').getBoundingClientRect() : null);
+    if (r && VIEW.list && !o.from) r = rowRect(it, r);         // a list row leaves as a card
     if (!r || r.bottom < 0 || r.top > innerHeight) {          // scrolled away: start from the middle of the screen
       const w = Math.min(190, innerWidth * 0.46), h = w * 0.75;
       r = { left: (innerWidth - w) / 2, top: innerHeight * 0.42 - h / 2, width: w, height: h, right: (innerWidth + w) / 2, bottom: innerHeight * 0.42 + h / 2 };
     }
     const tid = rid();
     st.pending.set(tid, { item: it, items, phase: 'sent' });
-    startSend(tid, items);
+    startSend(tid, items, true);
     wsSend({ t: 'send', tid, file: fileInfo(items), thumb: nativeThumb(it), thumbs: sheetThumbs(items), w: r.width, h: r.height, pw: innerWidth, ph: innerHeight });
     if (SEL.on) setSelecting(false);
     const keep = (x) => !!x.path || st.keep;
@@ -2171,6 +2283,7 @@
     };
     for (const x of items) { x._sentAt = now() + 400; const e2 = cards.get(x.id); if (e2) e2.classList.add('lifted'); }
     haptic('confirm');
+    if (o.quiet) { setTimeout(settle, 450); return; }
     if (st.theme === 'teleport') {
       const img = new Image();
       const src = nativeThumb(it);
@@ -2230,6 +2343,8 @@
   }
 
   function onFailed(m) {
+    // turned down on a PC set to "Ask each time": the send engine's job says so too (it may have sent every byte)
+    if ((m.why === 'declined' || m.why === 'timeout') && st.jobs.has(m.tid)) nc('sendRefused', m.tid, m.why);
     const p = st.pending.get(m.tid);
     if (!p) return;
     st.pending.delete(m.tid);
@@ -2241,7 +2356,9 @@
       if (el) { el.classList.remove('lifted'); el.classList.add('err'); setTimeout(() => el.classList.remove('err'), 900); }
     }
     haptic('reject');
-    toast('Couldn’t send ' + (items.length > 1 ? items.length + ' items' : midName(p.item.name)), 2600);
+    const what = items.length > 1 ? items.length + ' items' : midName(p.item.name), pcName = st.pc ? st.pc.name : 'your PC';
+    // a PC set to "Ask each time": its user said no, or nobody answered there within a minute
+    toast(m.why === 'declined' ? pcName + ' declined ' + what : m.why === 'timeout' ? 'Not accepted on ' + pcName + ' in time' : 'Couldn’t send ' + what, 2600);
     updateCount();
   }
 
@@ -2262,6 +2379,15 @@
   }
   function fmtRate(r) { return r >= 1e7 ? Math.round(r / 1e6) + ' MB/s' : r >= 1e6 ? (r / 1e6).toFixed(1) + ' MB/s' : Math.max(1, Math.round(r / 1e3)) + ' KB/s'; }
 
+  // a send the app carries on with (features/transfers.js lists them): the toolbar shows how it's going
+  function onJob(j) {
+    if (!j || !j.tid) return;
+    st.jobs.set(j.tid, j);
+    if (st.jobs.size > 60) { for (const [k, v] of st.jobs) { if (st.jobs.size <= 50) break; if (['done', 'failed', 'canceled', 'skipped'].includes(v.state)) st.jobs.delete(k); } }
+    updateCount();
+  }
+  $('count').onclick = () => { if (st.jobs.size && runHooks('countTap')) haptic('soft'); };
+
   function onUpDone(e) {
     const p = st.pending.get(e.tid);
     if (!p) return;
@@ -2271,14 +2397,17 @@
       updateCount();
       return;
     }
+    // the app's send engine already tried (and waited) as long as it made sense; canceled from the transfer list: quietly
+    if (e.final && e.canceled) { st.pending.delete(e.tid); for (const it of itemsOf(p)) st.hidden.delete(it.id); for (const it of itemsOf(p)) restoreItem(it); layout(true); updateCount(); return; }
     p.tries = (p.tries || 0) + 1;
-    if (p.tries < 2 && st.connected && st.pc) { startSend(e.tid, itemsOf(p)); return; } // one quick retry
+    if (!e.final && p.tries < 2 && st.connected && st.pc) { startSend(e.tid, itemsOf(p), p.phase === 'sent'); return; } // one quick retry
     if (p.phase === 'sent') { wsSend({ t: 'cancel', tid: e.tid, failed: true }); onFailed({ tid: e.tid }); }
     else p.failed = true;
   }
 
   // touch handling on the grid
   grid.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 2 && !(D && D.phase === 'drag')) pinchStart(e);   // two fingers spreading on a file: its preview
     // a card still settling back (or flying off) never blocks the next touch
     if ((D && D.phase === 'drag') || e.touches.length !== 1) { if (T) { clearTimeout(T.lp); T = null; } return; }
     const tgt = e.target;
@@ -2295,6 +2424,7 @@
   function findTouch(list, id) { for (let i = 0; i < list.length; i++) if (list[i].identifier === id) return list[i]; return null; }
 
   grid.addEventListener('touchmove', (e) => {
+    if (P && pinchMove(e)) return;
     if (D && D.phase === 'drag') {
       if (e.cancelable) e.preventDefault();
       const t = e.touches[0]; if (t) dragMove(t);
@@ -2316,6 +2446,7 @@
   }, { passive: false });
 
   function touchEnd(e) {
+    if (P && (!e.touches || e.touches.length < 2)) P = null;
     if (D && D.phase === 'drag') {
       if (!e.touches || e.touches.length === 0) dragEnd();
       return;
@@ -2352,11 +2483,15 @@
     V.total++;
     if (scroller.scrollTop > 40) scroller.scrollTo({ top: 0, behavior: 'smooth' });
     layout(true);
+    // fetched first: scrolled far down, its card isn't drawn yet (it shows once the view is back at the top)
+    const tok = pref.get(tokenKey(st.pc.id), '');
+    const url = linkBase() + m.url + '?device=' + encodeURIComponent(DEVICE) + '&token=' + encodeURIComponent(tok) + parallelArg();
+    nc('download', m.fid, url, m.name, String(m.size || 0), m.mime || '');
     const el = cards.get(it.id);
     if (!el) return;
     el.classList.add('ghost');
     const target = el.querySelector('.thumb');
-    const w = it._w, h = it._th;
+    const w = VIEW.list ? LR.th : it._w, h = it._th;   // (a list row's thumbnail is small and square)
     const f = makeFloat(it, { width: w, height: h }, target);
     const y0 = clamp((typeof m.y === 'number' ? m.y : innerHeight / 2) - h / 2, 20, innerHeight - h - 20);
     const sx = st.side === 'right' ? -w - 8 : innerWidth + 8;
@@ -2376,9 +2511,6 @@
       else { el.classList.remove('ghost'); f.remove(); haptic('soft'); }
     })(t0);
     setCardProgress(it.id, 0);
-    const tok = pref.get(tokenKey(st.pc.id), '');
-    const url = linkBase() + m.url + '?device=' + encodeURIComponent(DEVICE) + '&token=' + encodeURIComponent(tok) + parallelArg();
-    nc('download', m.fid, url, m.name, String(m.size || 0), m.mime || '');
   }
 
   function onDown(e) {
@@ -2430,6 +2562,7 @@
         break;
       case 'up': onUp(e); break;
       case 'up-done': onUpDone(e); break;
+      case 'job': onJob(e.job); break;
       case 'down': onDown(e); break;
       case 'down-done': onDownDone(e); break;
       case 'insets': applyInsets(e.top, e.bottom); break;
@@ -2456,10 +2589,450 @@
     if (closeSettings()) return true;
     if (D && D.phase === 'drag') { dragEnd(); return true; }
     if (SEL.on) { setSelecting(false); return true; }
+    if (SRCH.on && st.screen === 'main') { endSearch(); return true; }
     if (st.screen === 'main' && V.cat === 'dir' && V.stack.length) { goBack(); return true; }
     if (st.screen === 'main' && !st.connected) { showScreen('pair'); return true; }
     return false;
   };
+
+  // ------------------------------------------------------------------ list view
+  // The grid's cards laid out as rows (small thumbnail, name, size · date · type). They are the same elements, so a tap,
+  // a long press, selecting, the ⋯ menu and dragging off the edge to the PC work as they do on cards. A dragged row
+  // travels as a card the size of the grid's (the size the PC shows it at), grown out of the row's thumbnail.
+  const VIEW = { list: pref.get('layout', 'grid') === 'list' };
+  const LR = { h: 64, th: 48 };                      // row height, thumbnail size
+  grid.classList.toggle('list', VIEW.list);
+  const TYPE_NAMES = { image: 'Image', video: 'Video', audio: 'Audio', pdf: 'PDF', text: 'Text', apk: 'APK' };
+  function rowType(it) {
+    const e = String(it.ext || extOf(it.name) || '').toUpperCase();
+    return e && e.length <= 5 ? e : TYPE_NAMES[it.kind] || 'File';
+  }
+  function rowInfo(it) {
+    const when = fmtWhen(it.mtime || it.added);
+    if (it.dir) return (it.count === 1 ? '1 item' : (it.count || 0) + ' items') + ' · ' + when;
+    return it.incoming ? 'Receiving…' : fmtSize(it.size) + ' · ' + when + ' · ' + rowType(it);
+  }
+  function listLayout(W) {
+    const w = W - L.pad * 2;
+    let y = 0;
+    for (const it of geo) { it._x = L.pad; it._y = y; it._w = w; it._th = LR.th; y += LR.h; }
+    maxCardH = LR.h;
+    gridH = y;
+    grid.style.height = gridH + 'px';
+  }
+  // the card the grid would show for this file
+  function rowCard(it) {
+    const w = Math.round((innerWidth - L.pad * 2 - L.gap) / 2);
+    return { width: w, height: thumbH(it, w) };
+  }
+  // A dragged row's card starts small, over the row's thumbnail, and grows; once the finger moves it comes to the
+  // finger (a long press that only selects keeps it in place). It is lifted whole on the screen, so letting go
+  // without moving never sends it; the further it is dragged, the more it sits under the middle of the finger, so a
+  // row touched near the edge can still be pushed over it. D.x/D.y are where the card is (reaching the edge is
+  // measured with them); gx/gy is how far it still looks from there.
+  function rowLift(d, r) {
+    d.s = Math.min(1, Math.max(r.width / d.w, r.height / d.h));
+    d.x = clamp(d.fx - d.w / 2, 4, innerWidth - d.w - 4);
+    d.y = clamp(d.fy - d.h / 2, 4, innerHeight - d.h - 4);
+    d.offX = d.fx - d.x; d.offY = d.fy - d.y;
+    d.row = { s0: d.s, ox: d.offX, oy: d.offY };
+    d.gx = r.left + r.width / 2 - (d.x + d.w / 2);
+    d.gy = r.top + r.height / 2 - (d.y + d.h / 2);
+  }
+  function rowFrame(d, dt) {
+    const moved = Math.hypot(d.fx - d.fx0, d.fy - d.fy0);
+    const held = d.phase === 'drag' && d.how === 'press' && moved < 12;
+    if (d.phase === 'drag') {
+      d.sT = held ? 0.62 : 1.065;
+      const k = clamp((moved - 12) / 80, 0, 1);
+      d.offX = lerp(d.row.ox, d.w / 2, k); d.offY = lerp(d.row.oy, d.h / 2, k);
+      d.x = d.fx - d.offX; d.y = d.fy - d.offY;
+    }
+    if (!held) { d.gx = damp(d.gx, 0, dt, 70); d.gy = damp(d.gy, 0, dt, 70); return; }
+    const half = d.w * d.s / 2, cx = d.x + d.w / 2 + d.gx;           // only held: whole on the screen
+    d.gx += clamp(cx, half + 4, innerWidth - half - 4) - cx;
+  }
+  // let go: back into the row's thumbnail
+  function rowHome(d, r) {
+    d.bx0 += d.gx; d.by0 += d.gy; d.gx = 0; d.gy = 0;
+    d.bx1 = r.left + r.width / 2 - d.w / 2;
+    d.by1 = r.top + r.height / 2 - d.h / 2;
+    d.bs1 = d.row.s0;
+  }
+  function rowBack(d, u) {
+    if (u > 0.6) { unlift(d.items); d.f.style.opacity = String(clamp((1 - u) / 0.4, 0, 1)); }
+  }
+  // sent from the menu or the Send button: the row's card leaves from the row
+  function rowRect(it, r) {
+    const c = rowCard(it);
+    const left = clamp(r.left + r.width / 2 - c.width / 2, 4, innerWidth - c.width - 4), top = r.top + r.height / 2 - c.height / 2;
+    return { left, top, width: c.width, height: c.height, right: left + c.width, bottom: top + c.height };
+  }
+  function setLayout(list) {
+    list = !!list;
+    if (VIEW.list === list) return;
+    const keep = geo.find((it) => it._y + it._th > scroller.scrollTop);   // the file at the top stays at the top
+    VIEW.list = list;
+    pref.set('layout', list ? 'list' : 'grid');
+    grid.classList.toggle('list', list);
+    for (const [, el] of cards) el.remove();
+    cards.clear();
+    computeLayout();
+    scroller.scrollTop = keep ? keep._y : 0;
+    renderWindow(false);
+    updateCount();
+    renderHacts();
+    haptic('tick');
+  }
+
+  // ------------------------------------------------------------------ sort and search (the file browser)
+  // Every tab keeps its own order (pref 'sorts': { tab: 'name-asc' }; newest first when not set), and a folder tab's
+  // order (Downloads, Phone storage, a pinned folder) holds for the folders opened from it. Folders stay on top.
+  // Folders and the Flick list are sorted and searched here; the phone's categories by the app (querySorted).
+  const SORT_ROWS = [
+    ['name', 'Name', [['asc', 'A to Z'], ['desc', 'Z to A']]],
+    ['date', 'Date', [['desc', 'Newest'], ['asc', 'Oldest']]],
+    ['size', 'Size', [['desc', 'Largest'], ['asc', 'Smallest']]],
+    ['type', 'Type', [['asc', 'A to Z'], ['desc', 'Z to A']]],
+  ];
+  let sorts = {};
+  try { sorts = JSON.parse(pref.get('sorts', '{}')) || {}; } catch (e) { sorts = {}; }
+  const viewKey = () => (V.cat === 'dir' ? V.rootCat || 'storage' : V.cat);
+  const nativeSort = () => V.cat !== 'dir' && V.cat !== 'shelf' && !!(NV && typeof NV.querySorted === 'function');
+  function sortOf() {
+    const m = /^(name|date|size|type)-(asc|desc)$/.exec(String(sorts[viewKey()] || ''));
+    return m ? { key: m[1], dir: m[2] } : { key: 'date', dir: 'desc' };
+  }
+  let coll = null;
+  function cmpName(a, b) {
+    if (!coll) { try { coll = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }); } catch (e) { coll = { compare: (x, y) => (x < y ? -1 : x > y ? 1 : 0) }; } }
+    return coll.compare(String(a.name || ''), String(b.name || ''));
+  }
+  const typeOf = (x) => String(x.mime || x.ext || extOf(x.name) || '').toLowerCase();
+  function sortList(list) {
+    const s = sortOf(), sign = s.dir === 'asc' ? 1 : -1;
+    const when = (x) => +(x.mtime || x.added) || 0;
+    const by = s.key === 'name' ? (a, b) => cmpName(a, b) * sign
+      : s.key === 'size' ? (a, b) => ((+a.size || 0) - (+b.size || 0)) * sign || cmpName(a, b)
+      : s.key === 'type' ? (a, b) => (typeOf(a) < typeOf(b) ? -sign : typeOf(a) > typeOf(b) ? sign : 0) || cmpName(a, b)
+      : (a, b) => (when(a) - when(b)) * sign || cmpName(a, b);
+    // folders first, by name (the other way round only when sorting by name that way)
+    return list.sort((a, b) => (b.dir ? 1 : 0) - (a.dir ? 1 : 0) || (a.dir ? cmpName(a, b) * (s.key === 'name' ? sign : 1) : by(a, b)));
+  }
+  // a page of a category: in the tab's order, and only what matches while searching
+  function catPage(offset) {
+    if (!nativeSort()) return nreqT(120000, 'queryAsync', V.cat, offset, PAGE);
+    const s = sortOf();
+    return nreqT(120000, 'querySorted', V.cat, offset, PAGE, s.key + '-' + s.dir, SRCH.on ? SRCH.q : '');
+  }
+  // the category again from its first page (another order, another search), same tab
+  function requery() {
+    V.gen++;
+    if (SEL.on) setSelecting(false);
+    for (const [, el] of cards) el.remove();
+    cards.clear();
+    V.items = []; V.offset = 0; V.total = 0; V.more = false; V.loading = false;
+    scroller.scrollTop = 0;
+    $('empty').hidden = true;
+    loadMore();
+  }
+  function setSort(key, dir) {
+    const k = viewKey();
+    if (key === 'date' && dir === 'desc') delete sorts[k]; else sorts[k] = key + '-' + dir;
+    pref.set('sorts', JSON.stringify(sorts));
+    if (nativeSort()) {
+      if (SRCH.saved) SRCH.saved = 'stale';          // the tab as it was before the search is in the old order
+      requery();
+    } else {
+      sortList(V.items);
+      layout(false);
+      scroller.scrollTop = 0;
+      renderWindow(false);
+    }
+    renderHacts();
+  }
+  function sortSheet() {
+    openSheet('Sort by', []);
+    const box = $('sheetItems'), cur = sortOf();
+    for (const [key, label, dirs] of SORT_ROWS) {
+      const row = document.createElement('div');
+      row.className = 'sorow';
+      row.appendChild(Object.assign(document.createElement('span'), { textContent: label }));
+      const seg = document.createElement('div');
+      seg.className = 'sseg';
+      seg.setAttribute('role', 'radiogroup'); seg.setAttribute('aria-label', label);
+      for (const [dir, text] of dirs) {
+        const b = document.createElement('button');
+        const on = cur.key === key && cur.dir === dir;
+        b.className = on ? 'on' : '';
+        b.textContent = text;
+        b.setAttribute('role', 'radio'); b.setAttribute('aria-checked', String(on));
+        b.onclick = () => {
+          if (now() - sheetAt < 350) return;
+          haptic('tick');
+          for (const x of box.querySelectorAll('.sorow button')) { x.classList.remove('on'); x.setAttribute('aria-checked', 'false'); }
+          b.classList.add('on'); b.setAttribute('aria-checked', 'true');
+          setTimeout(() => { closeSheet(); setSort(key, dir); }, 160);
+        };
+        seg.appendChild(b);
+      }
+      row.appendChild(seg);
+      box.appendChild(row);
+    }
+  }
+
+  // Search: in a folder or the Flick list the view is filtered here as you type (SRCH.f); in a category the app
+  // searches the phone's media index, and the tab as it was comes back when the search ends.
+  const SRCH = { on: false, q: '', f: null, saved: null, t: 0 };
+  function shown(it) { return !SRCH.f || !!it.incoming || SRCH.f(it); }
+  function fold(s) {
+    s = String(s || '').toLowerCase();
+    try { s = s.normalize('NFD').replace(/[\u0300-\u036f]/g, ''); } catch (e) { /* as it is */ }
+    return s;
+  }
+  function matcher(q) {
+    const words = fold(q).split(' ').filter(Boolean);
+    return (it) => { const n = it._fold || (it._fold = fold(it.name)); return words.every((w) => n.indexOf(w) >= 0); };
+  }
+  function openSearch() {
+    if (SEL.on) return;
+    if (!SRCH.on) {
+      SRCH.on = true; SRCH.q = ''; SRCH.f = null; SRCH.saved = null;
+      document.body.classList.add('searching');
+      sIn.value = ''; sClear.hidden = true;
+      sIn.placeholder = V.cat === 'recent' ? 'Search recent files' : V.cat === 'shelf' ? 'Search the Flick list' : 'Search ' + V.title;
+    }
+    sIn.focus();
+  }
+  function runSearch() {
+    clearTimeout(SRCH.t);
+    if (!SRCH.on) return;
+    const q = sIn.value.trim().replace(/\s+/g, ' ').slice(0, 100);
+    if (q === SRCH.q) return;
+    SRCH.q = q;
+    if (nativeSort()) {
+      if (q && !SRCH.saved) SRCH.saved = { items: V.items, offset: V.offset, total: V.total, more: V.more, scroll: scroller.scrollTop };
+      if (q) requery(); else restoreView();
+      return;
+    }
+    SRCH.f = q ? matcher(q) : null;
+    scroller.scrollTop = 0;
+    layout(false);
+  }
+  // the category as it was before the search (or afresh, when its order changed meanwhile)
+  function restoreView() {
+    const s = SRCH.saved;
+    SRCH.saved = null;
+    if (s === 'stale' || (s && !s.items.length)) { requery(); return; }    // (searched before its first page came)
+    if (!s) return;
+    V.gen++;                                          // an answer still on its way was for the search
+    for (const [, el] of cards) el.remove();
+    cards.clear();
+    V.items = s.items; V.offset = s.offset; V.total = s.total; V.more = s.more; V.loading = false;
+    layout(false);
+    scroller.scrollTop = s.scroll;
+    renderWindow(false);
+    renderHeader();
+  }
+  // leaving: the view is being replaced anyway (another tab or folder)
+  function endSearch(leaving) {
+    if (!SRCH.on) return;
+    clearTimeout(SRCH.t);
+    SRCH.on = false; SRCH.q = ''; SRCH.f = null;
+    document.body.classList.remove('searching');
+    try { sIn.blur(); } catch (e) { /* ignore */ }
+    if (leaving) { SRCH.saved = null; return; }
+    if (SRCH.saved) restoreView(); else layout(false);
+  }
+
+  // the header: search, sort and grid/list; the search field takes the title's place while searching
+  const HIC = {
+    search: '<svg viewBox="0 0 24 24"><circle cx="10.6" cy="10.6" r="6.1" fill="none" stroke="currentColor" stroke-width="2"/><path d="M15.2 15.2l4.6 4.6" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/></svg>',
+    sort: '<svg viewBox="0 0 24 24"><path d="M4.5 7h9M4.5 12h6.5M4.5 17h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M17.5 5.5v13M14.6 15.6l2.9 2.9 2.9-2.9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    list: '<svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="5.2" height="5.2" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.9"/><rect x="3.5" y="14.3" width="5.2" height="5.2" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="M12 7.1h8.5M12 16.9h8.5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>',
+    grid: '<svg viewBox="0 0 24 24"><rect x="3.8" y="3.8" width="6.8" height="6.8" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.9"/><rect x="13.4" y="3.8" width="6.8" height="6.8" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.9"/><rect x="3.8" y="13.4" width="6.8" height="6.8" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.9"/><rect x="13.4" y="13.4" width="6.8" height="6.8" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.9"/></svg>',
+    back: '<svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    clear: '<svg viewBox="0 0 24 24"><path d="M7.5 7.5l9 9M16.5 7.5l-9 9" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>',
+    folder: '<svg viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2.2h6.5A2.5 2.5 0 0 1 21 9.7v7.8a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z" fill="currentColor"/></svg>',
+  };
+  Object.assign(ICONS, {
+    eye: '<svg viewBox="0 0 24 24"><path d="M2.8 12s3.4-6.2 9.2-6.2 9.2 6.2 9.2 6.2-3.4 6.2-9.2 6.2S2.8 12 2.8 12z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="12" cy="12" r="2.8" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>',
+    pin: '<svg viewBox="0 0 24 24"><path d="M9.4 3.8h5.2l-.9 5.3 3.4 3.4v1.7H6.9v-1.7l3.4-3.4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 14.2v6.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
+    left: '<svg viewBox="0 0 24 24"><path d="M14.5 6l-6 6 6 6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    right: '<svg viewBox="0 0 24 24"><path d="M9.5 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  });
+  function iconBtn(svg, label, run, cls) {
+    const b = document.createElement('button');
+    b.className = cls || 'hic';
+    b.setAttribute('aria-label', label);
+    b.appendChild(svgEl(svg));
+    b.onclick = (e) => { e.stopPropagation(); run(); };
+    return b;
+  }
+  const hActs = document.createElement('div');
+  hActs.className = 'hacts';
+  const sortBtn = iconBtn(HIC.sort, 'Sort', () => { haptic('soft'); sortSheet(); });
+  const layoutBtn = iconBtn(HIC.list, 'List view', () => setLayout(!VIEW.list));
+  hActs.append(iconBtn(HIC.search, 'Search', openSearch), sortBtn, layoutBtn);
+  $('hdr').querySelector('.hrow').insertBefore(hActs, $('selAll'));
+  const sBar = document.createElement('div');
+  sBar.className = 'hsearch';
+  const sField = document.createElement('label');
+  sField.className = 'sfield';
+  const sIn = document.createElement('input');
+  sIn.type = 'search'; sIn.id = 'searchIn'; sIn.autocomplete = 'off'; sIn.spellcheck = false;
+  sIn.setAttribute('enterkeyhint', 'search'); sIn.setAttribute('aria-label', 'Search');
+  const sClear = iconBtn(HIC.clear, 'Clear search', () => { sIn.value = ''; sClear.hidden = true; runSearch(); sIn.focus(); }, 'sclear');
+  sClear.hidden = true;
+  sField.append(svgEl(HIC.search), sIn, sClear);
+  sBar.append(iconBtn(HIC.back, 'Close search', () => { haptic('soft'); endSearch(); }, 'hback'), sField);
+  $('hdr').insertBefore(sBar, chips);
+  sIn.addEventListener('input', () => { sClear.hidden = !sIn.value; clearTimeout(SRCH.t); SRCH.t = setTimeout(runSearch, 140); });
+  sIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') { runSearch(); sIn.blur(); } });
+  function renderHacts() {
+    layoutBtn.innerHTML = '';
+    layoutBtn.appendChild(svgEl(VIEW.list ? HIC.grid : HIC.list));
+    layoutBtn.setAttribute('aria-label', VIEW.list ? 'Grid view' : 'List view');
+    sortBtn.classList.toggle('dot', !!sorts[viewKey()]);   // not the usual order (newest first)
+  }
+  renderHacts();
+
+  // ------------------------------------------------------------------ pinned folders: tabs after Documents
+  // pref 'pins': [{ path, name }], in the tabs' order. A pinned folder opens like Downloads (its own tab, its own
+  // order); press and hold its tab to move it or unpin it. Phone storage and Downloads have tabs already.
+  let pins = [];
+  try { pins = (JSON.parse(pref.get('pins', '[]')) || []).filter((p) => p && typeof p.path === 'string' && p.path); } catch (e) { pins = []; }
+  const pinCat = (path) => 'pin:' + path;
+  const isPinned = (path) => pins.some((p) => p.path === path);
+  const pinnable = (path) => !!path && path !== STG.root && path !== STG.downloads;
+  function savePins() { pref.set('pins', JSON.stringify(pins.map((p) => ({ path: p.path, name: p.name })))); renderPins(); }
+  function renderPins() {
+    for (const b of Array.from(chips.querySelectorAll('.chip.pin'))) b.remove();
+    const docs = chips.querySelector('.chip[data-v="docs"]');
+    const before = docs ? docs.nextSibling : null;
+    for (const p of pins) {
+      const b = document.createElement('button');
+      b.className = 'chip pin';
+      b.dataset.v = pinCat(p.path);
+      b.appendChild(svgEl(HIC.folder));
+      b.appendChild(Object.assign(document.createElement('span'), { textContent: p.name }));
+      b.classList.toggle('on', V.cat === 'dir' && V.rootCat === b.dataset.v);
+      b.onclick = () => { if (b._held) { b._held = false; return; } haptic('soft'); openCat(b.dataset.v); };
+      onHold(b, () => pinMenu(p));
+      chips.insertBefore(b, before);
+    }
+  }
+  function openPin(cat) {
+    const p = pins.find((x) => pinCat(x.path) === cat);
+    if (!p) { openCat('recent'); return; }
+    pref.set('lastView', cat);
+    V.stack = [];
+    resetView('dir', p.name);
+    V.rootCat = cat;
+    V.path = p.path;
+    loadDir(p.path, p.name);
+  }
+  // the entry in a folder's menu (here: the ••• menu, for the folder that is open)
+  function pinEntry(path, name, here) {
+    if (!pinnable(path)) return null;
+    if (isPinned(path)) return { label: here ? 'Unpin this folder' : 'Unpin from tabs', icon: 'pin', run: () => unpin(path) };
+    return { label: here ? 'Pin this folder' : 'Pin to tabs', icon: 'pin', run: () => pin(path, name) };
+  }
+  function pin(path, name) {
+    if (isPinned(path)) return;
+    name = name || path.split('/').pop() || 'Folder';
+    pins.push({ path, name });
+    savePins();
+    haptic('tick');
+    toast('Pinned ' + midName(name) + ' to your tabs', 1800);
+    const b = chips.querySelector('.chip.pin[data-v="' + CSS.escape(pinCat(path)) + '"]');
+    if (b) { const r = b.getBoundingClientRect(); if (r.left < 8 || r.right > innerWidth - 8) chips.scrollBy({ left: r.left - innerWidth / 2 + r.width / 2, behavior: 'smooth' }); }
+  }
+  function unpin(path) {
+    const p = pins.find((x) => x.path === path);
+    if (!p) return;
+    pins = pins.filter((x) => x !== p);
+    delete sorts[pinCat(path)];
+    pref.set('sorts', JSON.stringify(sorts));
+    if (pref.get('lastView', '') === pinCat(path)) pref.set('lastView', 'storage');
+    if (V.cat === 'dir' && V.rootCat === pinCat(path)) {
+      // still open: it is a folder in Phone storage now
+      V.rootCat = 'storage';
+      if (!V.stack.length && path !== STG.root) V.stack = [{ path: STG.root, title: 'Phone storage', scroll: 0 }];
+    }
+    savePins();
+    renderHeader();
+    haptic('tick');
+    toast('Unpinned ' + midName(p.name), 1600);
+  }
+  function movePin(i, d) {
+    const j = i + d;
+    if (j < 0 || j >= pins.length) return;
+    const p = pins[i]; pins[i] = pins[j]; pins[j] = p;
+    savePins();
+    haptic('tick');
+  }
+  function pinMenu(p) {
+    const i = pins.findIndex((x) => x.path === p.path);
+    if (i < 0) return;
+    openSheet(p.name, [
+      { label: 'Open', icon: 'folder', run: () => openCat(pinCat(p.path)) },
+      i > 0 ? { label: 'Move left', icon: 'left', run: () => movePin(i, -1) } : null,
+      i < pins.length - 1 ? { label: 'Move right', icon: 'right', run: () => movePin(i, 1) } : null,
+      { label: 'Unpin from tabs', icon: 'pin', run: () => unpin(p.path) },
+    ]);
+  }
+  // press and hold (a tab): fn; the tap that ends it isn't a tap (el._held)
+  function onHold(el, fn) {
+    let t = 0, x0 = 0, y0 = 0;
+    const stop = () => clearTimeout(t);
+    el.addEventListener('pointerdown', (e) => { el._held = false; x0 = e.clientX; y0 = e.clientY; stop(); t = setTimeout(() => { el._held = true; haptic('lift'); fn(); }, 480); });
+    el.addEventListener('pointermove', (e) => { if (Math.hypot(e.clientX - x0, e.clientY - y0) > 10) stop(); });
+    el.addEventListener('pointerup', stop);
+    el.addEventListener('pointercancel', stop);
+    el.addEventListener('pointerleave', stop);
+  }
+  renderPins();
+
+  // ------------------------------------------------------------------ preview (shown by features/preview.js)
+  // Opened from a file's menu (Preview) or by spreading two fingers on its card: a tap still opens the menu, a long
+  // press still lifts and selects, a sideways swipe still flicks, and two fingers did nothing on the grid before.
+  const hasPreview = () => !!(runHooks.list && runHooks.list.preview && runHooks.list.preview.length);
+  function previewEntry(it) { return hasPreview() && !it.dir ? { label: 'Preview', icon: 'eye', run: () => openPreview(it) } : null; }
+  function openPreview(it) { if (it && !it.dir && !it.incoming) runHooks('preview', { item: it, rect: cardRect(it.id) }); }
+  function viewFiles() { return visibleItems().filter((it) => !it.dir && !it.incoming); }
+  function cardRect(id) {
+    const el = cards.get(id);
+    if (!el || !el.isConnected) return null;
+    const r = el.querySelector('.thumb').getBoundingClientRect();
+    return r.width && r.bottom > 0 && r.top < innerHeight ? r : null;
+  }
+  // scrolls the view so that this file's card is on screen (the preview closes onto it)
+  function showItem(id) {
+    const it = geo.find((x) => x.id === id);
+    if (!it) return;
+    const pad = parseFloat(getComputedStyle(scroller).paddingTop) || 0;
+    const room = innerHeight - pad - 96, top = scroller.scrollTop;
+    if (it._y < top || it._y + it._th > top + room) { scroller.scrollTop = Math.max(0, it._y - Math.max(0, (room - it._th) / 2)); renderWindow(false); }
+  }
+  function moreFiles() { if (V.more && !V.loading && V.cat !== 'dir' && V.cat !== 'shelf') loadMore(); }
+  let P = null;                                      // two fingers on a card: { it, d0 }
+  const fingers = (e) => Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+  function pinchStart(e) {
+    P = null;
+    if (SEL.on || !hasPreview()) return;
+    const hit = document.elementFromPoint((e.touches[0].clientX + e.touches[1].clientX) / 2, (e.touches[0].clientY + e.touches[1].clientY) / 2);
+    const tg = e.touches[0].target;
+    const card = (hit && hit.closest && hit.closest('#grid .card')) || (tg && tg.closest && tg.closest('#grid .card'));
+    const it = card && V.items.find((x) => x.id === card.dataset.id);
+    if (it && !it.dir && !it.incoming) P = { it, d0: Math.max(20, fingers(e)) };
+  }
+  function pinchMove(e) {
+    if (e.touches.length < 2) { P = null; return false; }
+    if (e.cancelable) e.preventDefault();
+    if (fingers(e) / P.d0 > 1.3) { const it = P.it; P = null; haptic('soft'); openPreview(it); }
+    return true;
+  }
 
   // ------------------------------------------------------------------ features (phone/features/*.js)
   // The feature files load before this file and queue their start functions in window.FlickFeatures. They reach the
@@ -2470,9 +3043,11 @@
   //   back     Android's back button (return true when handled)
   //   menu     items for the ••• sheet (return one item or a list)
   //   settings the Settings page is being drawn (its body element; add sections to it)
+  //   settings-end  the same, after the app's own sections
   //   pcTap    the PC button on the main screen (return true when handled)
   //   view     the file view changed (folder, category, loading)
   //   conn     connected or not
+  //   preview  open a file full screen ({ item, rect }: rect = its card on screen, or null)
   function runHooks(name, a) {
     let r;
     for (const f of (runHooks.list && runHooks.list[name]) || []) {
@@ -2499,12 +3074,14 @@
     nc, njson, pref, saveSettings, haptic,
     // the link to the PC. linkAuthed: the PC proved itself on this link (signed in), connected or not
     wsSend, linkTrusted, linkAuthed: () => !!(st.wsOpen && st.trusted && st.pcProved && hasToken()),
-    paired: (pcId) => !!pref.get(tokenKey(pcId), ''), rankOf, busyMoving, choosePc, closeLink, openLinkSoon,
+    paired: (pcId) => !!pref.get(tokenKey(pcId), ''), rankOf, busyMoving, choosePc, closeLink, openLinkSoon, knownPcs, forgetPc,
     // screens, sheets, toasts, formatting
     toast, openSheet, closeSheet, showScreen, openSettings, closeSettings, renderSettings,
     svgEl, esc, rid, fmtSize, fmtWhen, midName,
     // the file browser, and sending to the PC
-    openCat, showInFolder, sendItems, phoneName,
+    openCat, showInFolder, sendItems, phoneName, fmtRate,
+    // the files the view shows (in its order), their thumbnails and cards: for the preview
+    viewFiles, thumbUrl, cardRect, showItem, moreFiles, fmtDur,
   });
   window.FlickApp = FlickApp;
   const FEATURES = {};                      // what the feature files share among themselves (features/core.js)
@@ -2518,6 +3095,15 @@
   openCat(STG.granted ? (pref.get('lastView', 'recent') || 'recent') : 'recent');
   setPcName();
   showScreen('pair');
+  // sends the app is carrying on with (some may be from before Flick was opened)
+  for (const j of njson('sendList') || []) if (j && j.tid) st.jobs.set(j.tid, j);
+  updateCount();
+  // the PC used last is remembered with the rest (from before this memory existed)
+  if (pref.get('lastPc', '') && pref.get('lastPcAddr', '') && !knownPcs()[pref.get('lastPc', '')]) {
+    const a = pref.get('lastPcAddr', '').split(':');
+    rememberPc({ id: pref.get('lastPc', ''), name: pref.get('lastPcName', ''), ip: a[0], port: +a[1] || 47860 }, []);
+  }
+  tellKnown();
   const lastAddr = pref.get('lastPcAddr', '');
   const lastId = pref.get('lastPc', '');
   if (lastAddr && lastId) {

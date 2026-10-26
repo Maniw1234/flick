@@ -108,7 +108,10 @@ final class Actions {
                     body.put("kind", k);
                     if ("text".equals(k)) body.put("text", clip.optString("text", ""));
                     else body.put("png", clip.optString("png", ""));
+                    boolean priv = clip.optBoolean("sensitive", false);
+                    if (priv) body.put("private", true);             // an app marked it private: the PC keeps no history of it
                     client.post(t, "/api/clip", null, body);
+                    if (!priv) ClipHistory.add(c, "out", body, t.id, t.name);
                     r.say(("text".equals(k) ? "Copied to " : "Image copied to ") + t.name);
                 } catch (Throwable e) {
                     r.say(Bg.why(e, t == null ? null : t.name));

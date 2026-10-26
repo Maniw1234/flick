@@ -9,8 +9,11 @@
 # also gets the phone app inside the PC's copy over Wi-Fi. The phone app is rebuilt and signed here only when it changed
 # since the last release (ci/phone_app.sh), with the key in the FLICK_SIGNING_KEY secret (see signing/README.md).
 #
+# Jobs: "release" decides, puts the phone app together and builds the Windows app; "mac" (on a Mac) and "linux" build
+# theirs with that phone app inside; "publish" puts everything in one release with one SHA256SUMS.
+#
 # Actions > Release > Run workflow with "Only build and check" ticked builds everything, including a signed phone app,
-# and publishes nothing.
+# and publishes nothing (the builds stay downloadable from the run for a few days).
 name: Release
 
 on:
@@ -34,6 +37,10 @@ jobs:
   release:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      new: ${{ steps.v.outputs.new }}
+      check: ${{ steps.v.outputs.check }}
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -92,16 +99,144 @@ jobs:
           EZIP="$RUNNER_TEMP/tools/electron-win32-x64.zip" RCEDIT="$RUNNER_TEMP/tools/rcedit-x64.exe" WINE="$WINE" \
           WINEPREFIX="$RUNNER_TEMP/wine" NSISDIR=/usr/share/nsis MAKENSIS=makensis MINGW_CC=x86_64-w64-mingw32-gcc STRICT=1 ./build_win.sh
 
+      # the Mac and Linux apps carry the same phone app; the publish job takes everything from these
+      - name: Hand the phone app to the Mac and Linux builds
+        if: steps.v.outputs.new == 'true'
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4  # v5.0.0
+        with:
+          name: phone-app
+          path: pc/phone-app/Flick.apk
+          if-no-files-found: error
+          retention-days: 5
+
+      - name: Keep the Windows app for the release
+        if: steps.v.outputs.new == 'true'
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4  # v5.0.0
+        with:
+          name: windows
+          path: |
+            build/win/Flick-Setup.exe
+            build/win/flick-app-${{ steps.v.outputs.version }}.zip
+          if-no-files-found: error
+          retention-days: 5
+
+  mac:
+    needs: release
+    if: needs.release.outputs.new == 'true'
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          name: phone-app
+          path: pc/phone-app
+
+      - name: Tools
+        run: |
+          mkdir -p "$RUNNER_TEMP/tools" && cd "$RUNNER_TEMP/tools"
+          # every downloaded tool is checked against a known checksum before it touches the build
+          EV=$(node -p "require('$GITHUB_WORKSPACE/pc/package.json').electronVersion")
+          A=$(node -p "require('$GITHUB_WORKSPACE/pc/package.json').electronSha256MacArm64 || ''")
+          X=$(node -p "require('$GITHUB_WORKSPACE/pc/package.json').electronSha256MacX64 || ''")
+          [ -n "$A" ] && [ -n "$X" ] || { echo "::error::pc/package.json has no electronSha256MacArm64/electronSha256MacX64 for Electron $EV"; exit 1; }
+          curl -fsSL -o electron-darwin-arm64.zip "https://github.com/electron/electron/releases/download/v$EV/electron-v$EV-darwin-arm64.zip"
+          curl -fsSL -o electron-darwin-x64.zip "https://github.com/electron/electron/releases/download/v$EV/electron-v$EV-darwin-x64.zip"
+          shasum -a 256 -c - <<SUMS
+          $A  electron-darwin-arm64.zip
+          $X  electron-darwin-x64.zip
+          SUMS
+
+      - name: Build the Mac apps (Apple Silicon and Intel), their disk images and the update bundle
+        run: |
+          EZIP_ARM64="$RUNNER_TEMP/tools/electron-darwin-arm64.zip" EZIP_X64="$RUNNER_TEMP/tools/electron-darwin-x64.zip" STRICT=1 ./build_mac.sh
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4  # v5.0.0
+        with:
+          name: mac
+          path: |
+            build/mac/Flick-mac-arm64.dmg
+            build/mac/Flick-mac-x64.dmg
+            build/mac/flick-app-mac-${{ needs.release.outputs.version }}.zip
+          if-no-files-found: error
+          retention-days: 5
+
+  linux:
+    needs: release
+    if: needs.release.outputs.new == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          name: phone-app
+          path: pc/phone-app
+
+      - name: Tools
+        run: |
+          mkdir -p "$RUNNER_TEMP/tools" && cd "$RUNNER_TEMP/tools"
+          # every downloaded tool is checked against a known checksum before it touches the build
+          EV=$(node -p "require('$GITHUB_WORKSPACE/pc/package.json').electronVersion")
+          L=$(node -p "require('$GITHUB_WORKSPACE/pc/package.json').electronSha256LinuxX64 || ''")
+          [ -n "$L" ] || { echo "::error::pc/package.json has no electronSha256LinuxX64 for Electron $EV"; exit 1; }
+          curl -fsSL -o electron-linux-x64.zip "https://github.com/electron/electron/releases/download/v$EV/electron-v$EV-linux-x64.zip"
+          # appimagetool, and the AppImage runtime it puts in front of the image (a fixed one, not the latest)
+          curl -fsSL -o appimagetool-x86_64.AppImage "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage"
+          curl -fsSL -o runtime-x86_64 "https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64"
+          sha256sum -c - <<SUMS
+          $L  electron-linux-x64.zip
+          ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  appimagetool-x86_64.AppImage
+          2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  runtime-x86_64
+          SUMS
+
+      - name: Build the Linux app (AppImage and tar.gz) and its update bundle
+        run: |
+          T="$RUNNER_TEMP/tools"
+          EZIP="$T/electron-linux-x64.zip" APPIMAGETOOL="$T/appimagetool-x86_64.AppImage" RUNTIME="$T/runtime-x86_64" ./build_linux.sh
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4  # v5.0.0
+        with:
+          name: linux
+          path: |
+            build/linux/Flick-linux-x86_64.AppImage
+            build/linux/Flick-linux-x64.tar.gz
+            build/linux/flick-app-linux-${{ needs.release.outputs.version }}.zip
+          if-no-files-found: error
+          retention-days: 5
+
+  publish:
+    needs: [release, mac, linux]
+    if: needs.release.outputs.new == 'true' && needs.release.outputs.check != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53  # v6.0.0
+        with:
+          path: build/artifacts       # each in a folder named after it: phone-app, windows, mac, linux
+
       - name: Publish the release
-        if: steps.v.outputs.new == 'true' && steps.v.outputs.check != 'true'
         env:
-          V: ${{ steps.v.outputs.version }}
+          V: ${{ needs.release.outputs.version }}
         run: |
           OUT=build/release && mkdir -p "$OUT"
-          APKV=$(node -p "require('./pc/apkinfo').apkInfo('pc/phone-app/Flick.apk').name")
-          cp build/win/Flick-Setup.exe "$OUT/Flick-Setup.exe"
-          cp build/win/flick-app-$V.zip "$OUT/flick-app-$V.zip"
-          cp pc/phone-app/Flick.apk "$OUT/Flick-$APKV.apk"
+          A=build/artifacts
+          APKV=$(node -p "require('./pc/apkinfo').apkInfo('$A/phone-app/Flick.apk').name")
+          # Windows keeps its names: installed copies update from flick-app-<version>.zip
+          cp "$A/windows/Flick-Setup.exe" "$A/windows/flick-app-$V.zip" "$OUT/"
+          cp "$A/mac/Flick-mac-arm64.dmg" "$A/mac/Flick-mac-x64.dmg" "$A/mac/flick-app-mac-$V.zip" "$OUT/"
+          cp "$A/linux/Flick-linux-x86_64.AppImage" "$A/linux/Flick-linux-x64.tar.gz" "$A/linux/flick-app-linux-$V.zip" "$OUT/"
+          cp "$A/phone-app/Flick.apk" "$OUT/Flick-$APKV.apk"
           ( cd "$OUT" && sha256sum * > SHA256SUMS )
           awk -v v="## $V" '$0==v{f=1;next} /^## /{f=0} f' CHANGES.md > notes.md
           [ -s notes.md ] || echo "Flick $V" > notes.md

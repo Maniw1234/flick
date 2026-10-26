@@ -224,6 +224,7 @@ public class LinkService extends Service {
         try {
             AutoSend.kick(this);
             if (System.currentTimeMillis() - lastSync > SYNC_EVERY) { lastSync = System.currentTimeMillis(); SyncManager.syncAll(this); }
+            Feedback.flushLater(this);                           // feedback that waited for a connection
         } catch (Throwable e) { Bg.warn("background link", e); }
         MAIN.removeCallbacks(syncTick);
         MAIN.postDelayed(syncTick, SYNC_EVERY);
@@ -252,6 +253,8 @@ public class LinkService extends Service {
             else if ("link".equals(type)) FromPc.link(this, e.optString("url", ""), pcName);
             else if ("ring".equals(type)) Ringer.start(this, e.optInt("sec", 30));
             else if ("ring-stop".equals(type)) Ringer.stop(this, "pc");
+            else if ("browse".equals(type)) Browse.handle(this, e, t.id);
+            else if ("asking".equals(type)) Bg.toast(this, "Waiting for " + pcName + " to accept");   // a PC set to "Ask each time"
         } catch (Throwable x) {
             Bg.warn("event " + type, x);
         } finally {

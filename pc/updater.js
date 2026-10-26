@@ -1,9 +1,11 @@
 'use strict';
 // Keeps the PC app up to date from the GitHub releases of github.com/Maniw1234/flick.
 //
-// Each release carries flick-app-<version>.zip: this app's own files (code, overlay, panel, and the phone app).
-// When a newer one is out, Flick downloads it, checks its SHA-256 against the release's SHA256SUMS, unpacks it into
-// %LOCALAPPDATA%\Flick\app\<version> and restarts into it (see boot.js). No installer and no admin prompt is needed.
+// Each release carries flick-app-<version>.zip: this app's own files (code, overlay, panel, and the phone app), and
+// flick-app-mac-<version>.zip and flick-app-linux-<version>.zip with the Mac's and Linux's own helpers.
+// When a newer one is out, Flick downloads its system's bundle, checks its SHA-256 against the release's SHA256SUMS,
+// unpacks it into the per-user update folder (%LOCALAPPDATA%\Flick\app\<version> on Windows, see
+// updatecore.updatesRoot) and restarts into it (see boot.js). No installer and no admin prompt is needed.
 // A release that needs a newer Electron than this install has can't be applied this way; the panel then offers
 // the full installer instead.
 //
@@ -98,7 +100,7 @@ class Updater {
       if (proof.unsigned) this.log('update', ver, 'skipped:', proof.why);   // main.js logs errors itself
       return (this.state = { state: proof.unsigned ? 'unsigned' : 'error', version: ver, why: proof.why });
     }
-    const bundle = assets.find((a) => a && a.name === 'flick-app-' + ver + '.zip');
+    const bundle = assets.find((a) => a && a.name === core.bundleName(ver));
     if (!bundle) return (this.state = { state: 'installer', version: ver, page });
 
     // the checksum the signed SHA256SUMS gives; GitHub's own for the upload (if it reports one) must agree

@@ -6,8 +6,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
+import java.io.FileInputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
@@ -22,7 +24,9 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * One large file moved as several parts at once, each over its own connection: Wi-Fi carries more data that way than
  * over a single connection. Uploads go to the PC's /api/part (each part is retried on its own); downloads use HTTP
- * byte ranges (a range that breaks resumes where it stopped). No Android classes, so it runs on any JVM.
+ * byte ranges (a range that breaks resumes where it stopped). With verify=1 in the part URL (a PC that checks), the
+ * file's SHA-256 is worked out while the parts travel and sent once they are all in: the PC checks the assembled file
+ * against it, and a file that arrived damaged fails here and is sent again. No Android classes, so it runs on any JVM.
  */
 final class Parallel {
     interface Progress { void onBytes(long done); }
@@ -47,13 +51,18 @@ final class Parallel {
 
     private Parallel() {}
 
-    /** partUrl: ".../api/part?tid=..&device=..&token=..&name=.." (index, offset, parts, total and att are added). */
+    /** partUrl: ".../api/part?tid=..&device=..&token=..&name=..[&verify=1]" (index, offset, parts, total and att are added). */
     static void upload(final File f, String partUrl, final int n, final AtomicBoolean abort, final Progress p) throws Exception {
         final long total = f.length();
         final long size = (total + n - 1) / n;
         final String att = Long.toString(System.nanoTime() & 0xffffffL, 36) + n;
         final String base = partUrl + "&att=" + att + "&parts=" + n + "&total=" + total;
         final AtomicLong sent = new AtomicLong();
+        // the whole file's checksum, read alongside the parts (the network is far slower than the phone's storage)
+        final Future<String> sum = partUrl.matches(".*[?&]verify=1(&.*)?") ? POOL.submit(new Callable<String>() {
+            @Override
+            public String call() throws Exception { return sha256(f, total, abort); }
+        }) : null;
         List<Future<?>> parts = new ArrayList<Future<?>>();
         for (int i = 0; i < n; i++) {
             final int index = i;
@@ -81,8 +90,68 @@ final class Parallel {
                 }
             }));
         }
-        finish(parts, abort);
+        try {
+            finish(parts, abort);
+            if (sum != null) commit(base + "&commit=1&sha256=" + get(sum), total, abort);
+        } finally {
+            if (sum != null) sum.cancel(true);
+        }
         if (p != null) p.onBytes(total);
+    }
+
+    /** SHA-256 of the first total bytes of f, in hex; stops when the transfer is aborted. */
+    static String sha256(File f, long total, AtomicBoolean abort) throws IOException {
+        MessageDigest md;
+        try { md = MessageDigest.getInstance("SHA-256"); } catch (Exception e) { throw new IOException("no SHA-256", e); }
+        InputStream in = new FileInputStream(f);
+        try {
+            byte[] buf = new byte[1024 * 1024];
+            long left = total;
+            while (left > 0) {
+                if (abort.get() || Thread.currentThread().isInterrupted()) throw new IOException("aborted");
+                int r = in.read(buf, 0, (int) Math.min(buf.length, left));
+                if (r < 0) throw new IOException("file changed");
+                md.update(buf, 0, r);
+                left -= r;
+            }
+        } finally { in.close(); }
+        StringBuilder b = new StringBuilder(64);
+        for (byte x : md.digest()) b.append(Character.forDigit((x >> 4) & 15, 16)).append(Character.forDigit(x & 15, 16));
+        return b.toString();
+    }
+
+    private static String get(Future<String> f) throws Exception {
+        try { return f.get(); }
+        catch (ExecutionException e) { throw e.getCause() instanceof Exception ? (Exception) e.getCause() : e; }
+    }
+
+    /**
+     * Every part is in: tells the PC the whole file's SHA-256. The PC reads the assembled file back before it answers,
+     * so the wait grows with the size. 200: the file arrived intact; anything else (422: it didn't) fails the upload.
+     */
+    private static void commit(String url, long total, AtomicBoolean abort) throws IOException {
+        HttpURLConnection c = null;
+        Watchdog.Guard g = null;
+        try {
+            c = (HttpURLConnection) new URL(url).openConnection();
+            g = Watchdog.guard(abort, c);
+            c.setConnectTimeout(5000);
+            c.setReadTimeout((int) Math.min(30 * 60000L, 60000L + total / (25L * 1024 * 1024) * 1000L));
+            c.setDoOutput(true);
+            c.setUseCaches(false);
+            c.setRequestMethod("POST");
+            c.setFixedLengthStreamingMode(0);
+            c.getOutputStream().close();
+            g.idle();
+            int code = c.getResponseCode();
+            drain(code == 200 ? c.getInputStream() : c.getErrorStream());
+            if (code != 200) throw new IOException(code == 422 ? "arrived damaged" : "check http " + code);
+        } catch (IOException e) {
+            throw g != null && g.ended() != null ? new IOException(g.ended(), e) : e;
+        } finally {
+            if (g != null) g.close();
+            if (c != null) c.disconnect();
+        }
     }
 
     private static void sendPart(String url, File f, long off, long len, AtomicBoolean abort, AtomicLong sent, long[] mine, Progress p) throws IOException {
@@ -190,6 +259,74 @@ final class Parallel {
                             if (w != null) w.close();
                             try { if (raf != null) raf.close(); } catch (Throwable e) { /* ignore */ }
                             if (c != null) c.disconnect();
+                        }
+                    }
+                    if (done < len) throw lastErr != null ? lastErr : new IOException("incomplete");
+                    return null;
+                }
+            }));
+        }
+        finish(fs, stop);
+        if (p != null) p.onBytes(total);
+    }
+
+    /**
+     * The same over Wire, straight to the PC (no local proxy in between): [0, total) of target on l into part, as n byte
+     * ranges at once, each carrying on from what it wrote when it breaks.
+     */
+    static void downloadDirect(final Wire.Link l, final String target, final File part, final long total, int n, final Progress p) throws Exception {
+        RandomAccessFile pre = new RandomAccessFile(part, "rw");
+        try { pre.setLength(total); } finally { pre.close(); }
+        final long size = (total + n - 1) / n;
+        final AtomicLong got = new AtomicLong();
+        final AtomicBoolean stop = new AtomicBoolean(false);
+        List<Future<?>> fs = new ArrayList<Future<?>>();
+        for (int i = 0; i < n; i++) {
+            final long off = i * size, len = Math.max(0, Math.min(size, total - off));
+            if (len == 0) continue;
+            fs.add(POOL.submit(new Callable<Void>() {
+                @Override
+                public Void call() throws Exception {
+                    long done = 0;
+                    int fails = 0;
+                    IOException lastErr = null;
+                    for (int attempt = 0; attempt < DOWN_CAP && done < len; attempt++) {
+                        if (stop.get()) throw new IOException("aborted");
+                        long before = done;
+                        Wire.Call c = null;
+                        Watchdog.Guard w = null;
+                        RandomAccessFile raf = null;
+                        try {
+                            c = Wire.Call.open(l, "GET", target, Wire.NO_BODY, null, 60000, "Range: bytes=" + (off + done) + "-" + (off + len - 1) + "\r\n");
+                            w = Watchdog.guard(stop, c);
+                            int[] code = new int[1];
+                            long[] clen = new long[1];
+                            String[] cr = new String[1];
+                            InputStream in = w.watch(c.respond(code, clen, cr));
+                            if (code[0] != 206 || cr[0] == null || !cr[0].endsWith("/" + total)) throw new Strike("http " + code[0], null);
+                            raf = new RandomAccessFile(part, "rw");
+                            raf.seek(off + done);
+                            byte[] buf = new byte[512 * 1024];
+                            int r, fill = 0;
+                            try {
+                                while (done + fill < len && (r = in.read(buf, fill, (int) Math.min(buf.length - fill, len - done - fill))) > 0) {
+                                    if (stop.get()) throw new IOException("aborted");
+                                    fill += r;
+                                    if (fill == buf.length || done + fill == len) { done += put(raf, buf, fill, got, p); fill = 0; }
+                                }
+                            } finally {
+                                if (fill > 0) done += put(raf, buf, fill, got, p);
+                            }
+                            if (done < len) throw new IOException("connection closed early");
+                        } catch (IOException e) {
+                            lastErr = w != null && w.ended() != null ? new Strike(w.ended(), e) : e;
+                            if (stop.get()) throw lastErr;
+                            if ((done == before || lastErr instanceof Strike) && ++fails >= DOWN_FAILS) break;
+                            try { Thread.sleep(300L * (fails + 1)); } catch (InterruptedException x) { throw lastErr; }
+                        } finally {
+                            if (w != null) w.close();
+                            try { if (raf != null) raf.close(); } catch (Throwable e) { /* ignore */ }
+                            if (c != null) c.close();
                         }
                     }
                     if (done < len) throw lastErr != null ? lastErr : new IOException("incomplete");

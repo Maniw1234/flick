@@ -38,7 +38,7 @@
         },
       };
     });
-    if (st.connected) items.push({ label: 'Disconnect', icon: 'off', danger: true, run: () => { st.wantResume = false; A.closeLink(); A.showScreen('pair'); A.openLinkSoon(); } });
+    if (st.connected) items.push({ label: 'Disconnect', icon: 'off', danger: true, run: () => { st.wantResume = false; st.noAuto = true; A.closeLink(); A.showScreen('pair'); A.openLinkSoon(); } });
     A.openSheet(st.connected ? 'Connected to ' + st.pc.name : 'Choose your PC', items);
     return true;
   });

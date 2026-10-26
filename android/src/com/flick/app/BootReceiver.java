@@ -15,6 +15,8 @@ public class BootReceiver extends BroadcastReceiver {
         if (!Intent.ACTION_BOOT_COMPLETED.equals(a) && !Intent.ACTION_MY_PACKAGE_REPLACED.equals(a)) return;
         try { if (Features.bg(c)) LinkService.start(c); } catch (Throwable e) { Bg.warn("boot: link", e); }
         try { FlickWidget.refresh(c); } catch (Throwable e) { Bg.warn("boot: widget", e); }
+        // sends that were under way carry on once there's a network (the job finds nothing to do if none were)
+        try { ResumeJob.schedule(c, 5000); } catch (Throwable e) { Bg.warn("boot: sends", e); }
         // the job check reads a file: off the main thread, with the broadcast kept open until it's done
         final Context app = c.getApplicationContext();
         final PendingResult done = goAsync();

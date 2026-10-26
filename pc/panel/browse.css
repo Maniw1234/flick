@@ -1,0 +1,75 @@
+/* Browse phone (browse.js): the tabs, the folder path, the grid of files with thumbnails, the picks bar and a copy's progress */
+
+.whead .bref { margin-left: auto; width: 32px; height: 32px; }
+.whead .bref svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+
+.btabs { flex: none; display: flex; gap: 5px; padding: 0 16px 10px; overflow-x: auto; scrollbar-width: none; }
+.btabs::-webkit-scrollbar { display: none; }
+.btabs button { flex: none; border: 0; border-radius: 14px; padding: 5px 10px; background: rgba(255,255,255,0.06); color: var(--sub); font-size: 12.5px; cursor: pointer; }
+.btabs button:hover { background: rgba(255,255,255,0.1); color: var(--text); }
+.btabs button.on { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+
+.bcrumbs { flex: none; display: flex; align-items: center; gap: 2px; padding: 0 16px 8px; overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
+.bcrumbs::-webkit-scrollbar { display: none; }
+.bcrumb { flex: none; border: 0; background: transparent; color: var(--accent); padding: 2px 4px; border-radius: 4px; font-size: 12.5px; cursor: pointer; max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
+.bcrumb:hover { background: rgba(255,255,255,0.06); }
+.bcrumb.on { color: var(--text); font-weight: 600; cursor: default; }
+.bcrumb.on:hover { background: transparent; }
+.bsep { flex: none; width: 10px; height: 10px; fill: none; stroke: var(--sub); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+
+.bbody { padding-top: 0; }
+.bgrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 8px; }
+.btile { position: relative; display: flex; flex-direction: column; align-items: stretch; gap: 0; min-width: 0; border: 0; padding: 0; background: transparent; text-align: left; cursor: pointer; border-radius: 8px; }
+.btile:focus-visible { outline-offset: 1px; }
+.bth { position: relative; display: grid; place-items: center; aspect-ratio: 1; border-radius: 7px; overflow: hidden; background: var(--card); }
+.btile:hover .bth { background: var(--card-hi); }
+.bth img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.btile:hover .bth img { filter: brightness(1.06); }
+.bname { margin: 5px 2px 0; font-size: 12px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bmeta { margin: 0 2px; color: var(--sub); font-size: 11px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bfolder { width: 46%; height: 46%; fill: var(--accent); opacity: .9; }
+.bdoc { position: relative; display: grid; place-items: center; width: 42%; aspect-ratio: 1; }
+.bdoc svg { width: 100%; height: 100%; fill: none; stroke: var(--sub); stroke-width: 1.5; stroke-linejoin: round; }
+.bext { position: absolute; left: 50%; bottom: 14%; transform: translateX(-50%); padding: 1px 4px; border-radius: 3px; background: var(--accent); color: var(--on-accent); font-size: 9px; font-weight: 700; letter-spacing: .03em; }
+.bplay { position: absolute; left: 50%; top: 50%; width: 26px; height: 26px; margin: -13px 0 0 -13px; padding: 6px 5px 6px 7px; border-radius: 50%; background: rgba(0,0,0,0.5); fill: #fff; }
+.bdur { position: absolute; right: 5px; bottom: 5px; padding: 1px 5px; border-radius: 4px; background: rgba(0,0,0,0.6); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+/* picked: an accent ring and a filled check; a faint empty check shows on hover */
+.bcheck { position: absolute; top: 6px; right: 6px; width: 18px; height: 18px; border-radius: 50%; border: 1.5px solid rgba(255,255,255,0.85); background: rgba(0,0,0,0.25); opacity: 0; transition: opacity .12s; }
+.btile:hover .bcheck, .btile:focus-visible .bcheck { opacity: 1; }
+.btile.sel .bth { box-shadow: inset 0 0 0 2px var(--accent); }
+.btile.sel .bth img { transform: scale(.92); border-radius: 4px; transition: transform .12s; }
+.btile.sel .bcheck { opacity: 1; border-color: var(--accent); background: var(--accent); }
+.btile.sel .bcheck::after { content: ''; position: absolute; left: 5px; top: 1.5px; width: 4px; height: 8px; border: solid var(--on-accent); border-width: 0 2px 2px 0; transform: rotate(45deg); }
+.btile.bskel { cursor: default; }
+.btile.bskel .bth { animation: bpulse 1.2s ease-in-out infinite; }
+.btile.bskel .bname { height: 10px; width: 70%; border-radius: 3px; background: var(--card); animation: bpulse 1.2s ease-in-out infinite; }
+@keyframes bpulse { 50% { opacity: .55; } }
+@media (prefers-reduced-motion: reduce) { .btile.bskel .bth, .btile.bskel .bname { animation: none; } }
+
+.bmsg { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 56px 18px 0; }
+.bmsg .psub { line-height: 1.45; max-width: 300px; }
+.bmsg .btn { margin-top: 18px; padding: 7px 20px; }
+.bmore { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 16px 0 4px; color: var(--sub); font-size: 12px; }
+.bspin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.18); border-top-color: var(--accent); animation: bspin .8s linear infinite; }
+@keyframes bspin { to { transform: rotate(360deg); } }
+
+/* the bottom bars: over the end of the list, which gets room to scroll past them */
+#bView.hasbar .bbody { padding-bottom: 86px; }
+.bbar, .bjob { position: absolute; left: 12px; right: 12px; bottom: 12px; z-index: 2; border-radius: 8px; background: #2d2d2d; border: 1px solid rgba(255,255,255,0.09);
+  box-shadow: 0 8px 28px rgba(0,0,0,0.45); animation: bup .2s cubic-bezier(.2,.9,.3,1); }
+@keyframes bup { from { transform: translateY(12px); opacity: 0; } }
+.bbar { display: flex; align-items: center; gap: 10px; padding: 10px 10px 10px 14px; }
+.bseltxt { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 10px; white-space: nowrap; overflow: hidden; }
+.bseltxt span { overflow: hidden; text-overflow: ellipsis; }
+.bseltxt .link { flex: none; padding: 0; font-size: 12.5px; }
+.bbar .btn { flex: none; padding: 7px 16px; }
+.bbar .btn:disabled { opacity: .45; cursor: default; filter: none; }
+.bjob { padding: 10px 10px 10px 14px; }
+.bjrow { display: flex; align-items: center; gap: 10px; }
+.bjtxt { flex: 1; min-width: 0; }
+.bjt { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bjs { color: var(--sub); font-size: 12px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bjob.bad .bjt { color: #ff99a4; }
+.bjob .link { flex: none; padding: 2px 0; font-size: 12.5px; }
+.bjbar { height: 3px; margin-top: 9px; border-radius: 2px; background: rgba(255,255,255,0.12); overflow: hidden; }
+.bjbar i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 2px; transition: width .3s ease; }

@@ -310,3 +310,55 @@ button.srow:active { background: rgba(255,255,255,0.06); }
 .sseg { display: flex; flex: none; background: rgba(255,255,255,0.08); border-radius: 9px; padding: 2px; }
 .sseg button { padding: 6px 14px; border-radius: 7px; font-size: 14px; font-weight: 600; color: #c7c7cc; }
 .sseg button.on { background: #636366; color: #fff; }
+
+/* ---------------- header: search, sort, grid/list ---------------- */
+.hacts { display: flex; gap: 2px; margin-left: auto; margin-right: -8px; flex: none; }
+.hic { position: relative; width: 38px; height: 38px; border-radius: 19px; display: grid; place-items: center; color: #e5e5ea; }
+.hic:active { background: rgba(255,255,255,0.12); }
+.hic svg { width: 22px; height: 22px; }
+.hic.dot::after { content: ''; position: absolute; right: 6px; top: 7px; width: 6px; height: 6px; border-radius: 50%; background: var(--ring); box-shadow: 0 0 6px var(--ring-glow); }
+body.selecting .hacts { display: none; }
+@media (max-width: 380px) { .htitle { font-size: 23px; } .hic { width: 34px; } }
+.hsearch { display: none; align-items: center; gap: 4px; padding: 0 16px; height: 44px; }
+body.searching .hrow { display: none; }
+body.searching .hsearch { display: flex; }
+body.searching.selecting .hrow { display: flex; }      /* selecting results: the selection's own header */
+body.searching.selecting .hsearch { display: none; }
+.sfield { flex: 1; min-width: 0; height: 38px; display: flex; align-items: center; gap: 8px; padding: 0 4px 0 12px; border-radius: 19px; background: rgba(255,255,255,0.1); color: #8e8e93; }
+.sfield > svg { width: 18px; height: 18px; flex: none; }
+.sfield input { flex: 1; min-width: 0; height: 100%; padding: 0; border: 0; outline: none; background: none; color: #fff; font: inherit; font-size: 16px; font-weight: 500;
+  user-select: text; -webkit-user-select: text; }
+.sfield input::placeholder { color: #8e8e93; }
+.sfield input::-webkit-search-cancel-button { -webkit-appearance: none; display: none; }
+.sclear { flex: none; width: 30px; height: 30px; border-radius: 15px; display: grid; place-items: center; color: #c7c7cc; }
+.sclear:active { background: rgba(255,255,255,0.12); }
+.sclear svg { width: 18px; height: 18px; }
+/* "Sort by" sheet */
+.sorow { display: flex; align-items: center; gap: 12px; min-height: 52px; padding: 8px 18px 8px 22px; }
+.sorow > span { flex: 1; font-size: 16px; font-weight: 550; }
+.sorow .sseg button { min-width: 86px; padding: 8px 12px; }
+.sorow .sseg button.on { background: #fff; color: #000; }
+/* pinned folders, in the tabs */
+.chip.pin { display: inline-flex; align-items: center; gap: 6px; padding-left: 11px; }
+.chip.pin svg { width: 15px; height: 15px; flex: none; color: #8fb4ff; }
+.chip.pin span { max-width: 150px; overflow: hidden; text-overflow: ellipsis; }
+.chip.pin.on svg { color: #3a5fcc; }
+
+/* ---------------- list view: the grid's cards as rows ---------------- */
+#grid.list .card { height: 64px; display: flex; align-items: center; gap: 14px; }
+#grid.list .card::before { content: ''; position: absolute; inset: 3px -8px; border-radius: 14px; background: transparent; transition: background .15s; pointer-events: none; }
+#grid.list .card:active::before { background: rgba(255,255,255,0.05); }
+body.selecting #grid.list .card.sel::before { background: rgba(255,255,255,0.09); }
+#grid.list .card .thumb { flex: none; width: 48px; border-radius: 11px; }
+#grid.list .card.folder .thumb svg { width: 64%; }
+#grid.list .card .meta { flex: 1; min-width: 0; height: auto; padding: 0 34px 0 0; }
+#grid.list .card .name { font-size: 15px; font-weight: 600; text-overflow: ellipsis; }
+#grid.list .card .info { margin-top: 3px; font-size: 12.5px; }
+#grid.list .card .more { top: 50%; right: -8px; margin-top: -15px; width: 36px; height: 30px; }
+#grid.list .badge, #grid.list .card .dur { display: none; }
+#grid.list .playb { width: 22px; height: 22px; margin: -11px 0 0 -11px; }
+#grid.list .playb::after { left: 8px; top: 6px; border-left-width: 8px; border-top-width: 5px; border-bottom-width: 5px; }
+#grid.list .doclines { left: 20%; right: 20%; top: 18%; bottom: 20%; background: repeating-linear-gradient(180deg, rgba(60,60,67,0.24) 0 2px, transparent 2px 6px); }
+#grid.list .card .prog { right: 10px; top: 10px; }
+#grid.list .card .check { left: 12px; top: 12px; }
+body.selecting #grid.list .card.sel .thumb { transform: translateZ(0) scale(.86); border-radius: 13px; }

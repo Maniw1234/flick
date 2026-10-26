@@ -82,6 +82,7 @@ final class Page {
             public void run() {
                 featuresChanged();
                 AutoSend.ensure(app);
+                Feedback.flushLater(app);
             }
         });
     }

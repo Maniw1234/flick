@@ -49,8 +49,9 @@ After each release, on the computer that has the key:
 
     node signing/sign_release.js <version> [--key flick-update-key.pem] [--dry-run]
 
-It downloads the release, checks every file against `SHA256SUMS` and that `flick-app-<version>.zip` is that version,
-signs, uploads `SHA256SUMS.sig` and reads it back. Where a file can't be uploaded from (a network that only lets JSON
+It downloads the release, checks every file against `SHA256SUMS` and that the app bundles (`flick-app-<version>.zip`
+and its Mac and Linux kin `flick-app-mac-<version>.zip`, `flick-app-linux-<version>.zip`) are that version, signs,
+uploads `SHA256SUMS.sig` and reads it back. Where a file can't be uploaded from (a network that only lets JSON
 requests through), it sends the signature as text to the "Attach release signature" workflow
 (`.github/workflows/attach-signature.yml`), which checks it against the release key before attaching it; `--via-workflow`
 goes that way directly. Only the signature reaches GitHub, never the key. If the release already has one, it only

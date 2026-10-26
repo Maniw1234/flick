@@ -7,6 +7,7 @@ const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 // Flick only sends small JSON control frames over the socket (files go over HTTP), so a few MB is already generous.
 // Caps stop a hostile peer from making us buffer without limit (a single giant frame, or endless unfinished fragments).
 const MAX_MESSAGE = 4 * 1024 * 1024;
+const OPCODES = new Set([0x0, 0x1, 0x2, 0x8, 0x9, 0xA]);   // continuation, text, binary, close, ping, pong
 
 class WSConnection extends EventEmitter {
   constructor(socket, req) {
@@ -41,7 +42,11 @@ class WSConnection extends EventEmitter {
     this.emit('close');
   }
 
+  // a peer that broke the protocol: nothing more it sends is read, and the connection closes
+  _refuse() { this._dead = true; this._buf = Buffer.alloc(0); this._parts = []; this.close(); }
+
   _onData(d) {
+    if (this._dead) return;
     // a big frame trickling in must not be re-copied on every packet: collect, and join once it's complete
     if (this._need && this._buf.length + this._have + d.length < this._need) { this._parts.push(d); this._have += d.length; return; }
     if (this._parts.length) { this._parts.push(d); d = Buffer.concat(this._parts); this._parts = []; this._have = 0; }
@@ -53,6 +58,9 @@ class WSConnection extends EventEmitter {
       const fin = (b[0] & 0x80) !== 0;
       const opcode = b[0] & 0x0f;
       const masked = (b[1] & 0x80) !== 0;
+      // a client masks every frame, no extension is agreed (so the reserved bits stay 0), and only these opcodes
+      // exist (RFC 6455 5.1-5.2): anything else ends the connection
+      if (!masked || (b[0] & 0x70) !== 0 || !OPCODES.has(opcode)) { this._refuse(); return; }
       let len = b[1] & 0x7f;
       let off = 2;
       if (len === 126) {
@@ -63,9 +71,9 @@ class WSConnection extends EventEmitter {
         const hi = b.readUInt32BE(2), lo = b.readUInt32BE(6);
         len = hi * 4294967296 + lo; off = 10;
       }
-      if (len > MAX_MESSAGE) { this.close(); return; }
+      if (len > MAX_MESSAGE) { this._refuse(); return; }
       // a fragmented message is the sum of its pieces; refuse one that grows past the cap before it finishes
-      if (opcode === 0x0 && this._frag && this._frag.len + len > MAX_MESSAGE) { this.close(); return; }
+      if (opcode === 0x0 && this._frag && this._frag.len + len > MAX_MESSAGE) { this._refuse(); return; }
       let mask = null;
       if (masked) {
         if (b.length < off + 4) return;

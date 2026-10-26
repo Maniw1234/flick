@@ -30,19 +30,28 @@ public class TransferService extends Service {
 
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     // main thread only
+    private static final java.util.Set<String> HOLDERS = new java.util.HashSet<String>();   // who wants it: "transfers", "sends"
     private static boolean wanted;                  // some transfer is running
     private static boolean starting;                // asked Android to start it; onStartCommand not seen yet
     private static TransferService running;
+    // what the notification says (Sends keeps it current); null: the plain "Moving files with your PC"
+    private static String title, text;
+    private static int progress = -1;
+    private static long shownAt;
 
     /** Any thread: transfers are running (on) or all finished (off). Never throws. */
-    static void want(Context c, final boolean on) {
+    static void want(Context c, final boolean on) { want(c, "transfers", on); }
+
+    /** Any thread: who (one of several users of the service) needs it now (on) or not any more (off). */
+    static void want(Context c, final String who, final boolean on) {
         final Context app = c.getApplicationContext();
         MAIN.post(new Runnable() {
             @Override
             public void run() {
-                wanted = on;
+                if (on) HOLDERS.add(who); else HOLDERS.remove(who);
+                wanted = !HOLDERS.isEmpty();
                 MAIN.removeCallbacks(STOP);
-                if (!on) {
+                if (!wanted) {
                     if (running != null) MAIN.postDelayed(STOP, LINGER_MS);
                     return;
                 }
@@ -56,6 +65,32 @@ public class TransferService extends Service {
                 }
             }
         });
+    }
+
+    /** Any thread: what the notification says (null title: the plain text); progress 0-100, or -1 for none. */
+    static void say(Context c, final String t, final String x, final int p) {
+        MAIN.post(new Runnable() {
+            @Override
+            public void run() {
+                boolean same = (t == null ? title == null : t.equals(title)) && (x == null ? text == null : x.equals(text)) && p == progress;
+                title = t; text = x; progress = p;
+                TransferService s = running;
+                if (same || s == null) return;
+                long now = android.os.SystemClock.elapsedRealtime();
+                if (now - shownAt < 700) { MAIN.removeCallbacks(REFRESH); MAIN.postDelayed(REFRESH, 700); return; }
+                s.refresh();
+            }
+        });
+    }
+
+    private static final Runnable REFRESH = new Runnable() { @Override public void run() { TransferService s = running; if (s != null) s.refresh(); } };
+
+    private void refresh() {
+        shownAt = android.os.SystemClock.elapsedRealtime();
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm != null) nm.notify(ID, notification());
+        } catch (Throwable e) { /* the notification only */ }
     }
 
     private static final Runnable STOP = new Runnable() {
@@ -100,9 +135,11 @@ public class TransferService extends Service {
     private Notification notification() {
         Notification.Builder b = Build.VERSION.SDK_INT >= 26 ? Api26.builder(this) : new Notification.Builder(this).setPriority(Notification.PRIORITY_LOW);
         Intent open = new Intent(this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        if (progress >= 0) b.setProgress(100, progress, false);
         return b.setSmallIcon(android.R.drawable.stat_sys_upload)
-                .setContentTitle("Flick")
-                .setContentText("Moving files with your PC")
+                .setContentTitle(title != null ? title : "Flick")
+                .setContentText(title != null && text != null ? text : "Moving files with your PC")
+                .setOnlyAlertOnce(true)
                 .setOngoing(true)
                 .setShowWhen(false)
                 .setLocalOnly(true)

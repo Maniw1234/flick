@@ -111,6 +111,19 @@ final class Bridge {
     @JavascriptInterface public void setPref(String k, String v) { prefs.edit().putString("p:" + k, v == null ? "" : v).apply(); }
 
     @JavascriptInterface public void discover(boolean on) { a.discovery().setActive(on); }
+    /** ips (a JSON array): where paired PCs were seen before; discovery asks there directly too. */
+    @JavascriptInterface
+    public void discoverKnown(String ips) {
+        try {
+            JSONArray arr = new JSONArray(ips);
+            ArrayList<String> out = new ArrayList<String>();
+            for (int i = 0; i < arr.length() && out.size() < 24; i++) {
+                String ip = arr.optString(i, "");
+                if (ip.matches("\\d{1,3}(\\.\\d{1,3}){3}")) out.add(ip);
+            }
+            a.discovery().setKnown(out.toArray(new String[0]));
+        } catch (Throwable e) { /* ignore */ }
+    }
 
     // ---------------- phone storage (file manager) ----------------
     @JavascriptInterface
@@ -214,6 +227,32 @@ final class Bridge {
         a.io().execute(new Runnable() { @Override public void run() { a.result(req, Files.query(a, cat, Math.max(0, offset), Math.max(1, Math.min(600, limit)))); } });
     }
 
+    /** queryAsync in another order (sort, see Files.query), only files whose name has the words of q ("" for all). */
+    @JavascriptInterface
+    public void querySorted(final String req, final String cat, final int offset, final int limit, final String sort, final String q) {
+        a.io().execute(new Runnable() {
+            @Override
+            public void run() {
+                String words = q == null ? "" : q.length() > 100 ? q.substring(0, 100) : q;
+                a.result(req, Files.query(a, cat, Math.max(0, offset), Math.max(1, Math.min(600, limit)), sort, words));
+            }
+        });
+    }
+
+    /**
+     * Where the page can load a whole file from (the preview shows photos and plays videos from it): a file:// URL for a
+     * file in shared storage (path) or in the Flick list (id), "" for anything else.
+     */
+    @JavascriptInterface
+    public String mediaUrl(String path, String id) {
+        try {
+            File f = null;
+            if (path != null && path.length() > 0) { File p = new File(path); if (Files.allowed(p)) f = p; }
+            else if (id != null && id.length() > 0) f = Library.get(a).file(id);
+            return f != null && f.isFile() ? Uri.fromFile(f).toString() : "";
+        } catch (Throwable e) { return ""; }
+    }
+
     @JavascriptInterface
     public String thumbPath(String path, String mtime, String mid, String mt) {
         return Thumbs.base64(a, path, Thumbs.parse(mtime), Thumbs.parse(mid), (int) Thumbs.parse(mt));
@@ -276,6 +315,29 @@ final class Bridge {
     @JavascriptInterface
     public void pick(final String kind) {
         a.runOnUiThread(new Runnable() { @Override public void run() { a.launchPicker(kind); } });
+    }
+
+    // ---------------- sends that survive Flick closing and carry on (protocol 7 PCs, see Sends/Outbox) ----------------
+    /** spec: {pc:{id,name,ip,port,via}, items:[{path|id,name,dir}], committed, skipDup, parallel}; "ok" or why not. */
+    @JavascriptInterface public String sendStart(String tid, String spec) { return Sends.get(a).start(tid, spec); }
+    @JavascriptInterface public void sendCommit(String tid) { Sends.get(a).box.commit(tid); }
+    @JavascriptInterface public void sendPause(String tid) { Sends.get(a).box.pause(tid); }
+    @JavascriptInterface public void sendResume(String tid) { Sends.get(a).box.resume(tid); }
+    @JavascriptInterface public void sendCancel(String tid) { Sends.get(a).box.cancel(tid); }
+    @JavascriptInterface public void sendRetry(String tid) { Sends.get(a).box.retry(tid); }
+    @JavascriptInterface public void sendForget(String tid) { Sends.get(a).box.forget(tid); }
+    /** The PC turned a send down ("Ask each time": why declined | timeout). */
+    @JavascriptInterface public void sendRefused(String tid, String why) { Sends.get(a).box.refused(tid, why); }
+    @JavascriptInterface public String sendList() { return Sends.get(a).list(); }
+    /** The page reached pcId at host:port over via: sends waiting for it go there. */
+    @JavascriptInterface public void sendRelink(String pcId, String host, int port, String via) { Sends.get(a).relink(pcId, host, port, via); }
+
+    /** Settings › Speed test: answers as a "res" event {ok, up, down (bytes/s), wifi:{mhz, mbps}} or {ok:false, why}. */
+    @JavascriptInterface
+    public void speedTest(final String req, final String pcId, final String host, final int port, final String via) {
+        LINKS.execute(new Runnable() {
+            @Override public void run() { a.result(req, SpeedTest.run(a.getApplicationContext(), pcId, host, port, via)); }
+        });
     }
 
     @JavascriptInterface public void upload(String tid, String id, String url) { a.transfers().upload(tid, id, url); }
@@ -401,7 +463,8 @@ final class Bridge {
             public void run() {
                 try {
                     if (!Features.clipFromPc(a)) return;
-                    Clip.write(a, new JSONObject(json), prefs.getString("p:lastPcName", ""));
+                    JSONObject m = new JSONObject(json);
+                    if (Clip.write(a, m, prefs.getString("p:lastPcName", "")) != null) ClipHistory.add(a, "in", m, prefs.getString("p:lastPc", ""), prefs.getString("p:lastPcName", ""));
                 } catch (Throwable e) { Bg.warn("clipWrite", e); }
             }
         });
@@ -435,6 +498,26 @@ final class Bridge {
         try { Features.set(a, name, value); } catch (Throwable e) { Bg.warn("setFeature", e); }
     }
 
+    // ---------------- Lock Flick (AppLock) ----------------
+    /** {"on", "secure": the phone has a screen lock to unlock Flick with, "sdk"}. */
+    @JavascriptInterface
+    public String lockState() {
+        AppLock l = a.lock();
+        return l == null ? "{}" : l.state();
+    }
+
+    /** On asks for the phone's lock once first; the answer is a "lock-state" event ({on, why}). */
+    @JavascriptInterface
+    public void setLock(final boolean on) {
+        a.runOnUiThread(new Runnable() { @Override public void run() { if (a.lock() != null) a.lock().set(on); } });
+    }
+
+    /** Android's security settings, to set a screen lock up. */
+    @JavascriptInterface
+    public void lockSetup() {
+        a.runOnUiThread(new Runnable() { @Override public void run() { if (a.lock() != null) a.lock().openSettings(); } });
+    }
+
     @JavascriptInterface public String history() { return Bg.history(a).json(); }
 
     @JavascriptInterface
@@ -458,6 +541,52 @@ final class Bridge {
     @JavascriptInterface public void syncAdd(String phoneFolderPath) { SyncManager.add(a, phoneFolderPath); }
     @JavascriptInterface public void syncRemove(String id) { SyncManager.remove(a, id); }
     @JavascriptInterface public void syncNow() { SyncManager.syncAll(a, true); }
+
+    /**
+     * Browse phone: a request from the PC that came over the page's link (the PC with id pcId). Browse answers that PC
+     * itself, over its pinned link, and only while "Let your PC browse this phone" is on.
+     */
+    @JavascriptInterface
+    public void browse(String json, String pcId) {
+        try { Browse.handle(a, new JSONObject(json), pcId); } catch (Throwable e) { Bg.warn("browse", e); }
+    }
+
+    // ---------------- clipboard history (ClipHistory) ----------------
+    @JavascriptInterface public String clipHistory() { return ClipHistory.listJson(a); }
+
+    /** The page sent a clipboard to the PC over its link ({kind, text | png}): kept as "out" (the app keeps "in" itself). */
+    @JavascriptInterface
+    public void clipHistoryAdd(String dir, String json) {
+        if (!"out".equals(dir)) return;
+        try { ClipHistory.addLater(a, "out", new JSONObject(json), prefs.getString("p:lastPc", ""), prefs.getString("p:lastPcName", "")); }
+        catch (Throwable e) { Bg.warn("clipHistoryAdd", e); }
+    }
+
+    /** An entry as the clipboard message the PC takes ({kind, text | png}), for the page's link; "" when it's gone. */
+    @JavascriptInterface
+    public String clipHistoryGet(String id) {
+        JSONObject m = ClipHistory.content(a, id);
+        return m == null ? "" : m.toString();
+    }
+
+    /** Tap to copy: the entry goes back on this phone's clipboard. */
+    @JavascriptInterface public boolean clipHistoryCopy(String id) { return ClipHistory.copy(a, id); }
+
+    /** Send to PC without the page's link (the app reaches the PC itself); the outcome shows as a toast. */
+    @JavascriptInterface
+    public void clipHistorySend(String id) {
+        ClipHistory.send(a, id, new Actions.Report() { @Override public void say(String msg) { a.toast(msg); } });
+    }
+
+    @JavascriptInterface public void clipHistoryRemove(String id) { ClipHistory.remove(a, id); }
+    @JavascriptInterface public void clipHistoryClear() { ClipHistory.clear(a); }
+
+    // ---------------- Settings > Send feedback (Feedback) ----------------
+    /** {ready, device, crash, crashAt, waiting}: what the form shows, so the user sees exactly what would be sent. */
+    @JavascriptInterface public String feedbackInfo() { return Feedback.info(a).toString(); }
+
+    /** {type, message, email, device, crash}: posted by the app; answers with a "feedback" event. */
+    @JavascriptInterface public void feedbackSend(String json) { Feedback.send(a, json); }
 
     /**
      * "Save to the Flick list" for a link that was shared to Flick (event share-link): saved as a text item, like other

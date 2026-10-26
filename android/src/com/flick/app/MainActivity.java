@@ -51,13 +51,24 @@ public class MainActivity extends Activity {
     private volatile boolean ready = false;
     private final ArrayList<String> queue = new ArrayList<String>();
     private String devId, devName;
+    private AppLock lock;                            // "Lock Flick" (Settings)
+
+    AppLock lock() { return lock; }
 
     // ------------------------------------------------------------ lifecycle
     @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        // Flick closed unexpectedly last time: say what happened (once), instead of starting as usual
+        String crash = null;
+        try { crash = CrashReport.take(this); } catch (Throwable e) { /* ignore */ }
+        if (crash != null && !crash.contains("CrashActivity")) {     // (never a loop of crash screens)
+            try { startActivity(new Intent(this, CrashActivity.class).putExtra(CrashActivity.EXTRA, crash)); finish(); return; }
+            catch (Throwable e) { /* start as usual */ }
+        }
         Page.attach(this);                           // background features reach the page through it
+        lock = new AppLock(this);
         setupWindow();
 
         web = new WebView(this);
@@ -121,12 +132,15 @@ public class MainActivity extends Activity {
             }
         });
         setContentView(web);
+        lock.onCreate();                             // covered from the start when Flick is locked
         web.loadUrl("file:///android_asset/www/index.html");
         // a share is handled once: not again when Android restores the activity after killing the app (state != null)
         if (state == null) handleIntent(getIntent());
         io().execute(new Runnable() {
             @Override
             public void run() {
+                // sends that were under way when Flick was closed carry on (Sends reads what was written down)
+                try { Sends.get(getApplicationContext()); } catch (Throwable e) { Log.w(TAG, "sends: " + e); }
                 try { Updater.cleanupInstalled(getApplicationContext()); } catch (Throwable e) { /* ignore */ }
                 // what a killed app left half-done: downloads in Download/Flick, imports onto the shelf
                 try { if (Files.granted(getApplicationContext())) Files.sweepParts(); } catch (Throwable e) { /* ignore */ }
@@ -143,6 +157,12 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        if (lock != null) lock.onStart();            // locks again after more than 30 s away
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         if (web != null) web.onResume();
@@ -151,17 +171,26 @@ public class MainActivity extends Activity {
         Updater u = Updater.peek();
         if (u != null) u.onResume(this);
         Page.onResume(this);                         // features
+        if (lock != null) lock.onResume();
     }
 
     @Override
     protected void onPause() {
         onScreen = false;
         emitEvent("pause");
+        if (lock != null) lock.onPause();
         super.onPause();
     }
 
     @Override
+    protected void onStop() {
+        if (lock != null) lock.onStop();
+        super.onStop();
+    }
+
+    @Override
     protected void onDestroy() {
+        if (lock != null) lock.onDestroy();
         Page.detach(this);                           // features
         Updater u = Updater.peek();
         if (u != null) u.detach(this);
@@ -179,6 +208,7 @@ public class MainActivity extends Activity {
     @SuppressWarnings("deprecation")
     @Override
     public void onBackPressed() {
+        if (lock != null && lock.onBack()) return;
         if (web == null) { super.onBackPressed(); return; }
         web.evaluateJavascript("(window.__back&&window.__back())?'1':'0'", new ValueCallback<String>() {
             @Override
@@ -205,7 +235,7 @@ public class MainActivity extends Activity {
             w.setNavigationBarContrastEnforced(false);
         }
         if (Build.VERSION.SDK_INT >= 30) {
-            Api30.edgeToEdge(w);
+            try { Api30.edgeToEdge(w); } catch (Throwable e) { Log.w(TAG, "edge to edge: " + e); }   // looks only: never fatal
         } else {
             w.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE
                     | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
@@ -243,6 +273,8 @@ public class MainActivity extends Activity {
     static final class Api30 {
         static void edgeToEdge(Window w) {
             w.setDecorFitsSystemWindows(false);
+            // the controller belongs to the window's decor view: make it first (Android 17 crashes when there's none yet)
+            w.getDecorView();
             WindowInsetsController c = w.getInsetsController();
             if (c != null) c.setSystemBarsAppearance(0, WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
         }
@@ -455,6 +487,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
+        if (lock != null && lock.onResult(req, res)) return;
         if (req != REQ_PICK || res != RESULT_OK || data == null) return;
         ArrayList<Uri> uris = new ArrayList<Uri>();
         ClipData cd = data.getClipData();

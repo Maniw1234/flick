@@ -179,9 +179,11 @@ public class AutoSend extends JobService {
                 if (!save(c, q, g)) return;
             } catch (PcClient.Failure f) {
                 if (f.is(PcClient.Failure.REFUSED) || f.is(PcClient.Failure.LOCAL)) {
-                    boolean givenUp = q.failed(it);
+                    String no = Bg.declined(f);                          // the PC's user said no: it isn't asked again
+                    boolean givenUp;
+                    if (no != null) { q.gone(it); givenUp = true; } else givenUp = q.failed(it);
                     if (!save(c, q, g)) return;
-                    if (givenUp) history(c, it, false, t);
+                    if (givenUp) history(c, it, false, t, no);
                     continue;
                 }
                 // the PC is away, not paired any more, or this was stopped: everything waits for the next try
@@ -205,9 +207,11 @@ public class AutoSend extends JobService {
         finally { try { fd.close(); } catch (Throwable e) { /* ignore */ } }
     }
 
-    private static void history(Context c, AutoSendQueue.Item it, boolean ok, PcClient.Target t) {
+    private static void history(Context c, AutoSendQueue.Item it, boolean ok, PcClient.Target t) { history(c, it, ok, t, null); }
+
+    private static void history(Context c, AutoSendQueue.Item it, boolean ok, PcClient.Target t, String why) {
         String kind = it.mime != null && it.mime.startsWith("video/") ? "video" : "image";
-        Bg.historyAdd(c, "out", it.name, it.size, it.path, kind, "auto", ok, t);
+        Bg.historyAdd(c, "out", it.name, it.size, it.path, kind, "auto", ok, t, why);
     }
 
     // ------------------------------------------------------------ the media index

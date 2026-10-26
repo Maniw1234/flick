@@ -41,6 +41,50 @@
     box.appendChild(s);
   }
 
+  // "On another Wi-Fi?": this PC's own Wi-Fi network, joined from the first code; the page from the second
+  function renderHot(w) {
+    const h = w.hot || { can: false, state: 'off' };
+    $('webHotCard').hidden = !h.can || !w.on;
+    const on = h.state === 'on';
+    $('webHotBox').hidden = !(on && h.qr);
+    $('webStep2').hidden = !(on && h.qr);
+    if (on && h.qr) {
+      const box = $('webHotQr');
+      box.textContent = '';
+      const px = Math.max(1, Math.floor(180 / h.qr.n)) * h.qr.n;
+      const NS = 'http://www.w3.org/2000/svg';
+      const s = document.createElementNS(NS, 'svg');
+      s.setAttribute('viewBox', '0 0 ' + h.qr.n + ' ' + h.qr.n);
+      s.setAttribute('width', px); s.setAttribute('height', px);
+      const p = document.createElementNS(NS, 'path'); p.setAttribute('d', h.qr.d); s.appendChild(p);
+      box.appendChild(s);
+      const t = $('webHotText');
+      t.textContent = '';
+      t.append('Wi-Fi ', el('b', 'mono', h.ssid), ' · password ', el('b', 'mono', h.pass));
+    }
+    const title = $('webHotTitle'), sub = $('webHotSub'), btn = $('webHotBtn');
+    sub.classList.remove('bad');
+    btn.disabled = h.state === 'starting';
+    if (on) {
+      title.textContent = 'This PC’s Wi-Fi is on';
+      sub.textContent = (h.kind === 'mobile' ? 'Windows Mobile hotspot: devices that join also get the internet.' : h.kind === 'nm' ? 'This PC’s own Wi-Fi connection is paused meanwhile.' : 'It stays on while Flick shares.') +
+        (h.ready ? '' : h.lost ? ' If the page doesn’t open, choose this network under Network below.' : ' Getting its address…');
+      btn.textContent = 'Turn off';
+    } else if (h.state === 'starting') {
+      title.textContent = 'Starting this PC’s Wi-Fi…';
+      sub.textContent = 'This takes a few seconds.';
+      btn.textContent = 'Start';
+    } else {
+      title.textContent = 'On another Wi-Fi?';
+      if (h.state === 'error') {
+        sub.textContent = h.why + (w.isWin ? '. You can also turn on the Mobile hotspot in Windows Settings, then choose Hotspot under Network.' : '.');
+        sub.classList.add('bad');
+      }
+      else sub.textContent = 'This PC can make a Wi-Fi network for devices that aren’t on its network.';
+      btn.textContent = 'Start';
+    }
+  }
+
   function render() {
     const w = W || { on: false, browsers: [], files: [], texts: [], addrs: [] };
     // the entry on the main view
@@ -64,6 +108,7 @@
       return;
     }
     renderQr(w.qr);
+    renderHot(w);
     $('webUrl').textContent = w.url || (w.on ? 'No network. Connect this PC to Wi-Fi or a network cable.' : '');
     $('webCopy').hidden = !w.url;
     const net = $('webNet');
@@ -203,6 +248,7 @@
   };
   $('webBack').onclick = () => showView(false);
   $('webStop').onclick = () => send('stop');
+  $('webHotBtn').onclick = () => send(W && W.hot && W.hot.state === 'on' ? 'hot-stop' : 'hot-start');
   $('webAgain').onclick = () => { starting = true; send('start'); render(); };
   $('webAdd').onclick = () => send('pick');
   $('webCopy').onclick = () => { send('copy', { url: true }); $('webCopy').textContent = 'Copied'; setTimeout(() => { $('webCopy').textContent = 'Copy'; }, 1500); };

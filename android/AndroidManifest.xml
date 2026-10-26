@@ -26,6 +26,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- "Lock Flick" (Settings): fingerprint, face or the phone's PIN when Flick opens (AppLock) -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <!-- Phone notifications on the PC show the app's name (apps with a launcher icon are visible) -->
     <queries>
         <intent>
@@ -35,6 +37,7 @@
     </queries>
 
     <application
+        android:name=".FlickApp"
         android:requestLegacyExternalStorage="true"
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
@@ -68,6 +71,13 @@
             </intent-filter>
         </activity>
 
+        <!-- once after Flick closed unexpectedly: what happened, to copy and send (CrashReport) -->
+        <activity
+            android:name=".CrashActivity"
+            android:exported="false"
+            android:theme="@style/Flick"
+            android:excludeFromRecents="true" />
+
         <provider
             android:name=".FilesProvider"
             android:authorities="com.flick.app.files"
@@ -78,6 +88,12 @@
             android:name=".TransferService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- carries on with sends Android stopped (low memory, a battery saver, a restart) once there's a network -->
+        <service
+            android:name=".ResumeJob"
+            android:exported="true"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
 
         <!-- ================= Features ================= -->
         <!-- the background link to the PC (setting "Stay connected in the background") -->

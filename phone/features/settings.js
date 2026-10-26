@@ -40,6 +40,10 @@
         set: (v) => { A.settings.clipSync = v; A.saveSettings(); } });
     }
     rows.push({ label: 'Clipboard from your PC', sub: 'What you copy on your PC is copied here too', on: clipFromPc, set: (v) => set('clipFromPc', v ? '1' : '0') });
+    if (A.has('clipHistory')) {
+      rows.push({ label: 'Clipboard history', sub: 'Keeps the last 20 things copied through Flick, on this phone only',
+        on: val('clipHistory', f.clipHistory !== false ? '1' : '0') === '1', set: (v) => set('clipHistory', v ? '1' : '0') });
+    }
     rows.push({ label: 'Show notifications on your PC', sub: 'Your phone’s notifications pop up on your PC', on: notify,
       set: (v) => { A.pref.set('notifyOn', v ? '1' : '0'); set('notify', v ? '1' : '0'); } });
     if (notify && f.notifyAccess === false) {
@@ -49,6 +53,14 @@
       seg: [['off', 'Off'], ['screenshots', 'Screenshots'], ['photos', 'Photos']], value: auto, set: (v) => set('autoSend', v) });
     if (auto !== 'off' && !A.stg.granted) {
       rows.push({ hint: 'Flick needs access to your photos', sub: 'So that new ones can go to your PC', action: 'Allow', run: () => A.nc('askStorage') });
+    }
+    if (A.has('browse')) {
+      const browse = val('browse', f.browse ? '1' : '0') === '1';
+      rows.push({ label: 'Let your PC browse this phone', sub: 'Your PC can see and copy photos, videos and files. It can’t change or delete them.',
+        on: browse, set: (v) => set('browse', v ? '1' : '0') });
+      if (browse && !A.stg.granted) {
+        rows.push({ hint: 'Flick needs access to your files', sub: 'So that your PC can see them', action: 'Allow', run: () => A.nc('askStorage') });
+      }
     }
     rows.push({ label: 'Stay connected in the background', sub: 'Links, the clipboard and Find my phone work while Flick is closed', on: bg, set: (v) => set('bg', v ? '1' : '0') });
     if (bg && (+f.sdk || 0) >= 33 && f.notifyPerm === false) {

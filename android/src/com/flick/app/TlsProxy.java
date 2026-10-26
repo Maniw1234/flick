@@ -154,6 +154,15 @@ final class TlsProxy {
         }
     }
 
+    /** Connections pinned to the certificate with fingerprint fp (lowercase hex), for code that talks TLS itself (Wire). */
+    static SSLSocketFactory pinned(String fp) throws IOException {
+        if (fp == null || fp.length() == 0) throw new IOException("no pin");
+        return factory(new Pin(fp.toLowerCase(java.util.Locale.US)));
+    }
+
+    /** A TLS connection to host:port through f, handshake done. */
+    static SSLSocket dial(SSLSocketFactory f, String host, int port) throws IOException { return connect(f, host, port); }
+
     private static SSLSocket connect(SSLSocketFactory f, String host, int port) throws IOException {
         Socket raw = new Socket();
         try {

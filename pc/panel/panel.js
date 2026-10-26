@@ -5,6 +5,20 @@
   let S = null;
   let pairDevice = null, pairShownAt = 0;
   const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // the page's own words are Windows'; on a Mac or Linux these lines name what is there instead
+  const OS_TEXT = {
+    mac: {
+      sendSub: 'Or drop files on this window, or on Flick in the menu bar or the Dock. In Finder, right-click a file and choose Open With > Flick.',
+      startupLbl: 'Open Flick when you log in',
+      fNotifySub: 'As notifications on this Mac. Turn it on in Flick on the phone too.',
+    },
+    linux: {
+      sendSub: 'Or drop files on this window. In your file manager, right-click a file and choose Open With > Flick.',
+      sendToLbl: 'Add Flick to your file manager’s Open With menu',
+      startupLbl: 'Start Flick when you log in',
+      fNotifySub: 'As desktop notifications. Turn it on in Flick on the phone too.',
+    },
+  };
 
   function set(key, value) { api.send('panel:set', { key, value }); }
   function act(what, arg) { api.send('panel:action', { what, arg }); }
@@ -37,7 +51,10 @@
     $('openAfter').checked = !!s.openAfter;
     $('showSpeed').checked = !!s.showSpeed;
     $('sendTo').checked = !!s.sendTo;
-    $('sendToRow').hidden = !s.isWin;
+    $('sendToRow').hidden = !s.isWin && s.os !== 'linux';     // a Mac always has Open With and the Dock icon
+    const words = OS_TEXT[s.os];
+    if (words) for (const id of Object.keys(words)) $(id).textContent = words[id];
+    $('btRow').hidden = !s.isWin;                             // Flick's Bluetooth link is a Windows helper
     $('autoUpdate').checked = s.autoUpdate !== false;
     $('bluetooth').checked = !!s.bluetooth;
     $('quickShare').checked = !!s.quickShare;
@@ -53,7 +70,7 @@
     $('sendRow').hidden = !s.connected;
     $('edgeSend').checked = !!s.edgeSend;
     $('startup').checked = !!s.startup;
-    $('startupRow').hidden = !s.isWin;
+    $('startupRow').hidden = !s.isWin && s.os !== 'mac' && s.os !== 'linux';
     if (document.activeElement !== $('name')) $('name').value = s.name || '';
     $('addr').textContent = (s.ips && s.ips.length ? s.ips.slice(0, 3).join(', ') : 'No network') + (s.port ? `  (port ${s.port})` : '');
     $('ver').textContent = 'Flick ' + s.version;
@@ -83,17 +100,26 @@
       sel.value = s.displayId ? String(s.displayId) : '';
     }
     const list = $('devices');
-    list.innerHTML = '';
     $('devicesCard').hidden = !(s.devices && s.devices.length);
+    const sig = JSON.stringify(s.devices || []);
+    if (list.dataset.sig === sig) return;      // unchanged: an open "Ask each time" list stays open
+    list.dataset.sig = sig;
+    list.innerHTML = '';
     for (const d of s.devices || []) {
       const row = document.createElement('div'); row.className = 'dev';
       const l = document.createElement('div');
       const n = document.createElement('div'); n.textContent = d.name;
       const dd = document.createElement('div'); dd.className = 'd'; dd.textContent = 'Paired ' + new Date(d.added || Date.now()).toLocaleDateString();
       l.appendChild(n); l.appendChild(dd);
+      // files from this phone: saved as they come (as always), or after Accept here
+      const sel = document.createElement('select'); sel.className = 'devask';
+      sel.setAttribute('aria-label', 'Files from ' + d.name);
+      for (const [v, t] of [['always', 'Always accept'], ['ask', 'Ask each time']]) { const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o); }
+      sel.value = d.ask ? 'ask' : 'always';
+      sel.onchange = () => api.send('panel:feat', { what: 'accept', device: d.id, mode: sel.value });
       const b = document.createElement('button'); b.className = 'link danger'; b.textContent = 'Remove';
       b.onclick = () => act('forget', d.id);
-      row.appendChild(l); row.appendChild(b);
+      row.appendChild(l); row.appendChild(sel); row.appendChild(b);
       list.appendChild(row);
     }
   }
@@ -204,5 +230,5 @@
   };
   $('name').onchange = (e) => set('name', e.target.value);
   $('name').onkeydown = (e) => { if (e.key === 'Enter') e.target.blur(); };
-  window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('pair').hidden && $('qs').hidden) act('hide'); });
+  window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('pair').hidden && $('qs').hidden && $('askBox').hidden) act('hide'); });
 })();

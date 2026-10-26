@@ -149,4 +149,16 @@
     if (button) box.appendChild(button);
     return box;
   };
+
+  /** Settings › Help, the last group (made by the first feature that adds to it): its card, for a row. */
+  X.helpCard = function (body) {
+    let g = body.querySelector('section.sgroup[data-help]');
+    if (!g) {
+      g = h('section', 'sgroup');
+      g.dataset.help = '1';
+      g.append(h('h3', '', 'Help'), h('div', 'scard'));
+      body.appendChild(g);
+    }
+    return g.querySelector('.scard');
+  };
 });

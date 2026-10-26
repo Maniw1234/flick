@@ -15,14 +15,16 @@ import org.json.JSONObject;
 
 /**
  * The features' switches, kept in SharedPreferences "flick" (keys "f:*", apart from the page's "p:*"): everything is off
- * until the user turns it on, except taking the clipboard from the PC. Also the notification channels, one per
- * purpose.
+ * until the user turns it on, except taking the clipboard from the PC and keeping a clipboard history. Also the
+ * notification channels, one per purpose.
  */
 final class Features {
     static final String BG = "f:bg";                   // "1": LinkService holds the background link
     static final String CLIP = "f:clipFromPc";         // "1" (default): the PC's clipboard is applied here
     static final String AUTO = "f:autoSend";           // "off" | "screenshots" | "photos"
     static final String NOTIFY = "f:notify";           // "1": phone notifications go to the PC
+    static final String BROWSE = "f:browse";           // "1": the paired PC may browse this phone's files (Browse)
+    static final String CLIPHIST = "f:clipHistory";    // "1" (default): keep a clipboard history (ClipHistory)
 
     static final String CH_LINK = "link";              // the background link's ongoing notification (low)
     static final String CH_RING = "ring";              // "your PC is looking for this phone" (high)
@@ -33,6 +35,8 @@ final class Features {
     static boolean bg(Context c) { return "1".equals(get(c, BG, "0")); }
     static boolean clipFromPc(Context c) { return !"0".equals(get(c, CLIP, "1")); }
     static boolean notify(Context c) { return "1".equals(get(c, NOTIFY, "0")); }
+    static boolean browse(Context c) { return "1".equals(get(c, BROWSE, "0")); }
+    static boolean clipHistory(Context c) { return !"0".equals(get(c, CLIPHIST, "1")); }
 
     static String autoSend(Context c) {
         String v = get(c, AUTO, "off");
@@ -55,6 +59,8 @@ final class Features {
             o.put("autoSend", autoSend(c));
             o.put("clipFromPc", clipFromPc(c));
             o.put("notify", notify(c));
+            o.put("browse", browse(c));
+            o.put("clipHistory", clipHistory(c));
             o.put("sdk", Build.VERSION.SDK_INT);
         } catch (Throwable e) { /* can't fail */ }
         return o.toString();
@@ -71,6 +77,14 @@ final class Features {
             else LinkService.stop(c);
         } else if ("clipFromPc".equals(name)) {
             put(c, CLIP, "1".equals(v) || "true".equals(v) ? "1" : "0");
+        } else if ("browse".equals(name)) {
+            boolean on = "1".equals(v) || "true".equals(v);
+            put(c, BROWSE, on ? "1" : "0");
+            if (!on) Browse.stopAll();                 // a copy under way stops too
+        } else if ("clipHistory".equals(name)) {
+            boolean on = "1".equals(v) || "true".equals(v);
+            put(c, CLIPHIST, on ? "1" : "0");
+            if (!on) ClipHistory.clear(c);             // off: nothing is kept, not even what was
         } else if ("autoSend".equals(name)) {
             if (!"off".equals(v) && !"screenshots".equals(v) && !"photos".equals(v)) return;
             String was = autoSend(c);

@@ -33,6 +33,13 @@ final class Discovery implements Runnable {
     private volatile boolean active;
     private Thread thread;
     private final Map<String, JSONObject> found = new LinkedHashMap<String, JSONObject>();
+    // addresses paired PCs were seen at before (the page remembers them): asked directly too, for networks that don't
+    // pass broadcasts (or where the PC is in another subnet, as on many office networks)
+    private volatile String[] known = new String[0];
+    private final String anon = "q" + Long.toHexString(new java.security.SecureRandom().nextLong());
+
+    /** ips: where paired PCs were seen before. */
+    void setKnown(String[] ips) { known = ips == null ? new String[0] : ips; }
 
     Discovery(Context ctx, String deviceId, String deviceName, Listener l) {
         this.ctx = ctx.getApplicationContext();
@@ -120,6 +127,17 @@ final class Discovery implements Runnable {
         for (InetAddress t : targets) {
             try { s.send(new DatagramPacket(b, b.length, t, PORT)); } catch (Throwable e) { /* ignore */ }
         }
+        // mDNS: a plain DNS question for _flick._tcp, answered straight back
+        try { byte[] q = Mdns.query(); s.send(new DatagramPacket(q, q.length, InetAddress.getByName(Mdns.GROUP), Mdns.PORT)); } catch (Throwable e) { /* no multicast here */ }
+        // the addresses paired PCs had: asked without saying who this phone is (it may be another network)
+        String[] ips = known;
+        if (ips.length > 0) {
+            byte[] a;
+            try { a = ("{\"t\":\"flick?\",\"v\":1,\"id\":\"" + anon + "\"}").getBytes("UTF-8"); } catch (Throwable e) { return; }
+            for (String ip : ips) {
+                try { s.send(new DatagramPacket(a, a.length, InetAddress.getByName(ip), PORT)); } catch (Throwable e) { /* ignore */ }
+            }
+        }
     }
 
     // ---- which kind of link a reply came over: the local interface whose subnet holds the PC's address
@@ -166,6 +184,7 @@ final class Discovery implements Runnable {
     }
 
     private void handle(DatagramPacket p) {
+        if (p.getLength() > 12 && p.getData()[p.getOffset()] != '{') { mdns(p); return; }
         try {
             String txt = new String(p.getData(), p.getOffset(), p.getLength(), "UTF-8");
             JSONObject m = new JSONObject(txt);
@@ -186,6 +205,26 @@ final class Discovery implements Runnable {
             // one entry per PC and address: the same PC can be reachable over a cable and Wi-Fi at once
             synchronized (found) { found.put(id + "@" + ip, pc); }
         } catch (Throwable e) { /* ignore junk */ }
+    }
+
+    /** An mDNS answer: the PCs it describes, like discovery replies. */
+    private void mdns(DatagramPacket p) {
+        String from = p.getAddress().getHostAddress();
+        for (Mdns.Pc m : Mdns.parse(p.getData(), p.getOffset(), p.getLength(), from)) {
+            try {
+                JSONObject pc = new JSONObject();
+                pc.put("id", m.id);
+                pc.put("name", m.name);
+                pc.put("ip", m.ip);
+                pc.put("port", m.port);
+                pc.put("known", false);
+                pc.put("v", m.v);
+                pc.put("tls", m.tls);
+                pc.put("via", linkFor(p.getAddress()));
+                pc.put("seen", SystemClock.elapsedRealtime());
+                synchronized (found) { found.put(m.id + "@" + m.ip, pc); }
+            } catch (Throwable e) { /* ignore */ }
+        }
     }
 
     /** Each PC once, at its fastest address; every address it was seen at is listed under "links". */

@@ -19,7 +19,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * Many files and folders sent to the PC in one streamed request (the PC side is pc/bundle.js):
  * "FLKB1\n", [u32 len][manifest JSON], then per entry [u32 len][entry JSON] (+ the file's bytes), and [u32 0] at the end.
- * No Android classes in here, so it can be exercised on any JVM.
+ * Each entry carries its number in this bundle ("i"), so a send that was cut off can carry on from any entry (and from
+ * inside a file) even when a file that couldn't be read was left out. No Android classes in here, so it can be
+ * exercised on any JVM.
  */
 final class Bundle {
     static final class Entry {
@@ -117,7 +119,19 @@ final class Bundle {
         return name.substring(0, dot) + " (" + i + ")" + name.substring(dot);
     }
 
-    void write(OutputStream out, AtomicBoolean abort, Progress prog) throws IOException {
+    void write(OutputStream out, AtomicBoolean abort, Progress prog) throws IOException { write(out, abort, prog, 0, 0); }
+
+    /** The file to carry on with (entry skip, from byte from) can't be read any more: send that entry again from 0. */
+    static final class ResumeLost extends IOException {
+        private static final long serialVersionUID = 1L;
+        ResumeLost(String m) { super(m); }
+    }
+
+    /**
+     * The bundle from entry number skip on; the first from bytes of that entry (a file) are on the PC already, so only
+     * the rest of it goes. prog counts the bytes written by this call.
+     */
+    void write(OutputStream out, AtomicBoolean abort, Progress prog, int skip, long from) throws IOException {
         DataOutputStream o = new DataOutputStream(out);
         o.write("FLKB1\n".getBytes("UTF-8"));
         StringBuilder m = new StringBuilder("{\"v\":1,\"files\":").append(manifestFiles >= 0 ? manifestFiles : files)
@@ -126,14 +140,22 @@ final class Bundle {
         block(o, m.append("]}").toString());
         byte[] buf = new byte[256 * 1024];
         long sent = 0;
-        for (Entry e : entries) {
+        for (int i = Math.max(0, skip); i < entries.size(); i++) {
+            Entry e = entries.get(i);
             if (abort != null && abort.get()) throw new IOException("aborted");
-            if (e.dir) { block(o, "{\"p\":" + quote(e.rel) + ",\"d\":1,\"m\":" + e.mtime + "}"); continue; }
+            if (e.dir) { block(o, "{\"p\":" + quote(e.rel) + ",\"d\":1,\"m\":" + e.mtime + ",\"i\":" + i + "}"); continue; }
+            long at = i == skip && from > 0 ? from : 0;
             InputStream in;
-            try { in = new FileInputStream(e.file); } catch (IOException x) { continue; }   // unreadable: leave it out
             try {
-                block(o, "{\"p\":" + quote(e.rel) + ",\"s\":" + e.size + ",\"m\":" + e.mtime + "}");
-                long left = e.size;
+                in = new FileInputStream(e.file);
+                if (at > 0) skipFully(in, at);
+            } catch (IOException x) {
+                if (at > 0) throw new ResumeLost(e.rel);
+                continue;                                                                 // unreadable: leave it out
+            }
+            try {
+                block(o, "{\"p\":" + quote(e.rel) + ",\"s\":" + e.size + ",\"m\":" + e.mtime + ",\"i\":" + i + "}");
+                long left = e.size - at;
                 while (left > 0) {
                     if (abort != null && abort.get()) throw new IOException("aborted");
                     int n = in.read(buf, 0, (int) Math.min(buf.length, left));
@@ -149,6 +171,32 @@ final class Bundle {
         }
         o.writeInt(0);
         o.flush();
+    }
+
+    private static void skipFully(InputStream in, long n) throws IOException {
+        while (n > 0) {
+            long k = in.skip(n);
+            if (k <= 0) { if (in.read() < 0) throw new IOException("file changed"); k = 1; }
+            n -= k;
+        }
+    }
+
+    /** Bytes of entries [0, n) of this bundle (what the PC has when a stream stopped before entry n). */
+    long bytesBefore(int n) {
+        long b = 0;
+        for (int i = 0; i < n && i < entries.size(); i++) b += entries.get(i).size;
+        return b;
+    }
+
+    /** What this bundle carries (names, sizes, times): another one means the files changed and it starts over. */
+    String signature() {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            for (Entry e : entries) md.update((e.rel + "|" + (e.dir ? "d" : e.size + "|" + e.mtime) + "\n").getBytes("UTF-8"));
+            StringBuilder b = new StringBuilder(64);
+            for (byte x : md.digest()) b.append(Character.forDigit((x >> 4) & 15, 16)).append(Character.forDigit(x & 15, 16));
+            return b.substring(0, 32);
+        } catch (Exception e) { return ""; }
     }
 
     private static void block(DataOutputStream o, String json) throws IOException {

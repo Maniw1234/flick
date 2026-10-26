@@ -270,7 +270,12 @@
     a.textContent = card.info.name || (card.saved && card.saved.name) || '';
     d.appendChild(a);
     const where = card.saved && card.saved.where;
-    if (where && where !== 'Desktop') {
+    if (card.saved && card.saved.note) {
+      const b = document.createElement('div');
+      b.className = 'where';
+      b.textContent = card.saved.note;
+      d.appendChild(b);
+    } else if (where && where !== 'Desktop') {
       const b = document.createElement('div');
       b.className = 'where';
       b.textContent = 'in ' + where;
@@ -354,7 +359,18 @@
     if (m.size) c.size = m.size;
     if (m.files) c.info.files = m.files;
   });
-  on('fx:progress', (m) => { const c = m && cards.get(m.tid); if (c) { c.progress = m.p; c.rate = m.rate || 0; } });
+  on('fx:progress', (m) => { const c = m && cards.get(m.tid); if (c) { c.progress = m.p; c.rate = m.rate || 0; c.progT = now(); c.paused = false; } });
+  // a transfer whose phone left (its app closed, its Wi-Fi dropped) waits to carry on: "Paused" under its card
+  on('fx:paused', (m) => { const c = m && cards.get(m.tid); if (c) { c.paused = true; kick(); } });
+  // ...and carries on: the card if it's still here, otherwise a new one flies in from the phone's side
+  on('fx:resumed', (m) => {
+    if (!m || !m.tid) return;
+    const c = cards.get(m.tid);
+    if (c && !c.gone && (c.state === 'flight' || c.state === 'rest')) { c.paused = false; c.progT = now(); kick(); return; }
+    if (!m.lift || !m.drop) return;
+    handlers['fx:lift'](m.lift);
+    setTimeout(() => handlers['fx:drop'](m.drop), 140);
+  });
   on('fx:saved', (m) => {
     const c = m && cards.get(m.tid);
     if (!c) return;
@@ -556,7 +572,8 @@
         if (theme.rest) theme.rest(E, c, (t - c.t0) / 1000, dt);
         const hold = theme.restHold == null ? 0.25 : theme.restHold;
         if ((c.pendingIcon || c.saved) && t - c.t0 > hold * 1000) { c.pendingIcon = false; toIcon(c); }
-        else if (t - c.t0 > 25000) { c.state = 'fade'; c.t0 = t; }
+        // a large file still arriving keeps its card (and its progress line) until it's in
+        else if (t - c.t0 > 25000 && !(c.progress > 0 && c.progress < 1 && !c.paused && t - (c.progT || 0) < 30000)) { c.state = 'fade'; c.t0 = t; }
         break;
       }
       case 'icon': {
@@ -609,11 +626,11 @@
       c.bar.style.transform = `translate3d(${c.pose.x - c.w / 2}px, ${c.pose.y + c.h / 2 + 8}px, 0)`;
       c.bar.firstChild.style.transform = `scaleX(${clamp(c.progress, 0, 1)})`;
       c.bar.style.opacity = '1';
-      // transfer speed under the line (large files only: it needs a moment to be meaningful)
-      if (c.rate > 0) {
+      // transfer speed under the line (large files only: it needs a moment to be meaningful), or that it's paused
+      if (c.rate > 0 || c.paused) {
         if (!c.rateEl) { c.rateEl = document.createElement('div'); c.rateEl.className = 'rate'; hud.appendChild(c.rateEl); (c.extraEls = c.extraEls || []).push(c.rateEl); }
         const r = c.rate;
-        c.rateEl.textContent = (r >= 1e7 ? Math.round(r / 1e6) : (r / 1e6).toFixed(1)) + ' MB/s';
+        c.rateEl.textContent = c.paused ? 'Paused, waiting for the phone' : (r >= 1e7 ? Math.round(r / 1e6) : (r / 1e6).toFixed(1)) + ' MB/s';
         c.rateEl.style.transform = `translate3d(${c.pose.x}px, ${c.pose.y + c.h / 2 + 15}px, 0) translateX(-50%)`;
         c.rateEl.style.opacity = '1';
       }

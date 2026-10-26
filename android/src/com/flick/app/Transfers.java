@@ -324,13 +324,17 @@ final class Transfers {
                         final long[] last = {0};
                         final long tot = hint;
                         try {
-                            Parallel.download(url, dest.part, hint, ways, new Parallel.Progress() {
+                            Parallel.Progress prog = new Parallel.Progress() {
                                 @Override
                                 public void onBytes(long done) {
                                     long now = SystemClock.uptimeMillis();
                                     synchronized (last) { if (now - last[0] > 120 || done == tot) { last[0] = now; event("down", "fid", fid, done, tot, null); } }
                                 }
-                            });
+                            };
+                            // straight to the PC when the page's URL is an encrypted link's local port (no proxy hop)
+                            Object[] direct = Wire.direct(url);
+                            if (direct != null) Parallel.downloadDirect((Wire.Link) direct[0], (String) direct[1], dest.part, hint, Math.max(ways, 4), prog);
+                            else Parallel.download(url, dest.part, hint, ways, prog);
                         }
                         catch (Throwable e) { dest.cancel(); throw e; }
                         File saved = dest.finish();

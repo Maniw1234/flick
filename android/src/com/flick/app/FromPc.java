@@ -22,6 +22,7 @@ final class FromPc {
         if (!Features.clipFromPc(c)) return;
         String kind = Clip.write(c, e, pcName);
         if (kind == null) return;
+        ClipHistory.add(c, "in", e, Bg.prefs(c).getString("p:lastPc", ""), pcName);
         Page.event("clip-in", "kind", kind);
         // Android 13+ shows its own note, and the page shows one when it's in front
         if (Build.VERSION.SDK_INT < 33 && !Page.inFront()) Bg.toast(c, "Copied from " + pcName);

@@ -202,7 +202,13 @@ final class Files {
     }
 
     // ------------------------------------------------------------ categories (MediaStore)
-    static String query(Context c, String cat, int offset, int limit) {
+    static String query(Context c, String cat, int offset, int limit) { return query(c, cat, offset, limit, null, null); }
+
+    /**
+     * A page of a category. sort: "date-desc" (newest first, the default), "date-asc", "name-asc", "name-desc",
+     * "size-asc", "size-desc", "type-asc" or "type-desc"; q: only files whose name contains each of its words.
+     */
+    static String query(Context c, String cat, int offset, int limit, String sort, String q) {
         JSONObject out = new JSONObject();
         Cursor cur = null;
         try {
@@ -229,12 +235,25 @@ final class Files {
                 }
             }
             sel = sel + " AND _data NOT LIKE '%/.%'";
+            ArrayList<String> sargs = new ArrayList<String>();
+            if (args != null) sargs.addAll(Arrays.asList(args));
+            if (q != null) {
+                int words = 0;
+                for (String w : q.trim().split("\\s+")) {
+                    if (w.length() == 0 || words++ >= 6) continue;
+                    sel = sel + " AND _display_name LIKE ? ESCAPE '\\'";
+                    sargs.add("%" + escapeLike(w) + "%");
+                }
+            }
+            if (!sargs.isEmpty()) args = sargs.toArray(new String[0]);
             ArrayList<String> proj = new ArrayList<String>(Arrays.asList("_id", "_data", "_display_name", "_size", "date_modified", "mime_type"));
             if (image || video || files) { proj.add("width"); proj.add("height"); }
             if (image || Build.VERSION.SDK_INT >= 29) proj.add("orientation");
             if (video || audio || Build.VERSION.SDK_INT >= 29) proj.add("duration");
             if (files) proj.add("media_type");
-            cur = c.getContentResolver().query(uri, proj.toArray(new String[0]), sel, args, "date_modified DESC");
+            String[] cols = proj.toArray(new String[0]);
+            try { cur = c.getContentResolver().query(uri, cols, sel, args, orderBy(sort, true)); }
+            catch (IllegalArgumentException e) { cur = c.getContentResolver().query(uri, cols, sel, args, orderBy(sort, false)); }   // (a provider that refuses COLLATE)
             JSONArray items = new JSONArray();
             int total = 0;
             if (cur != null) {
@@ -282,6 +301,17 @@ final class Files {
             try { out.put("error", String.valueOf(e.getMessage())); out.put("items", new JSONArray()); } catch (Throwable x) { /* ignore */ }
         } finally { if (cur != null) cur.close(); }
         return out.toString();
+    }
+
+    /** The ORDER BY for a query() sort (only these fixed clauses; nocase: names A to Z whatever their case). */
+    static String orderBy(String sort, boolean nocase) {
+        String s = sort == null ? "" : sort;
+        boolean asc = s.endsWith("-asc");
+        String name = "_display_name" + (nocase ? " COLLATE NOCASE" : "");
+        if (s.startsWith("name-")) return name + (asc ? " ASC" : " DESC");
+        if (s.startsWith("size-")) return "_size" + (asc ? " ASC" : " DESC") + ", " + name + " ASC";
+        if (s.startsWith("type-")) return "mime_type" + (asc ? " ASC" : " DESC") + ", " + name + " ASC";
+        return "date_modified" + (s.startsWith("date-") && asc ? " ASC" : " DESC");
     }
 
     /** Where files received from the PC are written when Flick can see shared storage. */

@@ -7,11 +7,14 @@ const { execFile, spawn } = require('child_process');
 const { FlickServer, lanAddresses, rid } = require('./server');
 const { apkInfoAsync } = require('./apkinfo');
 const tlscert = require('./tlscert');
+const { ReceivedIndex } = require('./have');
 const { Updater } = require('./updater');
 const { readProof, writeProof } = require('./updatecore');
 
 const VERSION = require('./package.json').version;
 const IS_WIN = process.platform === 'win32';
+const plat = require('./platform');          // what macOS and Linux do differently (Windows' own code stays here)
+const { IS_MAC, IS_LINUX } = plat;
 const HIDDEN_START = process.argv.includes('--hidden');
 // The test control server runs arbitrary JS in a window, so it must never be reachable in a shipped build, even if
 // someone sets the env var: a packaged app refuses it outright.
@@ -34,6 +37,23 @@ if (!app.requestSingleInstanceLock()) {
 }
 app.setAppUserModelId('com.flick.pc');
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+
+// macOS: files dropped on Flick in the Dock or opened with it from Finder go to the phone, like Windows' Send to. They
+// can come before Flick is ready (they started it), so they wait for it; a drop of several arrives one by one, and
+// goes out as one batch.
+let openFiles = [], openFilesT = null, startedAt = 0;
+app.on('open-file', (e, p) => {
+  e.preventDefault();
+  if (typeof p === 'string' && path.isAbsolute(p)) openFiles.push(p);
+  clearTimeout(openFilesT);
+  openFilesT = setTimeout(sendOpenFiles, 300);
+});
+function sendOpenFiles() {
+  if (!startedAt || !openFiles.length) return;
+  queueForPhone(openFiles.splice(0).slice(0, MAX_SEND));
+}
+// macOS: a click on Flick in the Dock (or opening it again) shows the panel; Flick's own start isn't such a click
+app.on('activate', () => { if (startedAt && Date.now() - startedAt > 2000) showPanel(); });
 
 // Flick's windows only ever show their own local pages. Never let one navigate elsewhere or spawn a new window, so a
 // bug that put attacker text into a page can't turn into "load a remote origin into a window that has the preload".
@@ -69,7 +89,8 @@ process.on('unhandledRejection', (e) => fault('unhandled', e));
 if (process.stdout && process.stdout.on) process.stdout.on('error', () => {});
 
 const DEFAULTS = {
-  id: null, name: null, side: 'right', anchor: 0.5, size: 1, saveDir: 'desktop', sound: true,
+  // received files land on the desktop, except on Linux, where desktops often show no files at all
+  id: null, name: null, side: 'right', anchor: 0.5, size: 1, saveDir: IS_LINUX ? 'downloads' : 'desktop', sound: true,
   startup: true, edgeSend: true, devices: {}, firstRun: true, displayId: null, theme: 'roadster',
   openAfter: false, showSpeed: true, sendTo: true, autoUpdate: true, bluetooth: false, quickShare: false,
 };
@@ -104,8 +125,12 @@ function defaultName() {
     const first = (s) => cap(String(s).trim().split(/[\s._-]+/)[0] || '');
     // A real-looking account name ("Mani Weinstein") beats a generated host name ("DESKTOP-4F2K9QX")
     const looksLikeName = /^\p{L}[\p{L} .'-]{1,40}$/u.test(user) && !/^(user|admin|administrator|owner|pc)$/i.test(user) && !/^(desktop|laptop|win)\b/i.test(user);
-    const genericHost = !host || /^(DESKTOP|LAPTOP|WIN|PC)-[A-Z0-9]{5,}$/i.test(host);
-    const fallback = looksLikeName ? first(user) + "'s PC" : (!genericHost ? host : (user ? first(user) + "'s PC" : 'My PC'));
+    const genericHost = !host || /^(DESKTOP|LAPTOP|WIN|PC)-[A-Z0-9]{5,}$/i.test(host) || /^localhost(\.|$)/i.test(host);
+    const pc = IS_MAC ? "'s Mac" : "'s PC";
+    const fallback = looksLikeName ? first(user) + pc : (!genericHost ? host : (user ? first(user) + pc : IS_MAC ? 'My Mac' : 'My PC'));
+    // the name the user gave this Mac; on Linux the account's full name (Windows: net user's "Full Name", below)
+    if (IS_MAC) return plat.macName().then((n) => resolve(n && n.length <= 40 ? n : fallback));
+    if (IS_LINUX && user) return plat.fullName(os.userInfo().username).then((full) => resolve(full.length > 1 ? first(full) + pc : fallback));
     if (!IS_WIN || !user) return resolve(fallback);
     execFile('net', ['user', os.userInfo().username], { windowsHide: true, timeout: 4000 }, (err, out) => {
       if (err || !out) return resolve(fallback);
@@ -145,6 +170,8 @@ async function saveDirNow() {
   customDir = { dir: d, ok };
   return ok ? d : app.getPath('desktop');
 }
+// files Flick saved, for "Skip files already on the PC" (have.js)
+const received = new ReceivedIndex(path.join(app.getPath('userData'), 'received.json'), { saveDir: () => saveDirPath() });
 function saveDirLabel() {
   if (store.saveDir === 'desktop') return 'Desktop';
   if (store.saveDir === 'downloads') return 'Downloads';
@@ -193,9 +220,13 @@ function createOverlay() {
     transparent: true, frame: false, resizable: false, movable: false, minimizable: false, maximizable: false,
     fullscreenable: false, skipTaskbar: true, focusable: false, show: false, hasShadow: false, alwaysOnTop: true,
     thickFrame: false, backgroundColor: '#00000000', title: 'Flick Overlay',
+    // macOS: a panel never takes focus and can float over full-screen apps; the whole screen, menu bar included
+    ...(IS_MAC ? { type: 'panel', enableLargerThanScreen: true } : {}),
     webPreferences: { preload: PRELOAD, backgroundThrottling: false, autoplayPolicy: 'no-user-gesture-required', spellcheck: false },
   });
   overlay.setAlwaysOnTop(true, 'screen-saver');
+  // on whichever desktop (Space, workspace) the user is on
+  if (!IS_WIN) overlay.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
   overlay.setIgnoreMouseEvents(true);
   overlay.setMenu(null);
   overlay.loadFile(path.join(__dirname, 'overlay', 'overlay.html'));
@@ -246,7 +277,7 @@ function reveal() {
 }
 function ensureShown(withShot) {
   if (!overlay || overlayShown || revealT) return;
-  if (withShot && Date.now() - lastShot > 1500) {
+  if (withShot && shotAllowed() && Date.now() - lastShot > 1500) {
     // photograph the desktop first and only then show the overlay, so the picture never contains the overlay itself;
     // a very slow capture is abandoned (the effects then run without it) rather than holding the animation back
     let done = false;
@@ -279,7 +310,8 @@ function watchdog() {
       discard(t);
     } else if (t.state !== 'lifted' && t.state !== 'dropped' && quiet > 10 * 60000) {
       discard(t);                                        // a leftover (should not happen): don't let it block updates
-    } else if (t.state === 'dropped' && t.upload !== 'done' && quiet > 45000) {
+    } else if (t.state === 'dropped' && t.upload !== 'done' && quiet > 45000 && !(server && server.uploadPaused(t.tid))) {
+      // (a paused one waits for its phone to come back: the server gives up on it after hours, see 'upload-failed')
       log('transfer', t.tid, 'stalled for', Math.round(quiet / 1000) + 's: fail');
       if (t.qs && qs) { qs.cancel(t.tid.slice(3), 'stalled'); if (!transfers.has(t.tid)) continue; }   // its failure path cleans up
       fx('failed', { tid: t.tid });
@@ -288,7 +320,7 @@ function watchdog() {
       discard(t);
     }
   }
-  const active = [...transfers.values()].some((t) => !t.done && (t.state === 'lifted' || t.state === 'dropped'));
+  const active = [...transfers.values()].some((t) => !t.done && !t.paused && (t.state === 'lifted' || t.state === 'dropped'));
   if (overlay && overlayShown && !active && now - lastFx > 20000) {
     log('overlay up with nothing going on: cleared');
     overlay.webContents.send('fx:reset');
@@ -303,6 +335,13 @@ ipcMain.on('fx:ready', () => { overlayReady = true; if (overlay) overlay.webCont
 ipcMain.on('fx:idle', () => {
   if (overlay && overlayShown) { overlay.hide(); overlayShown = false; dropShot(); }
 });
+
+// The photo of the desktop needs Screen Recording permission on macOS, which Flick doesn't ask for (the effects do
+// without it unless the user gave it), and under Wayland every capture would ask through a dialog of its own.
+function shotAllowed() {
+  if (IS_MAC) { try { return require('electron').systemPreferences.getMediaAccessStatus('screen') === 'granted'; } catch (e) { return false; } }
+  return !(IS_LINUX && (process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE === 'wayland'));
+}
 
 // full-resolution photo of the desktop (raw BGRA pixels, so it lines up pixel-for-pixel with the real screen)
 let shotBusy = null, lastShot = 0, shotAbandoned = false;
@@ -359,6 +398,7 @@ function ensureCatcher() {
     webPreferences: { preload: PRELOAD, backgroundThrottling: false, spellcheck: false },
   });
   catcher.setAlwaysOnTop(true, 'screen-saver');
+  if (!IS_WIN) catcher.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
   catcher.setMenu(null);
   catcher.loadFile(path.join(__dirname, 'catcher', 'catcher.html'));
   catcher.once('ready-to-show', () => { if (catcher) { catcher.showInactive(); catcher.setBounds(catcherBounds()); } });
@@ -412,7 +452,7 @@ async function thumbFor(p) {
       const img = nativeImage.createFromPath(p);
       if (!img.isEmpty()) { const s = img.getSize(); const r = Math.min(1, 360 / Math.max(s.width, s.height)); const t = img.resize({ width: Math.max(1, Math.round(s.width * r)), height: Math.max(1, Math.round(s.height * r)) }); return { url: 'data:image/jpeg;base64,' + t.toJPEG(82).toString('base64'), w: t.getSize().width, h: t.getSize().height }; }
     }
-    if (IS_WIN && (kind === 'image' || kind === 'video' || extOf(p) === 'pdf')) {
+    if ((IS_WIN || IS_MAC) && (kind === 'image' || kind === 'video' || extOf(p) === 'pdf')) {
       const t = await nativeImage.createThumbnailFromPath(p, { width: 360, height: 360 });
       if (t && !t.isEmpty()) return { url: 'data:image/jpeg;base64,' + t.toJPEG(82).toString('base64'), w: t.getSize().width, h: t.getSize().height };
     }
@@ -637,7 +677,8 @@ function onQsFailed(m) {
 // Explorer's right-click "Send to" menu gets "Flick (phone)" (a shortcut that starts Flick with --send <files>)
 function sendToShortcut() { return path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'SendTo', 'Flick (phone).lnk'); }
 function applySendTo() {
-  if (!IS_WIN) return;
+  if (IS_LINUX) { linuxEntries(); return; }        // Linux: Open With, in the same setting
+  if (!IS_WIN) return;                             // macOS: Open With and the Dock icon always work (Info.plist)
   const lnk = sendToShortcut();
   try {
     if (store.sendTo) {
@@ -646,6 +687,13 @@ function applySendTo() {
       });
     } else if (fs.existsSync(lnk)) fs.unlinkSync(lnk);
   } catch (e) { log('send-to shortcut', e.message); }
+}
+// Linux: Flick in the applications menu, in file managers' Open With (sendTo) and started at login (startup). A copy
+// run from source leaves the user's menus alone, except under test (its home folder is a test one).
+function linuxEntries() {
+  if (!app.isPackaged && !TEST_MODE) return;
+  plat.linuxEntries({ cmd: plat.startCommand(app.isPackaged ? null : app.getAppPath()), icon: path.join(__dirname, 'assets', 'icon.png'),
+    openWith: !!store.sendTo, startup: !!store.startup, log });
 }
 // Files on the command line after --send. Windows may reorder the arguments, so: every absolute path that exists,
 // except Flick itself.
@@ -661,11 +709,18 @@ function sendArgs(argv) {
 }
 
 // ------------------------------------------------------------ panel (status + settings)
+// Where the panel opens: by the tray icon. Windows' taskbar is at the bottom of the screen; the macOS menu bar (and a
+// Linux panel, when there's one at the top and none at the bottom) at the top.
+function panelSpot(W, H) {
+  const d = screen.getPrimaryDisplay(), wa = d.workArea, b = d.bounds;
+  const top = IS_MAC || (IS_LINUX && wa.y > b.y && wa.y + wa.height >= b.y + b.height);
+  return { x: wa.x + wa.width - W - 16, y: top ? wa.y + 8 : wa.y + wa.height - H - 16 };
+}
 function createPanel() {
-  const wa = screen.getPrimaryDisplay().workArea;
   const W = 420, H = 680;
+  const at = panelSpot(W, H);
   panel = new BrowserWindow({
-    width: W, height: H, x: wa.x + wa.width - W - 16, y: wa.y + wa.height - H - 16,
+    width: W, height: H, x: at.x, y: at.y,
     frame: false, resizable: false, maximizable: false, fullscreenable: false, show: false, backgroundColor: '#202020',
     title: 'Flick', icon: path.join(__dirname, 'assets', IS_WIN ? 'icon.ico' : 'icon.png'),
     webPreferences: { preload: PRELOAD, spellcheck: false },
@@ -692,9 +747,9 @@ function panelSend(ch, data) {
 
 function showPanel() {
   if (!panel) createPanel();
-  const wa = screen.getPrimaryDisplay().workArea;
   const [W, H] = panel.getSize();
-  panel.setPosition(wa.x + wa.width - W - 16, wa.y + wa.height - H - 16);
+  const at = panelSpot(W, H);
+  panel.setPosition(at.x, at.y);
   panel.show();
   panel.focus();
   pushPanelState();
@@ -724,11 +779,11 @@ function panelState() {
     phoneHas: s && s.connected ? { code: s.app || 0, name: s.appName || '' } : null,
     update: { state: updateInfo.state, version: updateInfo.version || '' },
     side: store.side, anchor: store.anchor, size: store.size, saveDir: store.saveDir, saveDirLabel: saveDirLabel(), saveDirPath: saveDirPath(),
-    sound: store.sound, startup: store.startup, edgeSend: store.edgeSend, isWin: IS_WIN, theme: themeName(),
+    sound: store.sound, startup: store.startup, edgeSend: store.edgeSend, isWin: IS_WIN, os: IS_WIN ? 'win' : IS_MAC ? 'mac' : 'linux', theme: themeName(),
     openAfter: store.openAfter, showSpeed: store.showSpeed, sendTo: store.sendTo, autoUpdate: store.autoUpdate,
     bluetooth: store.bluetooth, btState: btState, quickShare: store.quickShare, qsState: qsState,
     via: s && s.connected ? s.via || '' : '',
-    devices: Object.entries(store.devices || {}).map(([id, d]) => ({ id, name: d.name, added: d.added })),
+    devices: Object.entries(store.devices || {}).map(([id, d]) => ({ id, name: d.name, added: d.added, ask: !!(store.acceptMode && store.acceptMode[id] === 'ask') })),
     displays: displays().map((d, i) => ({ id: d.id, label: `Display ${i + 1} (${d.size.width}×${d.size.height})`, primary: d.id === screen.getPrimaryDisplay().id })),
     displayId: store.displayId, firstRun: store.firstRun,
   };
@@ -815,7 +870,13 @@ ipcMain.on('panel:pair-answer', (_e, { device, allow }) => {
 ipcMain.on('panel:preview', (_e, d) => sendPreview(!!(d && d.on)));
 
 function fixFirewall() {
-  if (!IS_WIN) return;
+  if (!IS_WIN) {
+    // macOS: Local Network privacy (and the firewall, if it's on); Linux: the firewall's ports. Said in the panel.
+    const h = plat.connectHelp({ tcp: server ? server.port || server.basePort : 47860, udp: server ? server.discoveryPort : 47870 });
+    if (h.url) shell.openExternal(h.url).catch(() => {});
+    panelSend('panel:note', { text: h.text });
+    return;
+  }
   const exe = process.execPath;
   // All profiles on purpose: Windows calls a phone hotspot, USB tethering and many home networks "Public", and those are
   // exactly where the phone has to reach this PC. Write the elevated script to our own per-user folder under a random
@@ -833,8 +894,15 @@ function fixFirewall() {
 }
 
 function applyStartup() {
-  if (!IS_WIN || !app.isPackaged) return;
-  try { app.setLoginItemSettings({ openAtLogin: !!store.startup, path: process.execPath, args: ['--hidden'], name: 'Flick' }); } catch (e) { log('startup failed', e.message); }
+  if (IS_LINUX) { linuxEntries(); return; }       // ~/.config/autostart/flick.desktop
+  if (!app.isPackaged) return;
+  // macOS takes neither a path nor arguments for a login item: openedAtLogin() tells such a start apart
+  const o = IS_MAC ? { openAtLogin: !!store.startup } : { openAtLogin: !!store.startup, path: process.execPath, args: ['--hidden'], name: 'Flick' };
+  try { app.setLoginItemSettings(o); } catch (e) { log('startup failed', e.message); }
+}
+function openedAtLogin() {
+  if (!IS_MAC) return false;
+  try { return !!app.getLoginItemSettings().wasOpenedAtLogin; } catch (e) { return false; }
 }
 
 // ------------------------------------------------------------ tray
@@ -854,10 +922,14 @@ function updateTray() {
   ]));
 }
 function createTray() {
-  const img = nativeImage.createFromPath(path.join(__dirname, 'assets', IS_WIN ? 'tray.ico' : 'tray.png'));
+  // macOS draws menu-bar icons itself from a black-and-clear template (and its @2x), for light and dark menu bars
+  const img = nativeImage.createFromPath(path.join(__dirname, 'assets', IS_WIN ? 'tray.ico' : IS_MAC ? 'trayTemplate.png' : 'tray.png'));
+  if (IS_MAC && !img.isEmpty()) img.setTemplateImage(true);
   tray = new Tray(img.isEmpty() ? nativeImage.createEmpty() : img);
   tray.on('click', togglePanel);
   tray.on('double-click', showPanel);
+  // macOS: files dropped on the menu-bar icon go to the phone
+  if (IS_MAC) tray.on('drop-files', (_e, files) => { if (Array.isArray(files)) queueForPhone(files.slice(0, MAX_SEND)); });
   updateTray();
 }
 
@@ -965,8 +1037,9 @@ function scheduleRestart(ver) {
     if (busy) { restartT = setTimeout(tryNow, 30000); return; }
     log('restarting into', ver);
     // only --hidden: the original command line may hold "--send <files>" from Explorer, which must not be sent again
+    // (on Linux the launcher's switches go along, and an AppImage restarts from its own file)
     const args = ['--hidden'];
-    app.relaunch({ args });
+    app.relaunch(plat.relaunch(args));
     app.isQuitting = true;
     app.quit();
   };
@@ -979,7 +1052,7 @@ function startUpdater() {
     fetch: (url, opts) => require('electron').net.fetch(url, opts),
   });
   if (BOOT && BOOT.failed) log('downloaded version failed to load, using the installed one:', BOOT.failed);
-  log('running', VERSION, BOOT && BOOT.dir ? 'from ' + BOOT.root + '\\' + BOOT.dir : '(installed copy)');
+  log('running', VERSION, BOOT && BOOT.dir ? 'from ' + path.join(BOOT.root, BOOT.dir) : '(installed copy)');
   setTimeout(() => { healthy = true; updater.markHealthy(BOOT); }, TEST_MODE ? 4000 : 6000);
   setTimeout(runUpdateCheck, TEST_MODE ? 6000 : 20000);
   setInterval(runUpdateCheck, 30 * 60 * 1000);
@@ -1027,15 +1100,20 @@ function uniquePath(dir, name) {
 const RISKY_EXT = new Set(['.exe', '.msi', '.msp', '.bat', '.cmd', '.com', '.scr', '.pif', '.cpl', '.ps1', '.psm1',
   '.vbs', '.vbe', '.js', '.jse', '.wsf', '.wsh', '.hta', '.lnk', '.url', '.reg', '.jar', '.msc', '.inf', '.scf',
   '.application', '.gadget', '.ws', '.vb', '.jnlp', '.chm', '.sct', '.appref-ms']);
+// and their macOS and Linux kin: apps, installers, disk images, scripts, launchers
+if (!IS_WIN) for (const x of ['.app', '.pkg', '.mpkg', '.dmg', '.command', '.tool', '.terminal', '.workflow', '.scpt', '.applescript',
+  '.sh', '.bash', '.zsh', '.csh', '.ksh', '.fish', '.py', '.pl', '.rb', '.desktop', '.appimage', '.run', '.bin', '.deb', '.rpm', '.flatpakref']) RISKY_EXT.add(x);
 const riskyExt = (p) => RISKY_EXT.has(path.extname(p).toLowerCase());
 
 function markOfWeb(dest) {
+  if (IS_MAC) { plat.quarantine(dest); return; }   // macOS' own mark (Gatekeeper); Linux has none
   if (!IS_WIN) return;
   fs.writeFile(dest + ':Zone.Identifier', '[ZoneTransfer]\r\nZoneId=3\r\n', () => {});
 }
 
 // mark a received file, or every file inside a received folder (bounded, best-effort)
 function markTree(dest) {
+  if (IS_MAC) { plat.quarantine(dest, true); return; }
   if (!IS_WIN) return;
   fs.stat(dest, (e, st) => {
     if (e) return;
@@ -1103,6 +1181,7 @@ async function finalizeBundle(t, dir) {
         await placeItem(src, dest);
         const now = new Date(); fs.utimes(dest, now, now, () => {});
         markTree(dest);
+        received.addTree(dest);
         placed.push(path.basename(dest));
         hist({ dir: 'in', tid: t.tid, path: dest, how: 'fling' });
       } catch (e) { lost++; log('could not save', top, e.message); }
@@ -1122,9 +1201,65 @@ function tState(tid) {
   return t;
 }
 
+// the overlay messages that fly a transfer's card in from the phone's side (a send from the phone's menu, a transfer
+// that carries on after a pause)
+function flyInMsgs(tid, info, pw, ph) {
+  const ps = { w: pw || phoneScreen().w, h: ph || phoneScreen().h };
+  const w = (info && info.card && info.card.w) || 160, h = (info && info.card && info.card.h) || 160;
+  const lift = Object.assign({}, info || { tid, name: 'file' }, { tid, card: { w, h } });
+  const x = store.side === 'right' ? -w * 0.55 : ps.w - w * 0.45;
+  const drop = { tid, x, y: ps.h / 2 - h / 2, w, h, r: 0, vx: store.side === 'right' ? -2.6 : 2.6, vy: 0, pw: ps.w, ph: ps.h };
+  return { lift, drop };
+}
+
+// "Ask each time" (a setting per phone, ask.js): once the user has thrown or sent it, a transfer from that phone waits
+// for Accept in the window; finalize saves nothing until then. Decline or 60 s without an answer: the phone is told
+// ('failed' with why declined | timeout), the upload is stopped and what arrived is deleted.
+function askFirst(t) {
+  if (!feats || t.ask || t.qs || t.web) return;
+  const device = server.ownerOf(t.tid);
+  if (!device || feats.ask.mode(device) !== 'ask') return;
+  t.ask = 'wait';
+  const info = t.info || {}, b = t.bundleInfo;
+  server.pushToPhone({ t: 'asking', tid: t.tid }, device);
+  feats.ask.ask({
+    device, deviceName: server.api.nameOf(device), name: t.name, tid: t.tid, kind: 'fling',
+    count: b && b.roots.length ? b.roots.length : info.count || 1, size: b ? b.bytes : +info.size || 0, names: b ? b.roots : [],
+  }).then((r) => {
+    if (transfers.get(t.tid) !== t || t.done) return;
+    if (r.yes) { t.ask = 'yes'; t.seen = Date.now(); if (t.state === 'dropped' && t.upload === 'done') finalize(t); return; }
+    t.ask = 'no';
+    log('transfer', t.tid, r.why);
+    server.pushToPhone({ t: 'failed', tid: t.tid, why: r.why }, device);    // before the upload is cut: the phone won't retry it
+    gone.set(t.tid, Date.now());
+    fx('cancel', { tid: t.tid });
+    clearTimeout(t.failT); clearTimeout(t.timer);
+    server.abortUpload(t.tid, r.why);
+    if (r.why === 'declined' || r.why === 'timeout') hist({ dir: 'in', tid: t.tid, name: t.name, size: 0, ok: false, how: 'fling', why: r.why });
+    discard(t);
+  });
+}
+function unask(t) { if (feats && t && t.ask === 'wait') feats.ask.withdraw((a) => a.tid === t.tid, 'canceled'); }
+// the questions show in the window, in front of whatever the user is doing (like a phone asking to pair)
+function askFront(on, fresh) {
+  if (on && fresh) {
+    showPanel();
+    if (panel) { panel.setAlwaysOnTop(true, 'floating'); panel.show(); panel.focus(); panel.flashFrame(true); }
+  } else if (!on && panel && !panel.isDestroyed()) { panel.setAlwaysOnTop(false); panel.flashFrame(false); }
+}
+
 async function finalize(t) {
-  if (t.done) return;
+  if (t.done || t.ask === 'wait' || t.ask === 'no') return;
   t.done = true;
+  t.paused = false;
+  if (t.already) {
+    // the phone sent nothing: this PC has the file(s) already (see have.js)
+    const name = t.already.name || t.name;
+    fx('saved', { tid: t.tid, name, where: saveDirLabel(), note: 'Already on this PC' });
+    if (server) server.pushToPhone({ t: 'saved', tid: t.tid, name, where: saveDirLabel(), already: true });
+    setTimeout(() => transfers.delete(t.tid), 5000);
+    return;
+  }
   let dest = null;
   try {
     const dir = await saveDirNow();
@@ -1145,6 +1280,7 @@ async function finalize(t) {
     release(dest);
     const now = new Date(); fs.utimes(dest, now, now, () => {});
     markOfWeb(dest);
+    received.add(dest);
     log('saved', dest);
     hist({ dir: 'in', tid: t.tid, path: dest, how: 'fling' });
     if (store.openAfter) setTimeout(() => openAfterArrival(dest), 900);
@@ -1162,6 +1298,7 @@ async function finalize(t) {
 }
 
 function discard(t) {
+  unask(t);
   if (t.tmpPath && t.bundle) fs.rm(t.tmpPath, { recursive: true, force: true }, () => {});
   else if (t.tmpPath) fs.unlink(t.tmpPath, () => {});
   transfers.delete(t.tid);
@@ -1215,9 +1352,11 @@ function wireServer() {
   server.on('lift', (m) => {
     const t = tState(m.tid);
     t.name = (m.file && m.file.name) || t.name;
+    if (m.file) t.info = m.file;                   // name, size, count: what "Ask each time" shows
     t.state = 'lifted';
     t.seen = Date.now();
-    fx('lift', liftInfo(m, t));
+    t.info = liftInfo(m, t);
+    fx('lift', t.info);
   });
   server.on('move', (m) => { const t = transfers.get(m.tid); if (t) t.seen = Date.now(); fx('move', m); });
   server.on('drop', (m) => {
@@ -1225,18 +1364,20 @@ function wireServer() {
     t.state = 'dropped';
     t.seen = Date.now();
     fx('drop', m);
+    askFirst(t);
     if (t.upload === 'done') finalize(t);
     clearTimeout(t.timer);   // a dropped transfer now lives as long as bytes keep arriving (see watchdog)
   });
   server.on('send', (m) => { // programmatic send (from the phone menu): fly in from the phone edge
     const t = tState(m.tid);
     t.name = (m.file && m.file.name) || t.name;
+    if (m.file) t.info = m.file;
     t.state = 'dropped';
-    const ps = { w: m.pw || phoneScreen().w, h: m.ph || phoneScreen().h };
-    const w = m.w || 160, h = m.h || 160;
-    fx('lift', Object.assign(liftInfo(m, t), { card: { w, h } }));
-    const x = store.side === 'right' ? -w * 0.55 : ps.w - w * 0.45;
-    setTimeout(() => fx('drop', { tid: m.tid, x, y: ps.h / 2 - h / 2, w, h, r: 0, vx: store.side === 'right' ? -2.6 : 2.6, vy: 0, pw: ps.w, ph: ps.h }), 140);
+    t.info = Object.assign(liftInfo(m, t), { card: { w: m.w || 160, h: m.h || 160 } });
+    askFirst(t);
+    const f = flyInMsgs(m.tid, t.info, m.pw, m.ph);
+    fx('lift', f.lift);
+    setTimeout(() => fx('drop', f.drop), 140);
     if (t.upload === 'done') finalize(t);
   });
   server.on('cancel', (m) => {
@@ -1250,12 +1391,23 @@ function wireServer() {
     discard(t);
     gone.set(m.tid, Date.now());
   });
-  server.on('upload-start', ({ tid, name }) => {
-    if (isGone(tid)) { server.abortUpload(tid); return; }
+  server.on('upload-start', ({ tid, name, total, committed, again }) => {
+    // late bytes of a transfer canceled or declined here are refused; "Try again" on the phone (again) starts it anew
+    if (isGone(tid)) { if (!again) { server.abortUpload(tid); return; } gone.delete(tid); }
+    const fresh = !transfers.has(tid);
     const t = tState(tid);
     t.upload = 'uploading'; t.seen = Date.now();
     clearTimeout(t.failT);
     if (name && t.name === 'file') t.name = name;
+    // one the user sent before this PC restarted, starting over now: its card flies in as if just sent
+    if (committed && fresh) {
+      t.state = 'dropped';
+      t.info = { tid, name: name === 'bundle' ? 'Files' : t.name, kind: name === 'bundle' ? 'folder' : 'file', size: total || 0, count: 1, card: { w: 160, h: 160 } };
+      askFirst(t);
+      const f = flyInMsgs(tid, t.info);
+      fx('lift', f.lift);
+      setTimeout(() => fx('drop', f.drop), 140);
+    }
   });
   server.on('upload-progress', ({ tid, received, total }) => {
     const t = transfers.get(tid);
@@ -1266,8 +1418,39 @@ function wireServer() {
     t.seen = now;
     if (t.state === 'dropped' && total) fx('progress', { tid, p: received / total, rate: store.showSpeed ? t.rate || 0 : 0 });
   });
-  server.on('bundle-manifest', ({ tid, files, bytes }) => {
+  // a resumable transfer stopped (its phone's app was closed, its Wi-Fi dropped): it waits for the phone to come back
+  server.on('upload-paused', ({ tid }) => {
+    const t = transfers.get(tid);
+    if (!t || t.done) return;
+    log('transfer', tid, 'paused: waiting for the phone');
+    t.paused = true; t.seen = Date.now();
+    if (t.state === 'dropped') fx('paused', { tid });
+  });
+  server.on('upload-resumed', ({ tid }) => {
+    const t = transfers.get(tid);
+    if (!t || t.done) return;
+    log('transfer', tid, 'carries on');
+    t.paused = false; t.seen = Date.now();
+    if (t.state === 'dropped') { const f = flyInMsgs(tid, t.info || { tid, name: t.name }); fx('resumed', { tid, lift: f.lift, drop: f.drop }); }
+  });
+  // the phone has nothing to send: this PC has the file(s) already
+  server.on('already-have', ({ tid, name }) => {
+    if (isGone(tid)) return;
+    const t = tState(tid);
+    log('transfer', tid, 'already on this PC:', name);
+    t.upload = 'done'; t.already = { name }; t.seen = Date.now();
+    clearTimeout(t.failT);
+    if (t.state === 'dropped') finalize(t);
+    else if (t.state === 'canceled') discard(t);
+    else { clearTimeout(t.timer); t.timer = setTimeout(() => { if (t.state === 'lifted') discard(t); }, 120000); }
+  });
+  server.on('bundle-manifest', ({ tid, files, bytes, roots }) => {
     fx('info', { tid, size: bytes, files });
+    const t = transfers.get(tid);
+    if (t) {
+      t.bundleInfo = { files, bytes, roots: Array.isArray(roots) ? roots.slice(0, 50) : [] };
+      if (t.ask === 'wait' && feats) feats.ask.update(tid, { count: t.bundleInfo.roots.length, size: bytes, names: t.bundleInfo.roots });
+    }
   });
   server.on('upload-done', ({ tid, tmpPath, name, bundle, size, ms }) => {
     if (isGone(tid)) { fs.rm(tmpPath, { recursive: true, force: true }, () => {}); return; }   // canceled meanwhile
@@ -1291,6 +1474,7 @@ function wireServer() {
       if (transfers.get(tid) !== t || t.upload !== 'failed' || t.done) return;
       if (t.state === 'dropped') { fx('failed', { tid }); server.pushToPhone({ t: 'failed', tid, why: 'upload' }); hist({ dir: 'in', tid, name: t.name, size: 0, ok: false, how: 'fling' }); }
       else if (t.state === 'lifted') fx('cancel', { tid });
+      unask(t);
       transfers.delete(tid);
     }, 15000);
   });
@@ -1314,20 +1498,51 @@ function wireServer() {
 // a browser are saved exactly like files from the phone and fly in on the screen like a Quick Share.
 const { WebShare, shareAddresses } = require('./webshare');
 const QR = require('./qr');
+const { Hotspot } = require('./hotspot');
 let web = null, webAddr = null, webAsking = null, webAddrsSig = '';
 let webQr = { url: '', qr: null };
+// "On another Wi-Fi?": this PC's own Wi-Fi network for devices that aren't on its network (hotspot.js)
+const hotspot = new Hotspot(Object.assign({ log: (m) => log(m) }, TEST_MODE && process.env.FLICK_FAKE_HOTSPOT ? {
+  // tests: a NetworkManager that works (or, with FLICK_FAKE_HOTSPOT=fail, one that can't)
+  platform: 'linux',
+  run: async (what) => (what === 'nm-devices' ? { ok: true, out: 'wlan0:wifi:connected\n' } : { ok: process.env.FLICK_FAKE_HOTSPOT !== 'fail', out: '', err: 'Error: Connection activation failed: No suitable device found' }),
+} : {}));
+let hotQr = { text: '', qr: null }, hotAddr = null, hotLost = false;
+hotspot.on('state', () => pushWebState());
 const webCards = new Map();     // batch id -> the transfer whose card is on screen
 
 function webState() {
   const addrs = shareAddresses(lanAddresses());
+  // the PC's own Wi-Fi network is on: the page's address is the one on it
+  const hot = hotspot.view();
+  if (hot.state === 'on' && hotAddr && addrs.some((a) => a.address === hotAddr)) webAddr = hotAddr;
   if (!addrs.some((a) => a.address === webAddr)) webAddr = addrs.length ? addrs[0].address : null;
   const on = !!(web && web.active);
   const url = on && webAddr ? web.urlFor(webAddr) : '';
   if (webQr.url !== url) webQr = { url, qr: url ? QR.svgPath(QR.encode(url, { ecl: 'M' }), 4) : null };
+  if (hotQr.text !== hot.wifi) hotQr = { text: hot.wifi, qr: hot.wifi ? QR.svgPath(QR.encode(hot.wifi, { ecl: 'M' }), 4) : null };
   return {
     on, url, qr: webQr.qr, addrs, addr: webAddr, ended: web ? web.endedWhy : '', idleMin: web ? Math.round(web.limits.idleMs / 60000) : 30, isWin: IS_WIN,
     browsers: on ? web.browsers() : [], files: on ? web.sharedFiles() : [], texts: on ? web.texts : [], asking: webAsking,
+    hot: { can: hot.can, state: hot.state, kind: hot.kind, ssid: hot.ssid, pass: hot.pass, why: hot.why, qr: hotQr.qr, ready: hot.state === 'on' && webAddr === hotAddr, lost: hotLost },
   };
+}
+
+// The PC's own Wi-Fi network: on, then the address it has there (a new network adapter shows up for it)
+async function startHotspot() {
+  hotLost = false;
+  const before = new Set(lanAddresses().map((a) => a.address));
+  const v = await hotspot.start();
+  if (v.state !== 'on') return;
+  const known = /^192\.168\.137\.|^10\.42\.0\./;
+  for (let i = 0; i < 40 && hotspot.state === 'on'; i++) {
+    const now = lanAddresses().map((a) => a.address);
+    const hit = now.find((a) => known.test(a)) || now.find((a) => !before.has(a));
+    if (hit) { hotAddr = hit; webAddr = hit; log('PC Wi-Fi network', v.ssid, 'at', hit); break; }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  if (!hotAddr && hotspot.state === 'on') hotLost = true;     // its address never showed: the user picks it under Network
+  pushWebState();
 }
 function pushWebState() { panelSend('panel:web', webState()); }
 setInterval(() => {
@@ -1412,7 +1627,9 @@ ipcMain.on('panel:web', async (_e, m) => {
   if (!web || !m || typeof m !== 'object') return;
   switch (m.what) {
     case 'start': web.start(); break;
-    case 'stop': web.stop('user'); break;
+    case 'stop': web.stop('user'); hotspot.stop(); hotAddr = null; break;
+    case 'hot-start': startHotspot(); break;
+    case 'hot-stop': hotspot.stop(); hotAddr = null; break;
     case 'addr': if (typeof m.addr === 'string') webAddr = m.addr; break;
     case 'pick': {
       if (!web.active) break;
@@ -1440,7 +1657,8 @@ function startWeb() {
   web = new WebShare({ server, save: webSave, where: saveDirLabel });
   server.web = web;                             // server.js hands /w/ requests to it
   web.on('log', (m) => log(m));
-  web.on('state', pushWebState);
+  // sharing ended (by itself, after a while with no browser): the PC's own Wi-Fi network goes with it
+  web.on('state', () => { if (!web.active && hotspot.state !== 'off') { hotspot.stop(); hotAddr = null; } pushWebState(); });
   web.on('ask', onWebAsk);
   web.on('ask-done', onWebAskDone);
   web.on('incoming-start', onWebIncoming);
@@ -1448,6 +1666,30 @@ function startWeb() {
   web.on('incoming-done', onWebDone);
   web.on('text', (t) => { showPanel(); panelSend('panel:web-text', { id: t.id }); });
 }
+
+// ------------------------------------------------------------ send feedback (feedback.js)
+let fb = null;
+function startFeedback() {
+  const { Feedback } = require('./feedback');
+  fb = new Feedback({
+    version: VERSION, userDir, log, fetch: (url, opts) => require('electron').net.fetch(url, opts),
+    testUrl: (TEST_MODE && process.env.FLICK_TEST_FEEDBACK_URL) || null,     // a local stand-in for Google, in tests only
+    onSent: () => {                                                           // a message that waited for a connection went
+      panelSend('panel:feedback', Object.assign({ later: true }, fb.info()));
+      if (feats) feats.toast({ title: 'Feedback sent', body: 'Thanks. Your message has been sent.', silent: true });
+    },
+  });
+}
+ipcMain.on('panel:feedback', async (_e, m) => {
+  if (!fb || !m || typeof m !== 'object') return;
+  if (m.what === 'send') {
+    const r = await fb.send({ type: m.type === 'idea' ? 'idea' : 'bug', message: String(m.message || ''), email: String(m.email || ''), device: m.device === true });
+    panelSend('panel:feedback', Object.assign({ result: r }, fb.info()));
+    return;
+  }
+  panelSend('panel:feedback', fb.info());        // 'hello': the form was opened
+  fb.flush();
+});
 
 // ------------------------------------------------------------ app
 app.on('second-instance', (_e, argv) => {
@@ -1464,22 +1706,28 @@ app.on('before-quit', () => {
   try { if (bt) bt.stop(); } catch (e) { /* ignore */ }
   try { if (qs) qs.stop(); } catch (e) { /* ignore */ }
   try { if (feats) feats.stop(); } catch (e) { /* ignore */ }
+  try { hotspot.stop(); } catch (e) { /* ignore */ }                // the PC's own Wi-Fi network, if Flick started it
+  try { if (fb) fb.stop(); } catch (e) { /* ignore */ }
   try { server && server.stop(); } catch (e) { /* ignore */ }
 });
 
 // Leftovers from a crash or power cut (half-received files, staging folders) in Flick's own temp folders.
 // Nothing can be in flight at startup, so anything older than a few minutes goes.
-function sweepTemp() {
-  const now = Date.now();
+// Leftovers of transfers that never finished: at start, anything older than 10 minutes; while Flick runs (every 30
+// minutes), files untouched for six hours (a file still arriving is written to all the time; folders are left to the
+// transfers that own them)
+function sweepTemp(running) {
+  const now = Date.now(), age = running ? 6 * 3600000 : 10 * 60000;
   for (const dir of [path.join(app.getPath('temp'), 'flick-incoming'), path.join(app.getPath('temp'), 'flick-quickshare')]) {
     fs.readdir(dir, (e, names) => {
       if (e) return;
       for (const n of names) {
         const full = path.join(dir, n);
-        fs.stat(full, (er, st) => { if (!er && now - st.mtimeMs > 10 * 60000) fs.rm(full, { recursive: true, force: true }, () => {}); });
+        fs.stat(full, (er, st) => { if (!er && now - st.mtimeMs > age && (!running || st.isFile())) fs.rm(full, { recursive: true, force: true }, () => {}); });
       }
     });
   }
+  if (running) return;
   fs.readdir(app.getPath('userData'), (e, names) => {
     if (!e) for (const n of names) if (/^flick-fw-.*\.cmd$/.test(n)) fs.unlink(path.join(app.getPath('userData'), n), () => {});
   });
@@ -1487,17 +1735,21 @@ function sweepTemp() {
 
 app.whenReady().then(async () => {
   sweepTemp();
+  setInterval(() => sweepTemp(true), 30 * 60000).unref();
   // a Windows account without a full name could leave the PC named "Comment's PC": fix it automatically
   if (!store.name || store.name === "Comment's PC") { store.name = await defaultName(); saveStore(); }
   // this PC's certificate (made the first time): phones talk to it only over links encrypted with it
   const tlsId = tlscert.ensure(app.getPath('userData'), 'Flick ' + store.id);
   if (!tlsId) log('no certificate: encrypted links are off');
   server = new FlickServer({
-    id: store.id, name: store.name, port: 47860, discoveryPort: 47870, version: VERSION,
+    // test runs can move the ports (several copies under test on one machine); real installs always use the defaults
+    id: store.id, name: store.name, port: (TEST_MODE && +process.env.FLICK_PORT) || 47860,
+    discoveryPort: (TEST_MODE && +process.env.FLICK_DISCOVERY_PORT) || 47870, version: VERSION,
     tmpDir: path.join(app.getPath('temp'), 'flick-incoming'), devices: store.devices,
     settings: { side: store.side, anchor: store.anchor, theme: themeName() },
     allowOrigin: TEST_MODE ? /^http:\/\/127\.0\.0\.1:\d+$/ : null,   // test harnesses serve the phone page over http
     tls: tlsId,
+    haveFiles: (items) => received.lookup(items),
   });
   wireServer();
   try { const port = await server.start(); log('listening', port, lanAddresses().map((a) => a.address).join(',')); }
@@ -1506,9 +1758,11 @@ app.whenReady().then(async () => {
   feats = require('./features').attach({
     electron: require('electron'), server, store, saveStore, log, userDir, appDir: __dirname,
     saveReceived: webSave, saveDirNow, markOfWeb, openAfterArrival, panelSend, getPanel: () => panel,
-    sendFiles: (paths) => queueForPhone(paths), updateTray,
+    sendFiles: (paths) => queueForPhone(paths), updateTray, pushState: pushPanelState, front: askFront,
+    askMs: (TEST_MODE && +process.env.FLICK_TEST_ASK_MS) || undefined,   // tests can shorten the 60 s
   });
   feats.watchWeb(web);                          // files from browsers go into the history too
+  startFeedback();
   refreshPhoneApp();
   startUpdater();
 
@@ -1522,9 +1776,14 @@ app.whenReady().then(async () => {
   applySendTo();
   applyBluetooth();
   applyQuickShare();
+  // macOS: the menu bar's Edit menu is what makes copy and paste work in the panel's fields (Electron's default menu
+  // would also offer reloading the windows and their developer tools)
+  if (IS_MAC) Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: 'appMenu' }, { role: 'editMenu' }, { role: 'windowMenu' }]));
+  startedAt = Date.now();
   const startFiles = sendArgs(process.argv);
   if (startFiles.length) setTimeout(() => queueForPhone(startFiles), 1500);
-  else if (!HIDDEN_START || store.firstRun) showPanel();
+  else if (openFiles.length) setTimeout(sendOpenFiles, 1500);
+  else if (!(HIDDEN_START || openedAtLogin()) || store.firstRun) showPanel();
   if (TEST_MODE) startTestControl();
 });
 
@@ -1534,6 +1793,8 @@ function startTestControl() {
     const u = new URL(req.url, 'http://x');
     try {
       if (u.pathname.startsWith('/f/') && feats) return feats.test(u, res);    // the phone features (features.js)
+      if (u.pathname === '/fb/state' && fb) return res.end(JSON.stringify(Object.assign({ outbox: fb.outbox, url: fb._url() }, fb.info())));
+      if (u.pathname === '/fb/flush' && fb) { await fb.flush(); return res.end(JSON.stringify(fb.info())); }
       if (u.pathname === '/capture') {
         const w = u.searchParams.get('w') === 'panel' ? panel : overlay;
         const img = await w.webContents.capturePage();
@@ -1543,7 +1804,7 @@ function startTestControl() {
       if (u.pathname === '/state') {
         return res.end(JSON.stringify({
           overlayShown, overlayReady, connected: !!(server && server.connected),
-          transfers: [...transfers.values()].map((t) => ({ tid: t.tid, state: t.state, upload: t.upload, done: !!t.done })),
+          transfers: [...transfers.values()].map((t) => ({ tid: t.tid, state: t.state, upload: t.upload, done: !!t.done, paused: !!t.paused })),
           panel: !!(panel && panel.isVisible()), catcher: !!catcher, catcherBounds: catcher && catcher.getBounds(),
           overlayBounds: overlay && overlay.getBounds(), saveDir: saveDirPath(), name: server && server.name,
           version: VERSION, boot: BOOT, update: updateInfo, qsPort: qs && qs.port, qsState, btState,
@@ -1574,5 +1835,5 @@ function startTestControl() {
       }
       res.statusCode = 404; res.end();
     } catch (e) { res.statusCode = 500; res.end(String(e && e.stack)); }
-  }).listen(47999, '127.0.0.1');
+  }).listen((TEST_MODE && +process.env.FLICK_TEST_PORT) || 47999, '127.0.0.1');
 }

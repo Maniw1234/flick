@@ -42,6 +42,7 @@
       return false;
     } else {
       A.toast('Clipboard sent to ' + X.pcName(), 1800);   // (the app says how its own sending went)
+      A.nc('clipHistoryAdd', 'out', json);                 // clipboard history (the app keeps what it sends itself)
     }
     A.pref.set('clipHash', hashOf(c));
     A.pref.set('clipAdopt', '');

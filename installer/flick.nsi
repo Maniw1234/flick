@@ -71,6 +71,17 @@ Section "Install"
   CreateShortCut "$SMPROGRAMS\Flick.lnk" "$INSTDIR\Flick.exe" "" "$INSTDIR\Flick.ico" 0
   CreateShortCut "$DESKTOP\Flick.lnk" "$INSTDIR\Flick.exe" "" "$INSTDIR\Flick.ico" 0
 
+  ; "Send with Flick" in File Explorer's right-click menu, for files and folders (next to Send to > Flick (phone)),
+  ; for the user installing: per-user keys, no admin rights needed for them. Windows 11 shows it under "Show more
+  ; options": its first menu, like its Share sheet, only lists apps with package identity, which takes a signing
+  ; certificate the PC trusts. Up to 15 items at once (Windows' default for such a verb; Send to takes any number).
+  WriteRegStr HKCU "Software\Classes\*\shell\Flick" "MUIVerb" "Send with Flick"
+  WriteRegStr HKCU "Software\Classes\*\shell\Flick" "Icon" "$INSTDIR\Flick.ico"
+  WriteRegStr HKCU "Software\Classes\*\shell\Flick\command" "" '"$INSTDIR\Flick.exe" --send "%1"'
+  WriteRegStr HKCU "Software\Classes\Directory\shell\Flick" "MUIVerb" "Send with Flick"
+  WriteRegStr HKCU "Software\Classes\Directory\shell\Flick" "Icon" "$INSTDIR\Flick.ico"
+  WriteRegStr HKCU "Software\Classes\Directory\shell\Flick\command" "" '"$INSTDIR\Flick.exe" --send "%1"'
+
   ; allow the phone to reach Flick on this PC (private and public Wi-Fi)
   nsExec::Exec 'netsh advfirewall firewall delete rule name="Flick"'
   Pop $0
@@ -102,6 +113,8 @@ Section "Uninstall"
   nsExec::Exec 'netsh advfirewall firewall delete rule name="Flick"'
   Pop $0
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Flick"
+  DeleteRegKey HKCU "Software\Classes\*\shell\Flick"
+  DeleteRegKey HKCU "Software\Classes\Directory\shell\Flick"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Flick"
   RMDir /r "$INSTDIR"
 SectionEnd

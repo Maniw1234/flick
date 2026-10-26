@@ -5,7 +5,8 @@
 //   node signing/sign_release.js <version> [--key <pem>] [--repo Maniw1234/flick] [--dry-run] [--via-workflow]
 //
 // Downloads the release's SHA256SUMS and every file it lists, checks each one's SHA-256 (and that nothing on the
-// release is missing from SHA256SUMS) and that flick-app-<version>.zip really is that version, then signs
+// release is missing from SHA256SUMS) and that the app bundles (flick-app-<version>.zip, and the -mac- and -linux-
+// ones) really are that version, then signs
 //   "flick-release-v1\nversion <version>\n" followed by SHA256SUMS exactly as published
 // (ECDSA P-256 with SHA-256, DER, base64) and uploads that as SHA256SUMS.sig. A release that already has a
 // SHA256SUMS.sig is only checked. --dry-run does everything except the upload.
@@ -84,13 +85,16 @@ for (const [name, want] of list) {
   console.log(`  ok ${name} (${buf.length} bytes, sha256 ${got.slice(0, 16)}…)`);
 }
 
-// ---- the Windows bundle is this version (installed PCs update to it), and each phone app is the version its name says
-const bundleName = `flick-app-${version}.zip`;
-if (!files.has(bundleName)) die(`${bundleName} isn't in SHA256SUMS`);
-let pkg = null;
-try { pkg = JSON.parse(core.unzipAll(files.get(bundleName)).find((f) => f.name === 'package.json').data.toString('utf8')); } catch (e) { die(`${bundleName} has no readable package.json`); }
-if (pkg.version !== version) die(`${bundleName} holds version ${pkg.version}, not ${version}`);
-console.log(`  ok ${bundleName} is Flick ${pkg.version}`);
+// ---- the app bundles are this version (installed PCs update to them; Windows' must be there, the Mac's and Linux's
+// are checked when the release has them), and each phone app is the version its name says
+for (const sys of ['win32', 'darwin', 'linux']) {
+  const bundleName = core.bundleName(version, sys);
+  if (!files.has(bundleName)) { if (sys === 'win32') die(`${bundleName} isn't in SHA256SUMS`); continue; }
+  let pkg = null;
+  try { pkg = JSON.parse(core.unzipAll(files.get(bundleName)).find((f) => f.name === 'package.json').data.toString('utf8')); } catch (e) { die(`${bundleName} has no readable package.json`); }
+  if (pkg.version !== version) die(`${bundleName} holds version ${pkg.version}, not ${version}`);
+  console.log(`  ok ${bundleName} is Flick ${pkg.version}`);
+}
 for (const [name, buf] of files) {
   const m = /^Flick-(\d+\.\d+\.\d+)\.apk$/.exec(name);
   if (!m) continue;

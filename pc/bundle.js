@@ -35,10 +35,15 @@ function safeRelative(p) {
 class BundleReceiver {
   /**
    * @param {string} root  empty staging folder for this transfer
-   * @param {object} hooks { onManifest(m), onProgress(received, total) }
+   * @param {object} hooks { onManifest(m), onProgress(received, total), onFile({i, p, size, from}), onEntry({i, p, size, dir}) }
+   *   onFile: a file entry's file is open and its bytes come next; onEntry: an entry is complete (on disk, closed).
+   *   i: the entry's number in the phone's list for this stream (its "i"; else counted from opts.first)
    * @param {object} [shared] { taken, tops, assigned }: state shared by the streams of one striped bundle
+   * @param {object} [opts] { first, resume: { p, from } }: first: the number of this body's first entry (a stream sent
+   *   again from its skip-th entry); resume: this stream continues a file entry that was cut off: its first entry must be
+   *   that file (already staged, see `assigned`), whose bytes from `from` on are all that follow its header
    */
-  constructor(root, hooks, shared) {
+  constructor(root, hooks, shared, opts) {
     this.root = path.resolve(root);
     this.hooks = hooks || {};
     this.stage = 'magic';
@@ -54,6 +59,10 @@ class BundleReceiver {
     this.assigned = shared ? shared.assigned : null; // requested path -> staged path: a stream sent again rewrites its own files
     this.done = false;
     this.aborted = false;
+    this.resume = (opts && opts.resume && opts.resume.from > 0) ? opts.resume : null;
+    this.first = true;                // the next entry is the stream's first
+    this.nextNo = (opts && opts.first) || 0;   // the number an entry without its own "i" gets
+    this.pos = 0;                     // where the open file's next bytes go
   }
 
   _top(seg0) { if (!this.tops.includes(seg0)) this.tops.push(seg0); }
@@ -74,30 +83,48 @@ class BundleReceiver {
     const segs = safeRelative(h.p);
     if (!segs) throw new Error('bad path');
     const full = this._resolve(segs);
+    const no = Number.isSafeInteger(h.i) && h.i >= 0 ? h.i : this.nextNo;
+    this.nextNo = no + 1;
+    // a stream continuing a file that was cut off starts with that file's entry
+    const resume = this.first ? this.resume : null;
+    this.first = false;
+    this.resume = null;
+    if (resume && (h.d || String(h.p) !== resume.p)) throw new Error('resume mismatch');
     if (h.d || segs.length > 1) this._top(segs[0]);   // a top-level file is recorded under the name it's actually staged as
     if (h.d) {
       await fs.promises.mkdir(full, { recursive: true });
       this.stage = 'hlen'; this.need = 4;
+      if (this.hooks.onEntry) this.hooks.onEntry({ i: no, p: String(h.p), size: 0, dir: true });
       return;
     }
     const size = Math.max(0, Math.floor(+h.s || 0));
-    await fs.promises.mkdir(path.dirname(full), { recursive: true });
-    const ext = path.extname(full), base = full.slice(0, full.length - ext.length);
     let dest = this.assigned && this.assigned.get(String(h.p));
-    if (!dest) {
-      dest = full; let i = 2;
-      while (this.taken.has(this._key(dest)) || fs.existsSync(dest)) dest = base + ' (' + i++ + ')' + ext;
-      this.taken.set(this._key(dest), true);
-      if (this.assigned) this.assigned.set(String(h.p), dest);
+    let fd;
+    if (resume) {
+      // the file staged before, continued where it was cut off
+      if (!dest || resume.from > size) throw new Error('resume mismatch');
+      fd = await fs.promises.open(dest, 'r+');
+      this.pos = resume.from;
+    } else {
+      await fs.promises.mkdir(path.dirname(full), { recursive: true });
+      const ext = path.extname(full), base = full.slice(0, full.length - ext.length);
+      if (!dest) {
+        dest = full; let i = 2;
+        while (this.taken.has(this._key(dest)) || fs.existsSync(dest)) dest = base + ' (' + i++ + ')' + ext;
+        this.taken.set(this._key(dest), true);
+        if (this.assigned) this.assigned.set(String(h.p), dest);
+      }
+      fd = await fs.promises.open(dest, 'w');
+      this.pos = 0;
     }
     if (segs.length === 1) this._top(path.basename(dest));
-    const fd = await fs.promises.open(dest, 'w');
     // abort() can come while the file is being opened: close it here, or nothing ever would
     if (this.aborted) { await fd.close().catch(() => {}); throw new Error('aborted'); }
     this.fd = fd;
-    this.cur = { path: dest, mtime: +h.m || 0 };
-    this.left = size;
-    if (size === 0) await this._closeFile();
+    this.cur = { path: dest, mtime: +h.m || 0, i: no, p: String(h.p), size, written: this.pos };
+    this.left = size - this.pos;
+    if (this.hooks.onFile) this.hooks.onFile({ i: no, p: String(h.p), size, from: this.pos });
+    if (this.left === 0) await this._closeFile();
     else this.stage = 'data';
   }
 
@@ -107,6 +134,7 @@ class BundleReceiver {
     if (fd) await fd.close();
     if (cur && cur.mtime > 0) { const t = new Date(cur.mtime); await fs.promises.utimes(cur.path, t, t).catch(() => {}); }
     this.stage = 'hlen'; this.need = 4;
+    if (cur && this.hooks.onEntry) this.hooks.onEntry({ i: cur.i, p: cur.p, size: cur.size, dir: false });
   }
 
   /** Feed the next chunk of the request body (await before feeding the next one). */
@@ -118,8 +146,9 @@ class BundleReceiver {
         const n = Math.min(this.left, chunk.length - off);
         const slice = chunk.subarray(off, off + n);
         let w = 0;
-        while (w < slice.length) { const r = await this.fd.write(slice, w, slice.length - w); w += r.bytesWritten; }
-        off += n; this.left -= n; this.received += n;
+        while (w < slice.length) { const r = await this.fd.write(slice, w, slice.length - w, this.pos + w); w += r.bytesWritten; }
+        off += n; this.left -= n; this.received += n; this.pos += n;
+        if (this.cur) this.cur.written = this.pos;
         if (this.hooks.onProgress) this.hooks.onProgress(this.received, this.total);
         if (this.left === 0) await this._closeFile();
         continue;
@@ -152,7 +181,10 @@ class BundleReceiver {
       }
       case 'hlen': {
         const n = b.readUInt32BE(0);
-        if (n === 0) { this.done = true; this.stage = 'end'; return; }
+        if (n === 0) {
+          if (this.resume) throw new Error('resume mismatch');   // the file it was to continue never came
+          this.done = true; this.stage = 'end'; return;
+        }
         if (n > MAX_JSON) throw new Error('bad entry');
         this.stage = 'header'; this.need = n; return;
       }

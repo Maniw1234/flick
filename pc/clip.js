@@ -9,8 +9,9 @@
 const crypto = require('crypto');
 
 // What password managers put next to a copied password so clipboard tools leave it alone (Windows' own clipboard
-// history and cloud clipboard skip it; so does Flick): never sent to a phone
-const PRIVATE_FORMATS = ['ExcludeClipboardContentFromMonitorProcessing', 'CanUploadToCloudClipboard', 'org.nspasteboard.ConcealedType'];
+// history and cloud clipboard skip it; so does Flick): never sent to a phone. Then macOS' mark, and Linux's (KDE's).
+const PRIVATE_FORMATS = ['ExcludeClipboardContentFromMonitorProcessing', 'CanUploadToCloudClipboard', 'org.nspasteboard.ConcealedType']
+  .concat(process.platform === 'linux' ? ['x-kde-passwordManagerHint'] : []);
 const TEXT_MAX = 1024 * 1024;
 const PNG_MAX = 6 * 1024 * 1024;
 const sha = (b) => crypto.createHash('sha1').update(b).digest('hex');

@@ -33,8 +33,8 @@ class History {
   list() { return this.items; }
 
   /**
-   * e: { dir: 'in'|'out', name?, path?, size?, time?, device?, deviceName?, ok?, how?, folder? }
-   * how: fling | auto | quickshare | browser | sync | pc (what moved it)
+   * e: { dir: 'in'|'out', name?, path?, size?, time?, device?, deviceName?, ok?, how?, folder?, why? }
+   * how: fling | auto | quickshare | browser | sync | pc | pull (what moved it)
    */
   add(e) {
     const it = {
@@ -50,6 +50,7 @@ class History {
       how: e.how ? String(e.how).slice(0, 20) : '',
     };
     if (e.folder) it.folder = true;
+    if (e.why && it.ok === false) it.why = String(e.why).slice(0, 20);     // declined | timeout (Ask each time)
     this.items.unshift(it);
     if (this.items.length > this.max) this.items.length = this.max;
     this._changed();

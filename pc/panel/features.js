@@ -43,7 +43,8 @@
     if (t >= today - 86400000) return 'Yesterday';
     return new Date(t).toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long' });
   }
-  const HOW = { auto: 'auto', share: 'shared', quickshare: 'Quick Share', browser: 'browser', sync: 'sync' };
+  const HOW = { auto: 'auto', share: 'shared', quickshare: 'Quick Share', browser: 'browser', sync: 'sync', pull: 'Browse phone' };
+  const WHY = { declined: 'Declined', timeout: 'Not accepted in time' };
 
   let F = null;            // the latest state
   let H = { items: [], total: 0 };
@@ -120,7 +121,7 @@
     let t = 'Files you send and receive show up here.';
     if (l) {
       const who = l.deviceName ? (l.dir === 'out' ? ' to ' : ' from ') + l.deviceName : '';
-      t = !l.ok ? l.name + ' didn’t arrive · ' + ago(l.time)
+      t = !l.ok ? (WHY[l.why] ? 'Declined ' + l.name + who : l.name + ' didn’t arrive') + ' · ' + ago(l.time)
         : (l.dir === 'out' ? 'Sent ' + l.name + who : l.name + who) + ' · ' + ago(l.time);
     }
     $('fHistSub').textContent = t;
@@ -152,6 +153,7 @@
   function renderSettings() {
     $('fSetBox').hidden = !F.seenFeat;
     $('fClipSync').checked = !!F.clipSync;
+    $('fClipHist').checked = !!F.clipHistory;
     $('fOpenLinks').checked = !!F.openLinks;
     $('fNotify').checked = !!F.phoneNotify;
     const apps = F.apps || [];
@@ -173,6 +175,7 @@
     }
   }
   $('fClipSync').onchange = (e) => send('set', { key: 'clipSync', value: e.target.checked });
+  $('fClipHist').onchange = (e) => send('set', { key: 'clipHistory', value: e.target.checked });
   $('fOpenLinks').onchange = (e) => send('set', { key: 'openLinks', value: e.target.checked });
   $('fNotify').onchange = (e) => send('set', { key: 'phoneNotify', value: e.target.checked });
   $('fAppsHead').onclick = () => {
@@ -249,7 +252,7 @@
       const sub = el('span', 'fhsub');
       const who = it.deviceName ? (it.dir === 'out' ? 'To ' : 'From ') + it.deviceName : it.dir === 'out' ? 'Sent' : 'Received';
       const bits = [];
-      if (!it.ok) { const w = el('span', 'why', 'Didn’t arrive'); sub.appendChild(w); bits.push(''); }
+      if (!it.ok) { const w = el('span', 'why', WHY[it.why] || 'Didn’t arrive'); sub.appendChild(w); bits.push(''); }
       bits.push(who + (HOW[it.how] ? ' (' + HOW[it.how] + ')' : ''));
       if (it.ok) bits.push(it.folder ? 'Folder' : fmt(it.size || 0));
       if (it.ok && !it.there && it.path) bits.push('moved or deleted');

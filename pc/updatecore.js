@@ -15,11 +15,29 @@ const MAX_FILES = 2000;
 // account still can't ship an update. A list, so a new key can be added here before the old one is retired.
 const RELEASE_KEYS = ['MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEUGJiEHyLcmPkuREqLXb7MLtKMKoRBQUNuKb8Gjcw7tIMuDVr0cRSM2Xjpu3SWDM4vdpGOJXnYjVG5Tin5P1DZA=='];
 
-/** Where downloaded app updates live: %LOCALAPPDATA%\Flick\app on Windows (no admin rights needed). */
+/**
+ * Where downloaded app updates live, per user (no admin rights needed): %LOCALAPPDATA%\Flick\app on Windows,
+ * ~/Library/Application Support/Flick/app on macOS, $XDG_DATA_HOME/Flick/app (~/.local/share/Flick/app) on Linux.
+ */
 function updatesRoot() {
   if (process.env.FLICK_UPDATES_DIR) return process.env.FLICK_UPDATES_DIR;
   if (process.platform === 'win32' && process.env.LOCALAPPDATA) return path.join(process.env.LOCALAPPDATA, 'Flick', 'app');
+  if (process.platform === 'darwin') return path.join(os.homedir(), 'Library', 'Application Support', 'Flick', 'app');
+  if (process.platform === 'linux') {
+    const x = process.env.XDG_DATA_HOME;
+    return path.join(x && path.isAbsolute(x) ? x : path.join(os.homedir(), '.local', 'share'), 'Flick', 'app');
+  }
   return path.join(os.homedir(), '.flick', 'app');
+}
+
+/**
+ * The app bundle a release carries for a system (process.platform by default): flick-app-<version>.zip is Windows'
+ * (the name installed copies have always looked for), flick-app-mac-<version>.zip and flick-app-linux-<version>.zip
+ * hold the same app with the Mac's or Linux's own helpers.
+ */
+function bundleName(version, platform) {
+  const p = platform || process.platform;
+  return 'flick-app-' + (p === 'darwin' ? 'mac-' : p === 'linux' ? 'linux-' : '') + version + '.zip';
 }
 
 function parseVersion(v) {
@@ -101,7 +119,10 @@ function writeProof(dir, p) {
   fs.writeFileSync(path.join(dir, 'SHA256SUMS.sig'), p.sig);
 }
 
-/** Every file in a zip, as [{ name, data }]; refuses anything that could land outside the target folder. */
+/**
+ * Every file in a zip, as [{ name, data, exec }]; refuses anything that could land outside the target folder. exec: the
+ * zip was made on Unix with the file executable (a helper program on macOS needs that to run).
+ */
 function unzipAll(buf) {
   if (buf.length > MAX_BUNDLE) throw new Error('bundle too big');
   let eocd = -1;
@@ -117,6 +138,7 @@ function unzipAll(buf) {
     const crc = buf.readUInt32LE(p + 16), csize = buf.readUInt32LE(p + 20), usize = buf.readUInt32LE(p + 24);
     const nameLen = buf.readUInt16LE(p + 28), extraLen = buf.readUInt16LE(p + 30), commentLen = buf.readUInt16LE(p + 32);
     const local = buf.readUInt32LE(p + 42);
+    const exec = (buf.readUInt16LE(p + 4) >> 8) === 3 && ((buf.readUInt32LE(p + 38) >>> 16) & 0o111) !== 0;
     const name = buf.toString('utf8', p + 46, p + 46 + nameLen).replace(/\\/g, '/');
     p += 46 + nameLen + extraLen + commentLen;
     if (name.endsWith('/')) continue;                                   // folder entry
@@ -132,7 +154,7 @@ function unzipAll(buf) {
     else if (method === 8) data = zlib.inflateRawSync(raw, { maxOutputLength: MAX_ENTRY });
     else throw new Error('unsupported compression');
     if (data.length !== usize || (zlib.crc32 && zlib.crc32(data) >>> 0 !== crc >>> 0)) throw new Error('damaged entry ' + name);
-    out.push({ name, data });
+    out.push({ name, data, exec });
   }
   return out;
 }
@@ -153,7 +175,7 @@ function installBundle(root, version, zipBuf) {
       const full = path.join(tmp, ...f.name.split('/'));
       if (!full.startsWith(tmp + path.sep)) throw new Error('bad path');
       fs.mkdirSync(path.dirname(full), { recursive: true });
-      fs.writeFileSync(full, f.data);
+      fs.writeFileSync(full, f.data, f.exec ? { mode: 0o755 } : undefined);
     }
     fs.rmSync(dest, { recursive: true, force: true });
     fs.renameSync(tmp, dest);
@@ -175,6 +197,6 @@ function pruneUpdates(root, keep) {
 }
 
 module.exports = {
-  updatesRoot, parseVersion, newer, readCurrent, writeCurrent, sha256, unzipAll, installBundle, pruneUpdates,
+  updatesRoot, bundleName, parseVersion, newer, readCurrent, writeCurrent, sha256, unzipAll, installBundle, pruneUpdates,
   RELEASE_KEYS, releaseMessage, verifyRelease, parseSums, readProof, writeProof,
 };
