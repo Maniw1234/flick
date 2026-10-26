@@ -15,7 +15,7 @@ const core = require('../pc/updatecore');
 
 const REPO = 'Maniw1234/flick';
 const ID = 'Maniw1234.Flick';
-const MANIFEST = '1.10.0';                 // winget manifest schema
+const MANIFEST = '1.12.0';                 // winget manifest schema
 function die(msg) { console.error('update: ' + msg); process.exit(1); }
 
 const args = process.argv.slice(2);

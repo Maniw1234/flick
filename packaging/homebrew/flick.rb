@@ -5,9 +5,9 @@
 cask "flick" do
   arch arm: "arm64", intel: "x64"
 
-  version "1.0.0"
-  sha256 arm:   "0000000000000000000000000000000000000000000000000000000000000000",
-         intel: "0000000000000000000000000000000000000000000000000000000000000000"
+  version "1.1.0"
+  sha256 arm:   "1b1f5e6a8d83abf8fdc18b7274cb23fe635c3e9e3fca63a6effa5887f2ac5ed4",
+         intel: "02f20cf2e31f73401675df1c14e29540de22272db376496a0f11a4d2f5be2b47"
 
   url "https://github.com/Maniw1234/flick/releases/download/v#{version}/Flick-mac-#{arch}.dmg"
   name "Flick"
