@@ -22,11 +22,12 @@ final class FeedbackForm {
     // address it gives has /forms/d/e/<FORM_ID>/viewform and one entry.<number>=... per question). The PC app has the
     // same block in pc/feedback.js. While FORM_ID is the placeholder, Settings > Send feedback says it isn't set up yet
     // and nothing is sent.
-    static final String FORM_ID = "PLACEHOLDER_FORM_ID";              // the long id between /forms/d/e/ and /viewform
-    static final String ENTRY_TYPE = "entry.PLACEHOLDER_TYPE";        // "Bug" or "Idea" (a choice with those two)
-    static final String ENTRY_MESSAGE = "entry.PLACEHOLDER_MESSAGE";
-    static final String ENTRY_EMAIL = "entry.PLACEHOLDER_EMAIL";
-    static final String ENTRY_DEVICE = "entry.PLACEHOLDER_DEVICE";    // device info, and the last crash report if attached
+    // the long id between /forms/d/e/ and /viewform
+    static final String FORM_ID = "1FAIpQLScAFSO2yq4_jbLiibQxTC_76whukL88i0pqRyAApD0KPK5-iA";
+    static final String ENTRY_TYPE = "entry.749821100";        // "Bug" or "Idea" (a choice with those two)
+    static final String ENTRY_MESSAGE = "entry.263938692";
+    static final String ENTRY_EMAIL = "entry.284337267";
+    static final String ENTRY_DEVICE = "entry.827076895";    // device info, and the last crash report if attached
     // ==================================================================================================================
 
     /** Tests only: a JVM test points this at a local stand-in for Google. Nothing in the app ever sets it. */

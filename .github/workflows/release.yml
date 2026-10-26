@@ -240,4 +240,16 @@ jobs:
           ( cd "$OUT" && sha256sum * > SHA256SUMS )
           awk -v v="## $V" '$0==v{f=1;next} /^## /{f=0} f' CHANGES.md > notes.md
           [ -s notes.md ] || echo "Flick $V" > notes.md
-          gh release create "v$V" --target "$GITHUB_SHA" --title "Flick $V" --notes-file notes.md --latest "$OUT"/*
+          # A draft of this release made by the repository's owner beforehand gets the files and goes out, so the release
+          # shows as the owner's; without one, this workflow makes the release.
+          DRAFT=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=50" --jq "[.[] | select(.draft and .tag_name == \"v$V\")][0].id // empty")
+          if [ -n "$DRAFT" ]; then
+            for f in "$OUT"/*; do
+              curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: application/octet-stream" --data-binary @"$f" \
+                "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$DRAFT/assets?name=$(basename "$f")" > /dev/null
+            done
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$DRAFT" -f tag_name="v$V" -f target_commitish="$GITHUB_SHA" \
+              -f name="Flick $V" -F body=@notes.md -F draft=false -f make_latest=true --silent
+          else
+            gh release create "v$V" --target "$GITHUB_SHA" --title "Flick $V" --notes-file notes.md --latest "$OUT"/*
+          fi

@@ -10,11 +10,12 @@
 // android/src/com/flick/app/FeedbackForm.java. While FORM_ID is the placeholder, the window says feedback isn't set up
 // yet and nothing is sent.
 const FORM = {
-  id: 'PLACEHOLDER_FORM_ID',        // the long id between /forms/d/e/ and /viewform
-  type: 'entry.PLACEHOLDER_TYPE',   // "Bug" or "Idea" (a multiple-choice question with exactly those two choices)
-  message: 'entry.PLACEHOLDER_MESSAGE',
-  email: 'entry.PLACEHOLDER_EMAIL',
-  device: 'entry.PLACEHOLDER_DEVICE',   // app version and Windows version (empty when the user unticks it)
+  // the long id between /forms/d/e/ and /viewform
+  id: '1FAIpQLScAFSO2yq4_jbLiibQxTC_76whukL88i0pqRyAApD0KPK5-iA',
+  type: 'entry.749821100',   // "Bug" or "Idea" (a multiple-choice question with exactly those two choices)
+  message: 'entry.263938692',
+  email: 'entry.284337267',
+  device: 'entry.827076895',   // app version and Windows version (empty when the user unticks it)
 };
 // ======================================================================================================================
 
