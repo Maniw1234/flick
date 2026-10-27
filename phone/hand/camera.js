@@ -149,7 +149,8 @@
       if (!this.on || this.busy || this.rd) return;    // (frames read from the track come by themselves)
       const go = () => {
         if (!this.on || this.busy) return;
-        if (!this._grab()) this.timer = setTimeout(() => this._tick(), 40);    // no picture yet
+        try { if (!this._grab()) this.timer = setTimeout(() => this._tick(), 40); }    // no picture yet
+        catch (e) { this.timer = setTimeout(() => this._tick(), 200); }               // a frame that can't be read
       };
       if (performance.now() - this.seen < 1200) soon(go);
       else this.timer = setTimeout(go, 160);
@@ -159,15 +160,19 @@
     // no hand is near (about 5 a second)
     async _read(track, gen) {
       let rd;
-      try { rd = this.rd = new MediaStreamTrackProcessor({ track }).readable.getReader(); } catch (e) { return; }
-      let n = 0;
-      try {
-        for (;;) {
-          const { value: f, done } = await rd.read();
-          if (done) break;
-          if (!this.on || this.gen !== gen) { f.close(); break; }
+      try { rd = this.rd = new MediaStreamTrackProcessor({ track }).readable.getReader(); } catch (e) { this._fail(gen, e); return; }
+      let n = 0, errors = 0;
+      for (;;) {
+        let f = null;
+        try {
+          const r = await rd.read();
+          if (r.done) break;
+          f = r.value;
+        } catch (e) { break; }                       // the camera stopped (stop() cancels the reader)
+        try {
+          if (!this.on || this.gen !== gen) break;
           const near = performance.now() - this.seen < 1200;
-          if (this.busy || (!near && n++ % 3 !== 0)) { f.close(); continue; }
+          if (this.busy || (!near && n++ % 3 !== 0)) continue;
           const k = Math.min(1, (this.o.size || MAX_SIDE) / Math.max(f.displayWidth, f.displayHeight));
           const w = Math.round(f.displayWidth * k), h = Math.round(f.displayHeight * k);
           if (!this.oc || this.oc.width !== w || this.oc.height !== h) {
@@ -176,10 +181,22 @@
             this.bufs = [];
           }
           this.ox.drawImage(f, 0, 0, w, h);
-          f.close();
+          f.close(); f = null;
           this._send(this.ox.getImageData(0, 0, w, h), w, h);
+          errors = 0;
+        } catch (e) {
+          if (++errors >= 5) { this._fail(gen, e); break; }   // a frame that can't be read is skipped; five in a row stop it
+        } finally {
+          if (f) try { f.close(); } catch (e) { /* ignore */ }
         }
-      } catch (e) { /* the camera stopped */ }
+      }
+    }
+
+    // the camera can't be read: off, and said so
+    _fail(gen, e) {
+      if (!this.on || this.gen !== gen) return;
+      this.stop();
+      this.state('error', String((e && e.message) || e));
     }
 
     _grab() {
@@ -204,17 +221,20 @@
       this.busy = true;
       this.sent = now;
       this.w = w; this.h = h;
-      // a tracker that never answers (it shouldn't) doesn't stop the camera's frames for good
+      const id = (this.inflight = ++this.id);
+      // a tracker that never answers (it shouldn't) doesn't stop the camera's frames for good: that frame is given up
       clearTimeout(this.busyT);
-      this.busyT = setTimeout(() => { this.busy = false; this._tick(); }, 3000);
-      this.worker.postMessage({ t: 'frame', id: ++this.id, buf, w, h, look }, [buf]);
+      this.busyT = setTimeout(() => { if (this.inflight === id) { this.inflight = 0; this.busy = false; this._tick(); } }, 3000);
+      this.worker.postMessage({ t: 'frame', id, buf, w, h, look }, [buf]);
     }
 
     _result(m) {
       if (m.t !== 'result') return;
+      if (m.buf) this.bufs.push(m.buf);
+      if (m.id !== this.inflight) return;           // a frame given up on (see _send): the one in flight is another
+      this.inflight = 0;
       clearTimeout(this.busyT);
       this.busy = false;
-      if (m.buf) this.bufs.push(m.buf);
       if (!this.on) return;
       if (!m.skipped) {
         this.stats.frames++;

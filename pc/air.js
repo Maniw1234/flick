@@ -241,7 +241,9 @@ function attach(o) {
       a.goAt = Date.now();
       a.video = m.video && Number.isFinite(+m.video.t) ? { t: Math.max(0, +m.video.t) } : null;
       const now = Date.now();
-      const seen = (a.landAt && now - a.landAt.at < SEEN_MS && a.landAt) || (lastOpen && lastOpen.at > a.at && now - lastOpen.at < 900 && lastOpen);
+      // where the hand opened (just now, or a moment ago), or an open hand the camera sees right now
+      const seen = (a.landAt && now - a.landAt.at < SEEN_MS && a.landAt) || (lastOpen && lastOpen.at > a.at && now - lastOpen.at < 900 && lastOpen)
+        || (hand && hand.pose === 'open' && now - hand.at < 600 && hand);
       if (seen) { land(a, seen); return a.video; }
       // no camera to see the hand: in from the edge now; otherwise the hand has a moment to reach the PC and open
       if (a.cam === false || !camOn() || /denied|nocamera|error/.test(camState)) { land(a, null); return a.video; }

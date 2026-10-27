@@ -1506,7 +1506,8 @@ function wireServer() {
       if (t.state === 'dropped') { fx('failed', { tid }); server.pushToPhone({ t: 'failed', tid, why: 'upload' }); hist({ dir: 'in', tid, name: t.name, size: 0, ok: false, how: 'fling' }); }
       else if (t.state === 'lifted') {
         fx('cancel', { tid });
-        if (t.air) server.pushToPhone({ t: 'failed', tid, why: 'upload' });   // a hand still holds it on the phone
+        // a hand still holds it on the phone: told, and a later attempt of it is turned away (as for a cancel)
+        if (t.air) { server.pushToPhone({ t: 'failed', tid, why: 'upload' }); gone.set(tid, Date.now()); }
       }
       if (air) air.cancel(tid);
       unask(t);

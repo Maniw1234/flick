@@ -2404,8 +2404,12 @@
   function onFailed(m) {
     // turned down on a PC set to "Ask each time": the send engine's job says so too (it may have sent every byte)
     if ((m.why === 'declined' || m.why === 'timeout') && st.jobs.has(m.tid)) nc('sendRefused', m.tid, m.why);
-    // Air grab: held without being let go of for very long, the PC put it back: so does the phone
-    if (m.why === 'held') { if (st.jobs.has(m.tid)) nc('sendCancel', m.tid); else nc('abort', m.tid); }
+    // Air grab: held without being let go of for very long, or its upload failed while held, the PC put it back: so does
+    // the phone (its background send stops)
+    const held = st.pending.get(m.tid);
+    if (m.why === 'held' || (m.why === 'upload' && held && held.air && held.phase === 'lifted')) {
+      if (st.jobs.has(m.tid)) nc('sendCancel', m.tid); else nc('abort', m.tid);
+    }
     const p = st.pending.get(m.tid);
     if (!p) return;
     st.pending.delete(m.tid);
