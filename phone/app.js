@@ -446,6 +446,7 @@
     st.ws = null; st.wsOpen = false; st.connected = false; st.trusted = false; st.awaitingApproval = false; st.connecting = false;
     st.pcProved = false;
     updateConn();
+    edgeOff();
   }
 
   // The way to the PC. Over Bluetooth: the local port the app's Bluetooth link gives (Bluetooth encrypts that link
@@ -541,6 +542,7 @@
     st.wsOpen = false; st.connected = false; st.connecting = false; st.pcProved = false;
     clearInterval(pingT);
     updateConn();
+    edgeOff();
     for (const [tid, p] of st.pending) {
       if (p.phase === 'lifted') { st.pending.delete(tid); if (p.job) nc('sendCancel', tid); }
       // the file already reached the PC; the "saved" note just can't arrive now
@@ -1814,6 +1816,9 @@
     if (typeof m.y === 'number') EG.y = clamp(m.y, 0, innerHeight);
     egKick();
   }
+  // the glow goes out: a card that left without flying off (Teleport), or the PC's hover on a link that's gone (its
+  // "off" can't come now); a lit target kept the glow on and its frame loop running for good
+  function edgeOff() { if (EG.target || EG.hover) { EG.hover = false; EG.target = 0; egKick(); } }
 
   // ------------------------------------------------------------------ release effects (canvas): vapor, ripples, particles
   const fxc = $('fx');
@@ -2234,7 +2239,7 @@
       }
       if (hid) setTimeout(() => layout(true), 120);
       if (SEL.on) setSelecting(false);
-      if (gone) { D.f.remove(); D = null; }
+      if (gone) { D.f.remove(); D = null; edgeOff(); }
     } else {
       if (st.pending.has(D.tid)) {
         wsSend({ t: 'cancel', tid: D.tid });
