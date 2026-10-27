@@ -3,7 +3,8 @@
  * pinch and move to select more. Make a fist to grab: the file open full screen, else the selection, else the file
  * that is lit up. Their upload starts at once. Take the fist away toward the PC and they go: they land where the PC's
  * camera sees your hand open, or come in from the screen's edge on a PC without one. Opening your hand over the phone
- * again puts them back. The other way round: copy files on the PC, bring a fist over the phone and open it.
+ * again puts them back. The other way round: with this on and Flick open, select files on the PC (copy them, on Linux),
+ * close your open hand into a fist in front of its screen, then bring it over the phone and open it.
  * The camera runs only while this is on (Settings), Flick is open on screen and a PC is connected. The hand tracking
  * runs on the phone (phone/hand/: MediaPipe's hand models on Flick's own engine); no picture leaves the phone. */
 (window.FlickFeatures = window.FlickFeatures || []).push(function (A, X) {
@@ -271,7 +272,7 @@
       const pc = X.pcName();
       A.toast(m.why === 'camoff' ? 'Air grab is off in Flick’s window on ' + pc + ': turn it on to grab files there'
         : m.why === 'nocamera' ? pc + ' has no camera Flick can use, so files there can’t be grabbed by hand'
-          : 'Select files on ' + pc + ', grab them with a fist in front of the screen, then open it here', 3200);
+          : (m.how === 'copy' ? 'Copy files on ' : 'Select files on ') + pc + ', grab them with a fist in front of the screen, then open it here', 3200);
     } else if (m.t === 'air-held') {
       // a fist picked files up in front of the PC: they come here when it opens over the phone
       if (+m.n > 0) A.toast((+m.n > 1 ? m.n + ' files' : String(m.name || 'A file')) + ' in your hand: open it over the phone', 3200);
@@ -403,7 +404,7 @@
     card.appendChild(row);
     if (on && camState === 'on' && A.st.connected) {
       const n = h('div', 'srow fsnote airtip');
-      n.appendChild(h('span', '', 'Pinch over a file to select it, and keep pinching across more. Files copied on ' + X.pcName() + ' come here when you bring a fist over the phone and open it.'));
+      n.appendChild(h('span', '', 'Pinch over a file to select it, and keep pinching across more. To bring files here, select them on ' + X.pcName() + ', make a fist in front of its screen, then open it over the phone.'));
       card.appendChild(n);
     }
     g.appendChild(card);

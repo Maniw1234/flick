@@ -58,10 +58,10 @@ Pick files up with your hand and drop them on the PC, without touching the scree
   selecting them.
 - **The cameras:** the phone's front camera runs only while Air grab is on, Flick is open on screen and a PC is
   connected. The PC's camera turns on only for a few seconds: after a grab on the phone, until the file lands, and
-  after you select files on the PC while Flick is open on the phone (at most 45 seconds in any 2 minutes). macOS asks
-  once for the camera, and once to let Flick ask Finder what's selected; turn the PC's camera off in Flick's window:
-  Files > Air grab. Hand tracking runs on each device, with MediaPipe's hand models on Flick's own WebAssembly engine
-  (`hand/`); no picture leaves the device.
+  after you select files on the PC (or bring a window with files selected to the front) while Flick is open on the
+  phone; at most 30 seconds at a time and 45 seconds in any 2 minutes. macOS asks once for the camera, and once to let
+  Flick ask Finder what's selected; turn the PC's camera off in Flick's window: Files > Air grab. Hand tracking runs on
+  each device, with MediaPipe's hand models on Flick's own WebAssembly engine (`hand/`); no picture leaves the device.
 
 ## What's in here
 

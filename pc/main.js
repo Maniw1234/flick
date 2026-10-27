@@ -508,8 +508,10 @@ function flushSendQueue() {
   if (fresh) setTimeout(() => sendPathsToPhone(q), 1200);
 }
 
+// opts: { fx: false (their cards already fly: Air grab), device (to that phone, not the one in use) }
 async function sendPathsToPhone(list, screenY, opts) {
   if (!server || !server.connected) return 0;
+  const device = (opts && opts.device) || undefined;
   const paths = expandPaths(list);
   if (!paths.length) return 0;
   const sy = typeof screenY === 'number' ? screenY : overlayBounds().y + store.anchor * overlayBounds().height;
@@ -519,7 +521,7 @@ async function sendPathsToPhone(list, screenY, opts) {
     const p = paths[i];
     const name = path.basename(p);
     const mime = MIME[extOf(name)] || 'application/octet-stream';
-    const offer = server.offerFile(p, mime);
+    const offer = server.offerFile(p, mime, device);
     // only the cards that fly across the screen need a picture (the phone makes its own once a file has arrived).
     // Thumbnails decode on this thread, so let downloads and messages run between files.
     const th = i < shown ? await thumbFor(p) : null;
@@ -533,7 +535,7 @@ async function sendPathsToPhone(list, screenY, opts) {
     server.pushToPhone({
       t: 'incoming', fid: offer.fid, name, size: offer.size, mime, kind, ext,
       thumb: th && th.url, aspect, y: phoneYFromOverlayY(y), url: '/api/file/' + encodeURIComponent(offer.fid), delay: Math.min(i, shown) * 90,
-    });
+    }, device);
     log('offer', name, offer.size);
   }
   return paths.length;
@@ -1825,6 +1827,7 @@ app.whenReady().then(async () => {
       discard(t);
     },
     liftMaxMs: (TEST_MODE && +process.env.FLICK_TEST_AIR_HOLD_MS) || undefined,      // tests can shorten the 90 s
+    camMaxMs: (TEST_MODE && +process.env.FLICK_TEST_AIR_CAM_MS) || undefined,        // and the camera's half minute
     debug: TEST_MODE,                                                                  // tests: hand events in the log
   });
   createTray();
@@ -1855,7 +1858,7 @@ function startTestControl() {
       if (u.pathname.startsWith('/f/') && feats) return feats.test(u, res);    // the phone features (features.js)
       if (u.pathname === '/fb/state' && fb) return res.end(JSON.stringify(Object.assign({ outbox: fb.outbox, url: fb._url() }, fb.info())));
       if (u.pathname === '/air' && air) { air.testHand(JSON.parse(u.searchParams.get('ev') || '{}')); return res.end('ok'); }   // a hand the camera "sees"
-      if (u.pathname === '/air-select' && air) { air.testSelect(JSON.parse(u.searchParams.get('paths') || '[]')); return res.end('ok'); }   // files "selected"
+      if (u.pathname === '/air-select' && air) { air.testSelect(JSON.parse(u.searchParams.get('paths') || '[]'), u.searchParams.get('first') === '1'); return res.end('ok'); }   // files "selected"
       if (u.pathname === '/air-state' && air) return res.end(JSON.stringify(air.state));
       if (u.pathname === '/fb/flush' && fb) { await fb.flush(); return res.end(JSON.stringify(fb.info())); }
       if (u.pathname === '/capture') {

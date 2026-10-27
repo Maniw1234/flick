@@ -1562,11 +1562,11 @@ class FlickServer extends EventEmitter {
     return false;
   }
 
-  offerFile(filePath, mime) {
+  offerFile(filePath, mime, device) {
     const st = fs.statSync(filePath);
     const fid = rid(8);
-    // device: the phone it's offered to (the one in use), for the history once it has fetched it
-    this.outgoing.set(fid, { path: filePath, name: path.basename(filePath), size: st.size, mime: mime || 'application/octet-stream', at: Date.now(), device: this.session ? this.session.device : null });
+    // device: the phone it's offered to (the one named, else the one in use), for the history once it has fetched it
+    this.outgoing.set(fid, { path: filePath, name: path.basename(filePath), size: st.size, mime: mime || 'application/octet-stream', at: Date.now(), device: device || (this.session ? this.session.device : null) });
     setTimeout(() => this.outgoing.delete(fid), 30 * 60 * 1000);
     return { fid, name: path.basename(filePath), size: st.size };
   }
