@@ -129,12 +129,14 @@ function attach(o) {
   }
   function stopCamIfIdle() { if (![...lifted.values()].some((a) => !a.landed)) stopCam(); }
 
-  // ---- where a hand in the camera's view is on the screen (the camera faces the user: the view is mirrored, so the
-  // hand moves on the screen the way it moves in front of it)
+  // ---- where a hand in the camera's view is on the screen. The camera faces the user: the view is mirrored, so the
+  // hand moves on the screen the way it moves in front of it. Held in front of the screen, the hand fills the middle of
+  // the camera's view across, and its lower part down (the camera sits at the top of the screen); a card following
+  // the fist shows where it will land.
   function toScreen(pos) {
     const s = o.overlaySize();
     const cl = (v) => Math.max(0, Math.min(1, v));
-    return { x: cl((pos[0] - 0.1) / 0.8) * s.width, y: cl((pos[1] - 0.12) / 0.72) * s.height };
+    return { x: cl((pos[0] - 0.2) / 0.6) * s.width, y: cl((pos[1] - 0.3) / 0.65) * s.height };
   }
   const newest = () => { let b = null; for (const a of lifted.values()) if (!a.landed && (!b || a.at > b.at)) b = a; return b; };
 
