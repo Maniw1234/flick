@@ -63,7 +63,7 @@ public class ActionActivity extends Activity {
                 // taken now, while this has focus; an image in it is read and converted off the main thread
                 final ClipData cd = Clip.grab(this);
                 final Actions.Report say = toast;
-                Bg.run("send clipboard", new Runnable() {
+                Bg.send("send clipboard", new Runnable() {
                     @Override public void run() { Actions.sendClipboard(app, Clip.describe(app, cd, true), say); }
                 });
             } else {

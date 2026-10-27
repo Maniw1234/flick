@@ -94,7 +94,7 @@ public class AutoSend extends JobService {
     static void kick(Context c) {
         final Context app = c.getApplicationContext();
         if ("off".equals(Features.autoSend(app))) return;
-        Bg.run("auto-send", new Runnable() { @Override public void run() { work(app, null); } });
+        Bg.send("auto-send", new Runnable() { @Override public void run() { work(app, null); } });
     }
 
     // ------------------------------------------------------------ jobs

@@ -56,7 +56,7 @@ final class Actions {
      */
     static void sendLatestPhoto(final Context ctx, final String how, final boolean held, final Report r) {
         final Context c = ctx.getApplicationContext();
-        boolean started = Bg.run("send photo", new Runnable() {
+        boolean started = Bg.send("send photo", new Runnable() {
             @Override
             public void run() {
                 PcClient.Target t = null;
@@ -95,7 +95,7 @@ final class Actions {
             r.say(clip != null && clip.optBoolean("sensitive", false) ? "That was copied as private: Flick leaves it on the phone" : "Your clipboard is empty");
             return;
         }
-        Bg.run("send clipboard", new Runnable() {
+        Bg.send("send clipboard", new Runnable() {
             @Override
             public void run() {
                 PcClient.Target t = null;
