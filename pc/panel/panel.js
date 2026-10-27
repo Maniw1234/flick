@@ -50,6 +50,14 @@
     $('sound').checked = !!s.sound;
     $('openAfter').checked = !!s.openAfter;
     $('showSpeed').checked = !!s.showSpeed;
+    $('airCam').checked = s.airCam !== false;
+    // a camera Flick tried and couldn't use (none, or the system doesn't allow it): files come in from the edge
+    $('airCamSub').textContent = s.airCam !== false && s.airCamState === 'denied'
+      ? (s.os === 'mac' ? 'macOS doesn’t let Flick use the camera: allow it in System Settings › Privacy & Security › Camera.'
+        : s.os === 'win' ? 'Windows doesn’t let Flick use the camera: turn on “Let desktop apps access your camera” in Settings › Privacy & security › Camera.'
+          : 'Flick can’t use this PC’s camera, so files come in from the edge.')
+      : s.airCam !== false && s.airCamState === 'nocamera' ? 'This PC has no camera Flick can use, so files come in from the edge.'
+        : 'After you grab a file on your phone, this PC’s camera looks for your hand for a few seconds. Off: files come in from the edge.';
     $('sendTo').checked = !!s.sendTo;
     $('sendToRow').hidden = !s.isWin && s.os !== 'linux';     // a Mac always has Open With and the Dock icon
     const words = OS_TEXT[s.os];
@@ -202,6 +210,7 @@
   $('sound').onchange = (e) => set('sound', e.target.checked);
   $('openAfter').onchange = (e) => set('openAfter', e.target.checked);
   $('showSpeed').onchange = (e) => set('showSpeed', e.target.checked);
+  $('airCam').onchange = (e) => set('airCam', e.target.checked);
   $('sendTo').onchange = (e) => set('sendTo', e.target.checked);
   $('autoUpdate').onchange = (e) => set('autoUpdate', e.target.checked);
   $('bluetooth').onchange = (e) => set('bluetooth', e.target.checked);

@@ -5,6 +5,8 @@
   const handlers = {};
   const on = (ch, fn) => { handlers[ch] = fn; api.on(ch, fn); };
   window.__fx = (ch, d) => { if (handlers[ch]) handlers[ch](d); };   // test hook
+  window.__cards = () => [...cards.values()].map((c) => ({ id: c.id, state: c.state, x: Math.round(c.pose.x), y: Math.round(c.pose.y),
+    target: c.target ? { x: Math.round(c.target.x), y: Math.round(c.target.y) } : null }));   // test hook
 
   const R = window.GFX, A = window.SFX;
   const canvas = document.getElementById('gl');
@@ -334,21 +336,37 @@
     const c = m && cards.get(m.tid);
     if (c && c.state === 'track') { c.onMove(m); kick(); }
   });
+  // Air grab (pc/air.js): the card follows the hand the PC's camera sees ({ x, y } on this screen), or ({ off })
+  // goes back to waiting at the edge
+  on('fx:air', (m) => {
+    const c = m && cards.get(m.tid);
+    if (!c) return;
+    if (m.off) { if (c.state === 'air') { c.state = 'track'; c.t0 = now(); } kick(); return; }
+    if (c.state !== 'track' && c.state !== 'air') return;
+    if (c.state === 'track') { c.state = 'air'; c.t0 = now(); }
+    c.air = { x: +m.x || 0, y: +m.y || 0, at: now() };
+    kick();
+  });
   on('fx:drop', (m) => {
     if (!m) return;
     let c = cards.get(m.tid);
     if (!c) { c = new Card(m.tid, m); cards.set(m.tid, c); }
+    const fromHand = c.state === 'air';      // it takes off from where the hand held it
     c.onMove(m);
     const pw = m.pw || 400, ph = m.ph || 860;
-    c.pose.x = E.mapX(m.x + m.w / 2, pw); c.pose.y = E.mapY(m.y + m.h / 2, ph);
-    c.pose.rz = ((m.r || 0) * Math.PI) / 180;
+    if (!fromHand) {
+      c.pose.x = E.mapX(m.x + m.w / 2, pw); c.pose.y = E.mapY(m.y + m.h / 2, ph);
+      c.pose.rz = ((m.r || 0) * Math.PI) / 180;
+    }
     c.prev = Object.assign({}, c.pose);
     c.state = 'flight';
     c.t0 = now();
     c.dropAt = now();
     const vx = (m.vx || 0) * S.k, vy = (m.vy || 0) * S.k;   // DIP per ms
     c.launch = { x0: c.pose.x, y0: c.pose.y, vx, vy, r0: c.pose.rz, s0: c.pose.sx || 1 };
-    c.target = landingSpot(c, vx, vy);
+    // Air grab: where the hand opened in front of the PC; otherwise where the throw carries it
+    c.target = m.land ? { x: clamp(+m.land.x || 0, c.w / 2 + 30, S.W - c.w / 2 - 30), y: clamp(+m.land.y || 0, c.h / 2 + 30, E.floorY() - c.h / 2 - 30) }
+      : landingSpot(c, vx, vy);
     theme.launch(E, c);
     kick();
   });
@@ -558,6 +576,19 @@
         c.pose.rz = ((m.r || 0) * Math.PI) / 180;
         c.pose.sx = c.pose.sy = m.s || 1.06;
         c.pose.z = 0; c.pose.rx = 0; c.pose.ry = 0;
+        break;
+      }
+      case 'air': {
+        // held by the hand in front of the PC: it floats where the hand is
+        const a = c.air;
+        c.visible = true;
+        if (c.pose.x < -9000) { c.pose.x = a.x; c.pose.y = a.y; }
+        c.pose.x = damp(c.pose.x, a.x, dt, 60);
+        c.pose.y = damp(c.pose.y, a.y + Math.sin(t / 240) * 3, dt, 60);
+        c.pose.z = damp(c.pose.z || 0, 26, dt, 120);
+        c.pose.sx = c.pose.sy = damp(c.pose.sx || 1, 0.92, dt, 120);
+        c.pose.rz = damp(c.pose.rz || 0, 0, dt, 90); c.pose.rx = 0; c.pose.ry = 0;
+        if (t - a.at > 45000) { c.state = 'cancel'; c.t0 = t; }
         break;
       }
       case 'flight': {

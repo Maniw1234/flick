@@ -2334,8 +2334,11 @@
     const it = items[0];
     st.pending.set(tid, { item: it, items, phase: 'lifted', air: true });
     startSend(tid, items);
+    // a card's size on the PC (a photo open full screen is shown as large as a card in the grid)
+    const k = rect ? Math.min(1, 230 / Math.max(rect.width, rect.height, 1)) : 1;
     wsSend({ t: 'lift', tid, air: true, file: fileInfo(items), thumb: nativeThumb(it), thumbs: sheetThumbs(items),
-      w: rect ? Math.round(rect.width) : 160, h: rect ? Math.round(rect.height) : 120, pw: innerWidth, ph: innerHeight });
+      w: rect ? Math.round(rect.width * k) : 160, h: rect ? Math.round(rect.height * k) : 120, y: rect ? Math.round(rect.top + rect.height * (1 - k) / 2) : undefined,
+      pw: innerWidth, ph: innerHeight });
     for (const x of items) { const e2 = cards.get(x.id); if (e2) e2.classList.add('lifted'); }
     haptic('lift');
     return tid;

@@ -1,5 +1,16 @@
 # Changes
 
+## 1.2.0
+
+- **Air grab: move files with your hand.** Turn it on in the phone's Settings (Android asks for the camera once). Hold
+  your open hand over Flick and the file under it lights up; pinch to select it, and keep pinching across more files;
+  make a fist to grab the file open full screen, the selection or the lit-up file, then open your hand in front of the
+  PC: the file lands where your hand is, or comes in from the edge on a PC without a camera. Open your hand over the
+  phone again to put it back. A video that was playing carries on on the PC from the same second. The other way: copy
+  files on the PC, bring a fist over the phone and open it. Works on Windows, Mac and Linux, with or without a webcam.
+  The phone's camera runs only while Flick is open and connected with Air grab on; the PC's only for a few seconds after
+  a grab (Files > Air grab in Flick's window). Hand tracking runs on the device: no picture leaves it.
+
 ## 1.1.0
 
 - Fixed: on Android 17 (Galaxy Z Fold 8 and other phones with One UI 9), Flick closed as soon as it was opened.

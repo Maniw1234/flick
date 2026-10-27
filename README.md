@@ -41,12 +41,29 @@ The PC app is the same everywhere, with these differences:
   which Wayland doesn't let a window do. Received files go to Downloads. To remove Flick, delete the AppImage or the
   folder, and `~/.local/share/applications/flick.desktop` and `~/.config/autostart/flick.desktop`.
 
+## Air grab
+
+Pick files up with your hand and drop them on the PC, without touching the screen.
+
+- **Phone to PC:** in the phone's Settings, turn on **Air grab** (Android asks for the camera once). Hold your open
+  hand over Flick: the file under it lights up. Pinch (thumb and index) to select it, and keep pinching across more
+  files to select those too. Make a fist to grab: the file open full screen, else the selection, else the lit-up file.
+  Move your fist toward the PC and open your hand in front of it: the file lands where your hand is (on a PC without a
+  camera, or with the camera off in Flick's window, it comes in from the edge). Open your hand over the phone again to
+  put the files back. A video that was playing carries on on the PC from the same second.
+- **PC to phone:** copy files on the PC (Ctrl+C, or Cmd+C on a Mac), bring a fist over the phone and open it.
+- **The cameras:** the phone's front camera runs only while Air grab is on, Flick is open on screen and a PC is
+  connected. The PC's camera turns on only for the few seconds between a grab on the phone and the file landing
+  (macOS asks once; turn it off in Flick's window: Files > Air grab). Hand tracking runs on each device, with
+  MediaPipe's hand models on Flick's own WebAssembly engine (`hand/`); no picture leaves the device.
+
 ## What's in here
 
 | Folder | What it is |
 |---|---|
-| `pc/` | PC app (Electron, for Windows, macOS and Linux; `platform.js` holds what macOS and Linux do differently): LAN server (HTTP, WebSocket, UDP discovery, mDNS), the transparent overlay with the animation themes (Roadster, Liquid, Teleport, Halo), the settings panel, the service that hands phone updates to the phone, the phone features (`phoneapi.js`, `features.js`, `sync.js`, `clip.js`, `history.js`, `keys.js`, `browse.js`, `cliphist.js`, `ask.js`), files already received (`have.js`), the PC's own Wi-Fi network (`hotspot.js`), Send feedback (`feedback.js`) and the "Share with a browser" page (`webshare.js`, `web/`) |
-| `phone/` | The phone app's interface (HTML, CSS, JS) that runs inside the Android app's WebView |
+| `pc/` | PC app (Electron, for Windows, macOS and Linux; `platform.js` holds what macOS and Linux do differently): LAN server (HTTP, WebSocket, UDP discovery, mDNS), the transparent overlay with the animation themes (Roadster, Liquid, Teleport, Halo), the settings panel, the service that hands phone updates to the phone, the phone features (`phoneapi.js`, `features.js`, `sync.js`, `clip.js`, `history.js`, `keys.js`, `browse.js`, `cliphist.js`, `ask.js`), files already received (`have.js`), Air grab (`air.js`, `air/`, `clipfiles.js`), the PC's own Wi-Fi network (`hotspot.js`), Send feedback (`feedback.js`) and the "Share with a browser" page (`webshare.js`, `web/`) |
+| `phone/` | The phone app's interface (HTML, CSS, JS) that runs inside the Android app's WebView, and the hand tracker it shares with the PC app (`phone/hand/`: models, engine, camera and gestures) |
+| `hand/` | Air grab's hand tracker source: the WebAssembly engine (`engine.c`), the converter from MediaPipe's TensorFlow Lite models (`convert.py`), `build.sh` (fetches the models, checks them, builds `phone/hand/`) and tests |
 | `android/` | Android app (Java, built without Gradle): WebView host, file browser access, transfers (the send engine that carries on in the background: `Outbox.java`, `Wire.java`, `Sends.java`), folder bundles, self-updater, and the background parts of the features (link service, auto-send, tiles, widget, notification forwarding, folder sync, Browse phone, clipboard history, Send feedback) |
 | `native/` | Small helpers: on Windows (built with MinGW) `flick-bt.c` offers Flick's Bluetooth service and `flick-keys.c` presses media keys for the phone's remote; `flick-keys-mac.swift` does the same on a Mac |
 | `ci/` | The release workflow's phone-app step (`phone_app.sh`) |

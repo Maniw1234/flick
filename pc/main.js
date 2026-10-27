@@ -93,6 +93,7 @@ const DEFAULTS = {
   id: null, name: null, side: 'right', anchor: 0.5, size: 1, saveDir: IS_LINUX ? 'downloads' : 'desktop', sound: true,
   startup: true, edgeSend: true, devices: {}, firstRun: true, displayId: null, theme: 'roadster',
   openAfter: false, showSpeed: true, sendTo: true, autoUpdate: true, bluetooth: false, quickShare: false,
+  airCam: true,                // Air grab: this PC's camera sees where the hand opens (air.js)
 };
 const readJson = (f) => { try { const o = JSON.parse(fs.readFileSync(f, 'utf8')); return o && typeof o === 'object' ? o : null; } catch (e) { return null; } };
 // settings.json, or its last good copy if it was damaged (a crash or power cut mid-save must not lose the pairings)
@@ -781,7 +782,7 @@ function panelState() {
     side: store.side, anchor: store.anchor, size: store.size, saveDir: store.saveDir, saveDirLabel: saveDirLabel(), saveDirPath: saveDirPath(),
     sound: store.sound, startup: store.startup, edgeSend: store.edgeSend, isWin: IS_WIN, os: IS_WIN ? 'win' : IS_MAC ? 'mac' : 'linux', theme: themeName(),
     openAfter: store.openAfter, showSpeed: store.showSpeed, sendTo: store.sendTo, autoUpdate: store.autoUpdate,
-    bluetooth: store.bluetooth, btState: btState, quickShare: store.quickShare, qsState: qsState,
+    bluetooth: store.bluetooth, btState: btState, quickShare: store.quickShare, qsState: qsState, airCam: store.airCam !== false, airCamState: air ? air.camState : 'off',
     via: s && s.connected ? s.via || '' : '',
     devices: Object.entries(store.devices || {}).map(([id, d]) => ({ id, name: d.name, added: d.added, ask: !!(store.acceptMode && store.acceptMode[id] === 'ask') })),
     displays: displays().map((d, i) => ({ id: d.id, label: `Display ${i + 1} (${d.size.width}×${d.size.height})`, primary: d.id === screen.getPrimaryDisplay().id })),
@@ -819,6 +820,7 @@ ipcMain.on('panel:set', (_e, { key, value }) => {
     case 'autoUpdate': store.autoUpdate = !!value; break;
     case 'bluetooth': store.bluetooth = !!value; applyBluetooth(); break;
     case 'quickShare': store.quickShare = !!value; applyQuickShare(); break;
+    case 'airCam': store.airCam = !!value; break;
     default: return;
   }
   saveStore();
@@ -1064,6 +1066,8 @@ const gone = new Map();      // tid -> when it was canceled: late events for it 
 // The phone features (features.js: several phones, clipboard, links, notifications, remote, sync, history); set once started
 let feats = null;
 function hist(e) { if (feats) feats.record(e); }   // a transfer history entry
+// Air grab (air.js): where a file a hand carried from the phone lands, and the files a hand catches from here
+let air = null;
 function isGone(tid) {
   const now = Date.now();
   for (const [k, at] of gone) if (now - at > 5 * 60000) gone.delete(k);
@@ -1212,6 +1216,12 @@ function flyInMsgs(tid, info, pw, ph) {
   return { lift, drop };
 }
 
+// Air grab: the card of a transfer a hand let go of flies to where it lands (msg: an overlay drop, with land: { x, y }
+// where the hand opened in front of the PC)
+function airLand(t, msg) {
+  if (t.state !== 'canceled') fx('drop', msg);
+}
+
 // "Ask each time" (a setting per phone, ask.js): once the user has thrown or sent it, a transfer from that phone waits
 // for Accept in the window; finalize saves nothing until then. Decline or 60 s without an answer: the phone is told
 // ('failed' with why declined | timeout), the upload is stopped and what arrived is deleted.
@@ -1283,7 +1293,9 @@ async function finalize(t) {
     received.add(dest);
     log('saved', dest);
     hist({ dir: 'in', tid: t.tid, path: dest, how: 'fling' });
-    if (store.openAfter) setTimeout(() => openAfterArrival(dest), 900);
+    // a video that was playing on the phone (Air grab) carries on here from the same second
+    if (t.video && air && kindOf(dest) === 'video') setTimeout(() => air.playAt(dest, t.video.t, () => openAfterArrival(dest)), 700);
+    else if (store.openAfter) setTimeout(() => openAfterArrival(dest), 900);
     fx('saved', { tid: t.tid, name: path.basename(dest), where: saveDirLabel() });
     if (server) server.pushToPhone({ t: 'saved', tid: t.tid, name: path.basename(dest), where: saveDirLabel() });
   } catch (e) {
@@ -1325,7 +1337,7 @@ function wireServer() {
     pushPanelState();
     ensureCatcher();
     // cards still held by the phone that left (another connected phone's stay)
-    for (const t of transfers.values()) if (t.state === 'lifted' && (!s || !server.ownerOf(t.tid) || server.ownerOf(t.tid) === s.device)) { fx('cancel', { tid: t.tid }); discard(t); }
+    for (const t of transfers.values()) if (t.state === 'lifted' && (!s || !server.ownerOf(t.tid) || server.ownerOf(t.tid) === s.device)) { if (air) air.cancel(t.tid); fx('cancel', { tid: t.tid }); discard(t); }
   });
   server.on('active', () => { pushPanelState(); ensureCatcher(); });   // another phone is in use: its name, its height
   server.on('pair-request', (s) => {
@@ -1357,7 +1369,23 @@ function wireServer() {
     t.seen = Date.now();
     t.info = liftInfo(m, t);
     fx('lift', t.info);
+    if (m.air && air) air.lifted(t, m);            // picked up by a hand: it waits at the edge (air.js)
   });
+  // Air grab: the hand let go of what it lifted. The transfer goes on as a dropped one; its card lands where this PC's
+  // camera sees the hand open, or comes in from the edge (air.js calls airLand)
+  server.on('air-go', (m) => {
+    const t = transfers.get(m.tid);
+    if (!t || t.state !== 'lifted') return;
+    t.state = 'dropped';
+    t.seen = Date.now();
+    if (air) t.video = air.go(t, m);
+    else airLand(t, flyInMsgs(m.tid, t.info).drop);
+    askFirst(t);
+    if (t.upload === 'done') finalize(t);
+    clearTimeout(t.timer);
+  });
+  // a hand that opened over the phone: the files copied on this PC go to it
+  server.on('air-catch', (m) => { if (air) air.catchFiles(m.device); });
   server.on('move', (m) => { const t = transfers.get(m.tid); if (t) t.seen = Date.now(); fx('move', m); });
   server.on('drop', (m) => {
     const t = tState(m.tid);
@@ -1381,6 +1409,7 @@ function wireServer() {
     if (t.upload === 'done') finalize(t);
   });
   server.on('cancel', (m) => {
+    if (air) air.cancel(m.tid);
     const t = transfers.get(m.tid);
     if (!t) { gone.set(m.tid, Date.now()); return; }          // never seen (its upload never started): nothing to undo
     const wasDropped = t.state === 'dropped';
@@ -1706,6 +1735,7 @@ app.on('before-quit', () => {
   try { if (bt) bt.stop(); } catch (e) { /* ignore */ }
   try { if (qs) qs.stop(); } catch (e) { /* ignore */ }
   try { if (feats) feats.stop(); } catch (e) { /* ignore */ }
+  try { if (air) air.stop(); } catch (e) { /* ignore */ }
   try { hotspot.stop(); } catch (e) { /* ignore */ }                // the PC's own Wi-Fi network, if Flick started it
   try { if (fb) fb.stop(); } catch (e) { /* ignore */ }
   try { server && server.stop(); } catch (e) { /* ignore */ }
@@ -1767,6 +1797,12 @@ app.whenReady().then(async () => {
   startUpdater();
 
   createOverlay();
+  air = require('./air').attach({
+    electron: require('electron'), store, log, fx, server, preload: PRELOAD, appDir: __dirname, isMac: IS_MAC,
+    tmpDir: app.getPath('temp'), side: () => store.side, phoneScreen,
+    overlaySize: () => { const b = overlayBounds(); return { width: b.width, height: b.height }; },
+    land: (t, msg) => airLand(t, msg), sendPaths: (paths) => sendPathsToPhone(paths), changed: () => pushPanelState(),
+  });
   createTray();
   applyStartup();
   screen.on('display-metrics-changed', () => { placeOverlay(); ensureCatcher(); });

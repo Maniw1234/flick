@@ -24,7 +24,7 @@ const { PhoneApi } = require('./phoneapi');
 // a bundle's streams for hours (not a minute), says how far each one got (/api/status), and takes the rest (a part
 // from "from", a stream from its "skip"-th entry). Also /api/speed (a speed test) and /api/have (which files the PC
 // already has, so they aren't sent twice)
-const PROTO = 7;
+const PROTO = 8;
 // how long a resumable transfer that stopped (the phone left, its app was closed) waits for the phone to come back
 const RESUME_KEEP_MS = 6 * 3600 * 1000;
 // open connections allowed at once from one address, and in all (see _onSocket)
@@ -686,10 +686,12 @@ class FlickServer extends EventEmitter {
         this.emit('pair-request', Object.assign(this._publicSession(s), { code: s.pairCode, upgrade: !!(was && was.token && !was.tls) }));
         break;
       }
-      case 'lift': case 'move': case 'drop': case 'cancel': case 'send':
+      // protocol 8: Air grab ('air-go': the hand let go of what it lifted; 'air-catch': a hand asks for the files copied
+      // here)
+      case 'lift': case 'move': case 'drop': case 'cancel': case 'send': case 'air-go': case 'air-catch':
         if (s.trusted && (this.session === s || (s.connected && this.sessions.get(s.device) === s))) {
           // a fling makes this the phone in use; its replies ('saved', 'failed') go back to it
-          if (m.t === 'lift' || m.t === 'send') this.use(s.device);
+          if (m.t === 'lift' || m.t === 'send' || m.t === 'air-catch') this.use(s.device);
           this._own(m.tid, s.device);
           m.device = s.device;
           this.emit(m.t, m);

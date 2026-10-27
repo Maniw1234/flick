@@ -1,7 +1,7 @@
 'use strict';
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
-const OK = /^(fx:|panel:|catcher:|app:)/;
+const OK = /^(fx:|panel:|catcher:|app:|air:)/;
 
 contextBridge.exposeInMainWorld('flick', {
   on: (ch, cb) => { if (OK.test(ch)) ipcRenderer.on(ch, (_e, d) => cb(d)); },

@@ -29,6 +29,8 @@ mkdir -p "$CODE"
 # every module at the top of pc/ ships (a new one can't be forgotten here), plus the folders the windows load
 cp "$PC"/*.js "$PC/package.json" "$CODE/"
 for d in overlay panel catcher assets phone-app web; do if [ -d "$PC/$d" ]; then cp -R "$PC/$d" "$CODE/"; fi; done
+# Air grab's hand tracker (the phone app's): this Mac's camera sees where the hand opens (pc/air.js)
+cp -R "$ROOT/phone/hand" "$CODE/hand"
 # the phone app ships inside the PC app, so phones can update over Wi-Fi from here
 node -e "const i=require('$PC/apkinfo').apkInfo('$CODE/phone-app/Flick.apk'); if (i.package !== 'com.flick.app') process.exit(1); console.log('phone app', i.name, '(' + i.code + ')')"
 # record which Electron this code was built for (an update for another Electron needs the full download)
@@ -94,6 +96,8 @@ p.update({
     'NSLocalNetworkUsageDescription': 'Flick finds your phone on the local network and sends files to it and from it.',
     # every Bonjour service Flick advertises or looks for: Quick Share (pc/quickshare.js, through pc/mdns.js)
     'NSBonjourServices': ['_FC9F5ED42C8A._tcp'],
+    # Air grab: after a file is grabbed on the phone, the camera looks for the hand for a few seconds (pc/air.js)
+    'NSCameraUsageDescription': 'After you grab a file on your phone, Flick looks for your hand for a few seconds so the file lands where your hand opens. Nothing is recorded.',
     # any file or folder can be dropped on Flick in the Dock or opened with it (it goes to the phone); Flick is never
     # the default app for anything
     'CFBundleDocumentTypes': [{'CFBundleTypeName': 'Any file', 'CFBundleTypeRole': 'Viewer',
