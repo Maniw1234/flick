@@ -164,6 +164,7 @@ public class MainActivity extends Activity {
                 try { Library.get(getApplicationContext()).sweep(); } catch (Throwable e) { /* ignore */ }
             }
         });
+        Thumbs.trimSoon(this);                       // the thumbnail cache stays a reasonable size
     }
 
     @Override
