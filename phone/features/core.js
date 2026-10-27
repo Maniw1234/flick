@@ -127,7 +127,8 @@
     el.addEventListener('pointerdown', (e) => {
       long = false; x0 = e.clientX; y0 = e.clientY;
       clearTimeout(t);
-      t = setTimeout(() => { long = true; A.haptic('lift'); onLong(); }, 480);
+      // (an element taken off the page under the finger hears no pointerup or pointercancel: it holds nothing)
+      t = setTimeout(() => { if (!el.isConnected) return; long = true; A.haptic('lift'); onLong(); }, 480);
     });
     el.addEventListener('pointermove', (e) => { if (Math.hypot(e.clientX - x0, e.clientY - y0) > 10) cancel(); });
     el.addEventListener('pointerup', cancel);
