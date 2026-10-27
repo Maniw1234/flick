@@ -55,7 +55,21 @@
   // view for a moment) | sent (they went; the hand is still in view) | catch (a fist that came in from outside: files
   // from the PC when it opens). pos, size: the hand in the camera's view (0..1); x, y: on the screen
   const M = { mode: 'idle', wasOpen: false, x: 0, y: 0, pos: [0.5, 0.5], size: 0, grabPos: null, grabSize: 0, tid: null, items: null, video: null,
-    catchT: 0, goT: 0, hideT: 0, inT: 0, touch: 0, paint: null, painted: null, hint: 0 };
+    catchT: 0, enterT: 0, sentAt: 0, pcHeldAt: 0, goT: 0, hideT: 0, inT: 0, touch: 0, paint: null, painted: null, hint: 0 };
+  const pcHolds = () => !!M.pcHeldAt && Date.now() - M.pcHeldAt < 20000;   // the PC said a fist holds files for here
+  const AWAY_MS = 350;         // carrying, the hand lost in the middle of the view: the files go after this
+  const CATCH_MS = 200;        // a fist that came in must be held over the phone this long before it opens to catch
+  const STICK = 12;            // px: the file a hand aims at stays lit until the aim is this far over another
+
+  // the file at the aim point (x, y on the screen), keeping the one lit until the aim is clearly over another, so the
+  // light doesn't flicker between neighbours at a border
+  function aimedItem(x, y) {
+    if (hovered && hoveredEl && hoveredEl.isConnected) {
+      const r = hoveredEl.getBoundingClientRect();
+      if (r.width && x > r.left - STICK && x < r.right + STICK && y > r.top - STICK && y < r.bottom + STICK) return hovered;
+    }
+    return A.itemAt(x, y);
+  }
 
   function onEvent(type, e) {
     if (type === 'move') move(e);
@@ -76,17 +90,20 @@
     if (M.mode === 'carry') return;
     M.wasOpen = e.pose === 'open';
     M.mode = e.pose === 'fist' ? 'catch' : 'hover';
-    M.catchT = Date.now();
+    M.catchT = M.enterT = Date.now();
   }
 
   function pose(e) {
     if (e.pose === 'open') M.wasOpen = true;
+    // a fist that came in looking half closed (the tracker's first frames of a hand moving in), or one closing over the
+    // phone while the PC holds files for it, never having been open here: a fist bringing files from the PC
+    if (M.mode === 'hover' && e.pose === 'fist' && !M.wasOpen && (Date.now() - M.enterT < 700 || pcHolds())) { M.mode = 'catch'; M.catchT = Date.now(); return; }
     if (M.mode === 'hover' && e.pose === 'fist') grab();
-    else if (M.mode === 'carry' && e.pose === 'open') released(e.pos);
+    else if (M.mode === 'carry' && e.pose === 'open') released(e.aim || e.pos);
     else if (M.mode === 'catch' && e.pose === 'open') {
       // a fist held over the phone for a moment, then opened (a hand that only passes through a fist doesn't count)
       const ms = Date.now() - M.catchT;
-      if (ms >= 250 && ms < 4000) catchFromPc();
+      if (ms >= CATCH_MS && ms < 4000) catchFromPc();
       M.mode = 'hover';
     }
   }
@@ -101,7 +118,12 @@
   }
 
   function move(e) {
+    // files thrown with the hand still in view: a moment later it can hover and grab again (no need to leave first)
+    if (M.mode === 'sent' && Date.now() - M.sentAt > 450 && e.pose !== 'fist') { M.mode = 'hover'; M.wasOpen = e.pose === 'open'; }
     const [x, y] = toScreen(e.pos);
+    // where the hand aims: while its pose changes (a hand closing into a fist moves as it closes), where it was before
+    // the change began (stream.js); else where it is
+    const [ax, ay] = toScreen(e.aim || e.pos);
     M.x = x; M.y = y;
     M.pos = e.pos; M.size = e.size || 0;
     if (M.mode === 'carry' && carryOver()) return;
@@ -110,7 +132,7 @@
     const pv = preview();
     const free = pv || gridFree();
     spot.hidden = !free;
-    place(spot, x, y);
+    place(spot, ax, ay);
     spot.classList.toggle('fist', e.pose === 'fist');
     spot.classList.toggle('pinch', !!e.pinch);
     if (!free || pv || Date.now() - M.touch < 600) { setHover(null); return; }
@@ -121,7 +143,7 @@
       return;
     }
     if (!e.pinch) M.paint = null;
-    if (e.pose !== 'fist') setHover(A.itemAt(x, y));     // a closing hand keeps what it was over
+    if (e.pose !== 'fist') setHover(aimedItem(ax, ay));  // a closing hand keeps what it was over
   }
 
   function pinch() {
@@ -196,7 +218,7 @@
       M.mode = 'away';
       held.classList.add('gone');
       clearTimeout(M.goT);
-      M.goT = setTimeout(() => { if (M.mode === 'away') { M.mode = 'idle'; go(); } }, 600);
+      M.goT = setTimeout(() => { if (M.mode === 'away') { M.mode = 'idle'; go(); } }, AWAY_MS);
       return;
     }
     if (M.mode !== 'away') M.mode = 'idle';
@@ -210,7 +232,7 @@
     return Math.hypot(pos[0] - g[0], pos[1] - g[1]) > 0.28 || !!(M.grabSize && M.size && M.size < M.grabSize * 0.6);
   };
   function released(pos) {
-    if (movedAway(pos)) { go(); M.mode = 'sent'; } else putBack();
+    if (movedAway(pos)) { go(); M.mode = 'sent'; M.sentAt = Date.now(); } else putBack();
   }
 
   function go() {
@@ -259,6 +281,7 @@
     if (!A.st.connected) return;
     if ((A.st.pcProto || 1) < AIR_PROTO) { A.toast(X.OLD_PC, 2600); return; }
     A.wsSend({ t: 'air-catch' });
+    M.pcHeldAt = 0;
     const r = h('div', 'aircatch');
     layer.appendChild(r);
     place(r, M.x, M.y);
@@ -275,12 +298,13 @@
           : (m.how === 'copy' ? 'Copy files on ' : 'Select files on ') + pc + ', grab them with a fist in front of the screen, then open it here', 3200);
     } else if (m.t === 'air-held') {
       // a fist picked files up in front of the PC: they come here when it opens over the phone
+      M.pcHeldAt = +m.n > 0 ? Date.now() : 0;
       if (+m.n > 0) A.toast((+m.n > 1 ? m.n + ' files' : String(m.name || 'A file')) + ' in your hand: open it over the phone', 3200);
     } else if (m.t === 'air-land' && m.tid && m.tid === M.tid) {
       // the PC's camera saw the fist open in front of it: the files go there. Out of this camera's view, at once; still
       // in view, only if the hand moved well away from where it grabbed (this camera knows best where it is)
       if (M.mode === 'away') { M.mode = 'idle'; go(); }
-      else if (M.mode === 'carry' && movedAway(M.pos)) { go(); M.mode = 'sent'; }
+      else if (M.mode === 'carry' && movedAway(M.pos)) { go(); M.mode = 'sent'; M.sentAt = Date.now(); }
     }
   });
 

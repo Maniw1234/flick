@@ -73,6 +73,9 @@
       return this.ready;
     }
 
+    // the tracker loaded ahead (its models are compiled and ready), with the camera still off
+    warm() { return this._worker().then(() => true, () => false); }
+
     async start() {
       if (this.on) return true;
       this.on = true;
@@ -93,7 +96,9 @@
         const md = navigator.mediaDevices;
         if (!md || !md.getUserMedia) throw Object.assign(new Error('no camera'), { name: 'NotFoundError' });
         const side = this.o.size || MAX_SIDE;
-        const video = { width: { ideal: side }, height: { ideal: Math.round(side * 3 / 4) }, frameRate: { ideal: 15, max: 30 } };
+        // 30 frames a second where the camera gives them: the tracker takes the newest one each time it is free, so a
+        // hand is followed as often as the tracker can (at 15, it waited for frames)
+        const video = { width: { ideal: side }, height: { ideal: Math.round(side * 3 / 4) }, frameRate: { ideal: 30, max: 30 } };
         if (this.o.facing) video.facingMode = this.o.facing;
         if (this.o.deviceId) video.deviceId = { exact: this.o.deviceId };
         stream = await md.getUserMedia({ video, audio: false });

@@ -344,9 +344,23 @@
     if (m.off) { if (c.state === 'air') { c.state = 'track'; c.t0 = now(); } kick(); return; }
     if (c.state !== 'track' && c.state !== 'air') return;
     if (c.state === 'track') { c.state = 'air'; c.t0 = now(); }
-    c.air = { x: +m.x || 0, y: +m.y || 0, at: now() };
+    c.air = handAt(c.air, m);
     kick();
   });
+  // where the hand is, with its speed (px per ms, smoothed): between the camera's reports (15 to 30 a second) the card
+  // carries on a little the way the hand moves, so it keeps up with it
+  function handAt(prev, m) {
+    const t = now(), x = +m.x || 0, y = +m.y || 0;
+    const a = { x, y, at: t, vx: 0, vy: 0 };
+    if (prev && t - prev.at > 0 && t - prev.at < 150) {
+      const k = 0.5, dt = t - prev.at;
+      a.vx = (prev.vx || 0) * (1 - k) + ((x - prev.x) / dt) * k;
+      a.vy = (prev.vy || 0) * (1 - k) + ((y - prev.y) / dt) * k;
+    }
+    return a;
+  }
+  // the hand's place now: the last report, carried on for at most 40 ms
+  const handNow = (a, t) => { const k = Math.min(40, Math.max(0, t - a.at)); return [a.x + (a.vx || 0) * k, a.y + (a.vy || 0) * k]; };
   // Air grab, PC to phone (pc/air.js): files a fist picked up in front of the screen. Their card follows the fist
   // ({ x, y } on this screen), waits at the edge on the phone's side once the hand has left ({ edge }), goes into the
   // phone when it catches them ({ go }), or is put back ({ drop }). The first message carries the card's face.
@@ -372,7 +386,7 @@
     }
     if (c.state !== 'airout') return;
     if (m.edge) c.airEdge = now();
-    else if (typeof m.x === 'number') { c.air = { x: +m.x, y: +m.y, at: now() }; c.airEdge = 0; }
+    else if (typeof m.x === 'number') { c.air = handAt(c.air, m); c.airEdge = 0; }
     kick();
   });
   on('fx:drop', (m) => {
@@ -611,8 +625,9 @@
         const a = c.air;
         c.visible = true;
         if (c.pose.x < -9000) { c.pose.x = a.x; c.pose.y = a.y; }
-        c.pose.x = damp(c.pose.x, a.x, dt, 60);
-        c.pose.y = damp(c.pose.y, a.y + Math.sin(t / 240) * 3, dt, 60);
+        const [hx, hy] = handNow(a, t);
+        c.pose.x = damp(c.pose.x, hx, dt, 38);
+        c.pose.y = damp(c.pose.y, hy + Math.sin(t / 240) * 3, dt, 38);
         c.pose.z = damp(c.pose.z || 0, 26, dt, 120);
         c.pose.sx = c.pose.sy = damp(c.pose.sx || 1, 0.92, dt, 120);
         c.pose.rz = damp(c.pose.rz || 0, 0, dt, 90); c.pose.rx = 0; c.pose.ry = 0;
@@ -626,9 +641,9 @@
         if (c.airEdge) {
           tx = E.edgeX() + E.dirIn() * (c.w * 0.18);       // two thirds of it past the edge, toward the phone
           ty = clamp(c.air.y, c.h / 2 + 30, E.floorY() - c.h / 2 - 30) + Math.sin(t / 210) * 4;
-        } else { tx = c.air.x; ty = c.air.y + Math.sin(t / 240) * 3; }
-        c.pose.x = damp(c.pose.x, tx, dt, c.airEdge ? 110 : 60);
-        c.pose.y = damp(c.pose.y, ty, dt, 60);
+        } else { const [hx, hy] = handNow(c.air, t); tx = hx; ty = hy + Math.sin(t / 240) * 3; }
+        c.pose.x = damp(c.pose.x, tx, dt, c.airEdge ? 110 : 38);
+        c.pose.y = damp(c.pose.y, ty, dt, c.airEdge ? 60 : 38);
         c.pose.z = damp(c.pose.z || 0, c.airEdge ? 0 : 26, dt, 120);
         c.pose.sx = c.pose.sy = damp(c.pose.sx || 1, c.airEdge ? 1 : 0.92, dt, 90);
         c.pose.rz = damp(c.pose.rz || 0, 0, dt, 90); c.pose.rx = 0; c.pose.ry = 0;

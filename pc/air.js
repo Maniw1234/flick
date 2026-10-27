@@ -71,8 +71,14 @@ function attach(o) {
   const sel = o.selwatch || new SelWatch({ log: o.log });
   sel.on('change', (s) => onSelection(s));
   function watchSelection() {
-    if (phones.size && camOn()) sel.start();
-    else { sel.stop(); disarm(); }
+    if (phones.size && camOn()) { sel.start(); warm(); }
+    else { sel.stop(); disarm(); closeLater(); }
+  }
+  // a phone ready to grab: the camera window and its hand tracker get ready now (the camera itself stays off), so a
+  // grab doesn't wait for them to load
+  function warm() {
+    clearTimeout(idleT);
+    ensureWin().then((ok) => { if (ok) send('air:warm'); }, () => {});
   }
 
   // ---- the camera window
@@ -94,7 +100,8 @@ function attach(o) {
   function send(ch, d) { if (win && !win.isDestroyed()) win.webContents.send(ch, d); }
   function closeLater() {
     clearTimeout(idleT);
-    idleT = setTimeout(() => { if (!needCam() && win && !win.isDestroyed()) win.destroy(); }, IDLE_CLOSE_MS);
+    // (kept while a phone is ready to grab: see warm)
+    idleT = setTimeout(() => { if (!needCam() && !(phones.size && camOn()) && win && !win.isDestroyed()) win.destroy(); }, IDLE_CLOSE_MS);
     if (idleT.unref) idleT.unref();
   }
 
@@ -189,7 +196,13 @@ function attach(o) {
     const a = newest();
     if (o.debug && ev.type !== 'move') log('hand', ev.type, ev.pose || '', a ? a.t.tid + (a.go ? ' (let go)' : '') + (a.sawFist ? ' fist seen' : '') : G.held ? 'holding ' + G.held.state : Date.now() < G.armedUntil ? 'armed' : '-');
     if (ev.type === 'leave') hand = null;
-    else if (Array.isArray(ev.pos)) { const p = toScreen(ev.pos); hand = { x: p.x, y: p.y, pose: ev.pose, at: now }; }
+    else if (Array.isArray(ev.pos)) {
+      const p = toScreen(ev.pos);
+      // aim: where the hand was aimed before its pose began to change (stream.js): a fist that opens lands its file
+      // where the fist was, not where opening moved the hand
+      const q = Array.isArray(ev.aim) ? toScreen(ev.aim) : p;
+      hand = { x: p.x, y: p.y, ax: q.x, ay: q.y, pose: ev.pose, at: now };
+    }
     if (a) onCarry(ev, a, now);         // a phone's file on its way here comes first
     else onPick(ev, now);
   }
@@ -217,12 +230,13 @@ function attach(o) {
       return;
     }
     if (ev.pose !== 'open' || (ev.type !== 'pose' && ev.type !== 'enter')) return;
+    const at = { x: p.ax, y: p.ay };                     // where the fist was when it began to open
     // once the phone has let go, a hand opening (or coming into view open) picks where it lands
-    if (a.go) { lastOpen = { x: p.x, y: p.y, at: now }; land(a, p); return; }
+    if (a.go) { lastOpen = { x: at.x, y: at.y, at: now }; land(a, at); return; }
     // before that, only the fist this camera saw (without it leaving the view) opening tells the phone to let go:
     // another hand, or one never seen closed, sends nothing
     if (ev.type !== 'pose' || !a.sawFist) return;
-    lastOpen = a.landAt = { x: p.x, y: p.y, at: now };
+    lastOpen = a.landAt = { x: at.x, y: at.y, at: now };
     if (o.server) o.server.pushToPhone({ t: 'air-land', tid: a.t.tid }, a.device);
   }
 

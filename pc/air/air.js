@@ -19,7 +19,8 @@
     for (const n of ['hand.js', 'worker.js', 'camera.js', 'stream.js']) await load(n);
     stream = new window.FlickHandStream({
       mirror: true,                                   // the camera faces the user: the hand moves the way it looks
-      onEvent: (type, e) => api.send('air:event', { type, pose: e.pose, pos: e.pos, size: e.size, edge: e.edge }),
+      // (aim: where the hand was aimed before its pose began to change: a fist that opens lands what it holds there)
+      onEvent: (type, e) => api.send('air:event', { type, pose: e.pose, pos: e.pos, aim: e.aim, size: e.size, edge: e.edge }),
     });
     cam = new window.FlickHandCam({
       worker: () => window.FlickHandWorker.inline(),  // this window shows nothing: the tracker can run on its page
@@ -41,6 +42,11 @@
     setInterval(() => { if (cam && cam.on) stream.push({ t: performance.now() }); }, 200);
   })();
 
+  // a phone is ready to grab: load the hand tracker now, so the camera only has to open when it's wanted
+  api.on('air:warm', async () => {
+    try { await setup; } catch (e) { return; }
+    cam.warm();
+  });
   api.on('air:start', async () => {
     want = true;
     try { await setup; } catch (e) { api.send('air:state', { state: 'error', detail: String(e && e.message) }); return; }
