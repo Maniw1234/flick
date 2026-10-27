@@ -318,7 +318,11 @@
   // faster links first: USB cable, Ethernet, a hotspot or direct link, Wi-Fi, then Bluetooth
   const LINK_RANK = { usb: 5, ethernet: 4, hotspot: 3, direct: 3, wifi: 2, bluetooth: 1 };
   const rankOf = (p) => LINK_RANK[(p && p.via) || 'wifi'] || 2;
-  const busyMoving = () => [...st.pending.values()].some((p) => p.phase === 'sent' && !p.uploaded) || (st.incoming && st.incoming.size > 0) || V.items.some((x) => x.incoming);
+  // files moving now. A send the app carries on with (a job) counts only while it runs or is about to, not while it
+  // waits for the PC (that can go on for hours) or is paused: those carry on wherever this page connects.
+  const jobMoving = (tid) => { const j = st.jobs.get(tid); return !j || j.state === 'running' || j.state === 'queued'; };
+  const busyMoving = () => [...st.pending].some(([tid, p]) => p.phase === 'sent' && !p.uploaded && (!p.job || jobMoving(tid))) ||
+    (st.incoming && st.incoming.size > 0) || V.items.some((x) => x.incoming);
   function onPcs() {
     // Bluetooth reports the PC it reached through the same list
     st.pcs = (st.lanList || []).filter((p) => p && p.ip && p.port).concat(st.btPc ? [st.btPc] : []);
