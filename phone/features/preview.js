@@ -166,6 +166,14 @@
 
   // ---- open, close
   A.on('preview', (o) => { if (o && o.item) open(o.item, o.rect); });
+  // for Air grab (air.js): the file on screen, its video (to carry on from the same second on the PC), closing
+  X.preview = {
+    open: () => S.open,
+    item: () => (S.open ? S.it : null),
+    video: () => (S.open ? cur()._vid : null),
+    rect: () => { const z = cur() && cur()._z; const r = z && (z.querySelector('img,video') || z).getBoundingClientRect(); return r && r.width ? r : null; },
+    close: () => { if (S.open) close(); },
+  };
   function open(it, rect) {
     if (S.open || !it || it.dir) return;
     let list = A.viewFiles();

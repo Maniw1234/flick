@@ -218,3 +218,5 @@ See `CHANGES.md`.
 ## License
 
 MIT. See `LICENSE`.
+
+Air grab's hand models (`phone/hand/palm.fhm`, `phone/hand/landmark.fhm`) are MediaPipe's, used under the Apache License 2.0. See `phone/hand/LICENSE-MediaPipe.txt`.

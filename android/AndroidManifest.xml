@@ -28,6 +28,10 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- "Lock Flick" (Settings): fingerprint, face or the phone's PIN when Flick opens (AppLock) -->
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <!-- Air grab: the front camera sees the hand (only while Flick is open; nothing is recorded or sent) -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.front" android:required="false" />
     <!-- Phone notifications on the PC show the app's name (apps with a launcher icon are visible) -->
     <queries>
         <intent>

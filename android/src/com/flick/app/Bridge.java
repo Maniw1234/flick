@@ -97,6 +97,10 @@ final class Bridge {
     static final String GITHUB_LATEST = "https://api.github.com/repos/Maniw1234/flick/releases/latest";
     static final String GITHUB_DL = "https://github.com/Maniw1234/flick/releases/download/";
 
+    // ---------------- the camera, for Air grab ----------------
+    @JavascriptInterface public String cameraState() { return a.cameraState(); }
+    @JavascriptInterface public void askCamera() { a.runOnUiThread(new Runnable() { @Override public void run() { a.askCamera(); } }); }
+
     // ---------------- Bluetooth (when there's no network) ----------------
     @JavascriptInterface public void btPermission() { a.runOnUiThread(new Runnable() { @Override public void run() { a.askBluetooth(); } }); }
     @JavascriptInterface public boolean btPermitted() { return BtLink.permitted(a); }

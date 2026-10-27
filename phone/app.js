@@ -2315,6 +2315,62 @@
     setTimeout(() => releaseFx({ x: r.left, y: r.top, w: r.width, h: r.height }, 0, null), wait * 1000);
   }
 
+  // ------------------------------------------------------------------ Air grab (features/air.js)
+  // A fist over the phone picks files up: their upload starts at once, as for a lift, and the PC shows them waiting at
+  // its edge. Taking the hand away toward the PC sends them ('air-go': the PC lands them where its camera sees the hand
+  // open, or flies them in from the edge); opening the hand over the phone again puts them back.
+  function itemAt(x, y) {
+    const el = document.elementFromPoint(x, y);
+    const card = el && el.closest ? el.closest('.card') : null;
+    if (!card) return null;
+    for (const [id, c] of cards) if (c === card) return V.items.find((it) => it.id === id && !it.incoming) || null;
+    return null;
+  }
+  function airLift(items, rect) {
+    items = (items || []).filter((x) => x && !x.incoming);
+    if (!items.length) return null;
+    if (!st.connected) { toast('Not connected to your PC'); return null; }
+    const tid = rid();
+    const it = items[0];
+    st.pending.set(tid, { item: it, items, phase: 'lifted', air: true });
+    startSend(tid, items);
+    wsSend({ t: 'lift', tid, air: true, file: fileInfo(items), thumb: nativeThumb(it), thumbs: sheetThumbs(items),
+      w: rect ? Math.round(rect.width) : 160, h: rect ? Math.round(rect.height) : 120, pw: innerWidth, ph: innerHeight });
+    for (const x of items) { const e2 = cards.get(x.id); if (e2) e2.classList.add('lifted'); }
+    haptic('lift');
+    return tid;
+  }
+  // o.video: { t } the second a playing video had reached (the PC opens it there)
+  function airGo(tid, o) {
+    const p = st.pending.get(tid);
+    if (!p || p.phase !== 'lifted') return false;
+    wsSend({ t: 'air-go', tid, video: o && o.video ? { t: Math.max(0, +o.video.t || 0) } : undefined });
+    p.phase = 'sent';
+    if (p.job) nc('sendCommit', tid);
+    haptic('confirm');
+    let hid = false;
+    for (const x of itemsOf(p)) {
+      x._sentAt = now();
+      if (!x.path && !st.keep) { st.hidden.add(x.id); hid = true; }
+    }
+    if (hid) setTimeout(() => layout(true), 120);
+    if (SEL.on) setSelecting(false);
+    return true;
+  }
+  function airCancel(tid) {
+    const p = st.pending.get(tid);
+    if (!p || p.phase !== 'lifted') return;
+    wsSend({ t: 'cancel', tid });
+    if (p.job) nc('sendCancel', tid); else nc('abort', tid);
+    st.pending.delete(tid);
+    unlift(itemsOf(p));
+  }
+  function selectToggle(it) {
+    if (!it || it.incoming) return;
+    if (!SEL.on) { setSelecting(true); SEL.ids.add(it.id); haptic('tick'); renderSelection(); return; }
+    toggleSel(it);
+  }
+
   // a sent file that stays on the phone comes back into the grid once its departure has finished playing
   function restoreItem(item) {
     const wait = Math.max(D && D.it === item ? 120 : 0, (item._sentAt || 0) + 750 - now());
@@ -3082,6 +3138,9 @@
     openCat, showInFolder, sendItems, phoneName, fmtRate,
     // the files the view shows (in its order), their thumbnails and cards: for the preview
     viewFiles, thumbUrl, cardRect, showItem, moreFiles, fmtDur,
+    // Air grab: the file under a point, the selection, and a send in two steps (lift now, go or cancel later)
+    itemAt, selected: selItems, selectToggle, airLift, airGo, airCancel, nativeThumb,
+    get selecting() { return SEL.on; },
   });
   window.FlickApp = FlickApp;
   const FEATURES = {};                      // what the feature files share among themselves (features/core.js)

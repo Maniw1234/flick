@@ -24,6 +24,7 @@ import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.webkit.ConsoleMessage;
+import android.webkit.PermissionRequest;
 import android.webkit.RenderProcessGoneDetail;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -102,6 +103,7 @@ public class MainActivity extends Activity {
                 String u = uri != null ? uri.toString() : null;
                 if (u == null || !u.startsWith("https://flick.local/")) return null;
                 if ("/t".equals(uri.getPath())) return Thumbs.respond(MainActivity.this, uri);
+                if (uri.getPath() != null && uri.getPath().startsWith("/hand/")) return handFile(uri.getPath().substring(6));
                 return Library.get(MainActivity.this).intercept(u);
             }
             @Override
@@ -117,6 +119,21 @@ public class MainActivity extends Activity {
             public Bitmap getDefaultVideoPoster() {
                 // no grey play-button placeholder while a preview clip loads
                 return Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888);
+            }
+            @Override
+            public void onPermissionRequest(final PermissionRequest req) {
+                // Air grab: only the camera, only for Flick's own page, and only once Android allowed Flick to use it
+                ui.post(new Runnable() {
+                    @Override
+                    public void run() {
+                        boolean video = false;
+                        for (String r : req.getResources()) if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(r)) video = true;
+                        String origin = String.valueOf(req.getOrigin());
+                        boolean ours = origin.startsWith("file:") || origin.startsWith("https://flick.local");
+                        if (video && ours && cameraGranted()) req.grant(new String[]{PermissionRequest.RESOURCE_VIDEO_CAPTURE});
+                        else req.deny();
+                    }
+                });
             }
             @Override
             public boolean onConsoleMessage(ConsoleMessage m) {
@@ -331,6 +348,43 @@ public class MainActivity extends Activity {
     // ------------------------------------------------------------ storage access
     private static final int REQ_STORAGE = 42;
     private static final int REQ_BT = 43;
+    private static final int REQ_CAMERA = 45;
+
+    // ------------------------------------------------------------ the camera, for Air grab (asked once)
+    boolean cameraGranted() {
+        return Build.VERSION.SDK_INT < 23 || checkSelfPermission(android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED;
+    }
+    /** "granted", or "ask" (Android will show its question), or "blocked" (it won't anymore: only Settings can change it). */
+    String cameraState() {
+        if (cameraGranted()) return "granted";
+        boolean asked = getSharedPreferences("flick", MODE_PRIVATE).getBoolean("camAsked", false);
+        if (asked && Build.VERSION.SDK_INT >= 23 && !shouldShowRequestPermissionRationale(android.Manifest.permission.CAMERA)) return "blocked";
+        return "ask";
+    }
+    void askCamera() {
+        if (cameraGranted()) { emitEvent("camera"); return; }
+        if ("blocked".equals(cameraState())) {
+            try { startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName()))); }
+            catch (Throwable e) { toast("Open Settings › Apps › Flick › Permissions to allow the camera"); }
+            return;
+        }
+        getSharedPreferences("flick", MODE_PRIVATE).edit().putBoolean("camAsked", true).apply();
+        requestPermissions(new String[]{android.Manifest.permission.CAMERA}, REQ_CAMERA);
+    }
+
+    // the hand tracker's files (assets/www/hand/), for the page's fetch: a file:// page can't fetch files
+    private WebResourceResponse handFile(String name) {
+        if (!name.matches("[a-z0-9-]+\\.(wasm|fhm|js)")) return null;
+        try {
+            String mime = name.endsWith(".wasm") ? "application/wasm" : name.endsWith(".js") ? "text/javascript" : "application/octet-stream";
+            WebResourceResponse r = new WebResourceResponse(mime, null, getAssets().open("www/hand/" + name));
+            java.util.Map<String, String> h = new java.util.HashMap<String, String>();
+            h.put("Access-Control-Allow-Origin", "*");
+            h.put("Cache-Control", "no-cache");
+            r.setResponseHeaders(h);
+            return r;
+        } catch (Throwable e) { return null; }
+    }
     private BtLink btLink;
 
     synchronized BtLink btLink() {
@@ -394,6 +448,7 @@ public class MainActivity extends Activity {
         super.onRequestPermissionsResult(req, perms, res);
         if (req == REQ_STORAGE) emitEvent("storage");
         if (req == REQ_BT) emitEvent("bt-perm");
+        if (req == REQ_CAMERA) emitEvent("camera");
         Page.onPermissions(this, req);               // features
     }
 
