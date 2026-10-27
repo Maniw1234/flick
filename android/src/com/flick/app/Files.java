@@ -19,6 +19,7 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -182,6 +183,24 @@ final class Files {
     }
 
     private static String escapeLike(String s) { return s.replace("%", "\\%").replace("_", "\\_"); }
+
+    /** MediaStore's paths (_data) of these items of one type (mt: 1 image, 2 audio, 3 video), by id. */
+    static Map<Long, String> mediaPaths(Context c, int mt, Collection<Long> ids) {
+        HashMap<Long, String> out = new HashMap<Long, String>();
+        Uri base = mt == 1 ? MediaStore.Images.Media.EXTERNAL_CONTENT_URI : mt == 3 ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                : mt == 2 ? MediaStore.Audio.Media.EXTERNAL_CONTENT_URI : null;
+        if (base == null || ids.isEmpty()) return out;
+        StringBuilder in = new StringBuilder();
+        String[] args = new String[ids.size()];
+        int i = 0;
+        for (Long id : ids) { in.append(i == 0 ? "?" : ",?"); args[i++] = String.valueOf(id); }
+        Cursor cur = null;
+        try {
+            cur = c.getContentResolver().query(base, new String[]{"_id", "_data"}, "_id IN (" + in + ")", args, null);
+            while (cur != null && cur.moveToNext()) out.put(cur.getLong(0), cur.getString(1));
+        } catch (Throwable e) { /* none known: the ids aren't used */ } finally { if (cur != null) cur.close(); }
+        return out;
+    }
 
     private static void readMedia(Context c, Uri uri, boolean image, boolean video, String sel, String[] args, String prefix, Map<String, long[]> out) {
         ArrayList<String> proj = new ArrayList<String>(Arrays.asList("_id", "_data", "width", "height"));

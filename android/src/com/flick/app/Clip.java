@@ -156,6 +156,12 @@ final class Clip {
     /** The image at u as base64 PNG of at most MAX_PNG bytes (made smaller if needed), or null. */
     static String png(ContentResolver cr, Uri u, String mime) {
         try {
+            // a file:// address on the clipboard would be read with Flick's own rights: only from shared storage
+            if (ContentResolver.SCHEME_FILE.equals(u.getScheme())) {
+                File f = Library.sharedFile(u);
+                if (f == null) return null;
+                u = Uri.fromFile(f);
+            }
             if ("image/png".equals(mime)) {
                 byte[] raw = read(cr, u, MAX_PNG + 1);
                 if (raw != null && raw.length <= MAX_PNG && isPng(raw)) return Base64.encodeToString(raw, Base64.NO_WRAP);

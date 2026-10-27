@@ -200,19 +200,43 @@ public final class Library {
     // ------------------------------------------------------------ importing
     public JSONObject importUri(Uri uri) throws IOException {
         ContentResolver cr = ctx.getContentResolver();
-        String name = null;
+        // Flick opens a file:// address with its own rights: only a file in shared storage, never Flick's own data
+        // (its settings hold the pairing tokens)
+        File plain = null;
+        if (ContentResolver.SCHEME_FILE.equals(uri.getScheme())) {
+            plain = sharedFile(uri);
+            if (plain == null) throw new IOException("not allowed");
+        }
+        String name = plain != null ? plain.getName() : null;
         Cursor c = null;
-        try {
-            c = cr.query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null);
-            if (c != null && c.moveToFirst() && !c.isNull(0)) name = c.getString(0);
-        } catch (Throwable e) { /* ignore */ } finally { if (c != null) c.close(); }
+        if (plain == null) {
+            try {
+                c = cr.query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null);
+                if (c != null && c.moveToFirst() && !c.isNull(0)) name = c.getString(0);
+            } catch (Throwable e) { /* ignore */ } finally { if (c != null) c.close(); }
+        }
         if (name == null || name.length() == 0) name = uri.getLastPathSegment();
         String mime = null;
-        try { mime = cr.getType(uri); } catch (Throwable e) { /* ignore */ }
+        try { mime = plain != null ? Files.mimeOf(plain.getName()) : cr.getType(uri); } catch (Throwable e) { /* ignore */ }
         name = ensureExt(sanitize(name == null ? "file" : name), mime);
-        InputStream in = cr.openInputStream(uri);
+        InputStream in = plain != null ? new FileInputStream(plain) : cr.openInputStream(uri);
         if (in == null) throw new IOException("Cannot open");
         try { return importStream(in, name, mime, null); } finally { try { in.close(); } catch (Throwable e) { /* ignore */ } }
+    }
+
+    /**
+     * The file a file:// address names, only when it is in shared storage (its real path, after links) and not in
+     * apps' own folders there (Android/data, Android/obb); null otherwise.
+     */
+    static File sharedFile(Uri u) {
+        try {
+            String p = u.getPath();
+            if (p == null || p.length() == 0) return null;
+            File f = new File(p).getCanonicalFile();
+            String l = f.getPath().toLowerCase(Locale.US) + "/";
+            if (!Files.allowed(f) || l.contains("/android/data/") || l.contains("/android/obb/")) return null;
+            return f.isFile() ? f : null;
+        } catch (Throwable e) { return null; }
     }
 
     public JSONObject importText(String text, String title) throws IOException {
