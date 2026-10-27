@@ -62,6 +62,10 @@ Pick files up with your hand and drop them on the PC, without touching the scree
   phone; at most 30 seconds at a time and 45 seconds in any 2 minutes. macOS asks once for the camera, and once to let
   Flick ask Finder what's selected; turn the PC's camera off in Flick's window: Files > Air grab. Hand tracking runs on
   each device, with MediaPipe's hand models on Flick's own WebAssembly engine (`hand/`); no picture leaves the device.
+- **Aiming:** a hand moves a little as it closes or opens, so the file grabbed is the one the hand was over just before
+  it began to close, and a file lands on the PC where the hand was just before it opened (`phone/hand/stream.js`:
+  `aim`). The hand's position is smoothed with a One Euro filter (a still hand doesn't jitter, a quick one doesn't lag),
+  and the light stays on a file until the hand is clearly over the next one.
 
 ## What's in here
 
@@ -142,6 +146,12 @@ builds can be downloaded from the run for five days).
   fingerprint of their first and last 256 KB; `pc/have.js`, `Have.java`) and `/api/cancel`. A send canceled or
   turned down on the PC is answered 410 from then on (with `why=declined|timeout` when the PC's user turned it down
   under "Ask each time"); Try again on the phone starts a new attempt with `again=1`, which the PC takes.
+- **Kept connections:** `Wire` keeps up to 8 idle TLS connections per PC for 8 seconds, so a send's checks, parts and
+  streams don't each pay for a new handshake; a request on a kept connection that hears nothing within 4 seconds goes
+  again on a new one. The PC answers `Connection: close` when it answers an upload before its body has arrived (no
+  space, say). A fresh attempt skips `/api/status` (nothing can be on the PC yet), and `/api/have` also checks the
+  PC's free space (`bytes=`, 507 when it won't fit). On Windows, a file that arrives in several parts at once is made
+  sparse first (`bin/flick-sparse.exe`, `FSCTL_SET_SPARSE`), so NTFS doesn't fill it with zeros ahead of each part.
 - **The PC's own Wi-Fi** (`pc/hotspot.js`), for Share with a browser from another network: the Windows Mobile hotspot
   (PowerShell, WinRT tethering) or, without an internet connection to share, a Wi-Fi Direct network Flick keeps up;
   NetworkManager's hotspot on Linux. The panel shows a Wi-Fi QR code (`WIFI:T:WPA;S:…;P:…;;`) and the page's.

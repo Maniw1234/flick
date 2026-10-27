@@ -12,6 +12,21 @@
   webcam. The phone's camera runs only while Flick is open and connected with Air grab on; the PC's only for a few
   seconds, after a grab or after you select files (Files > Air grab in Flick's window). Hand tracking runs on the
   device: no picture leaves it.
+- **Air grab aims where you meant.** A hand moves a little as it closes or opens: the file grabbed is the one your
+  hand was over just before it closed, and a file lands on the PC where your hand was just before it opened. The
+  light stays on a file until your hand is clearly over the next one, a still hand no longer jitters and a quick one
+  no longer lags behind, and the card on the PC follows your hand more closely. A fist that comes in half closed
+  still catches files from the PC, and right after a throw the same hand can grab again without leaving the camera's
+  view. On the PC, hand tracking loads ahead of time while a phone is ready, so the camera follows your hand sooner.
+- **Faster transfers.** The phone keeps its encrypted connections to the PC open between requests, so a send no longer
+  pays for a new handshake on every file and check (in tests, a single photo arrived in about 40% less time), and a
+  fresh send skips a round trip it didn't need. The PC checks for files it already has, and for free space, much
+  faster (a few milliseconds for 2,000 files instead of most of a second) and writes many small files faster. On
+  Windows, a large file coming in several parts no longer stalls at the start while Windows fills it with zeros
+  (seconds for a big video on a hard drive). On Android 10 and newer, the phone keeps Wi-Fi in its low-latency mode
+  while files move.
+- Fixed: a send canceled while it was waiting for the PC could still go through, and a pause tapped while a try was
+  failing could be lost.
 
 ## 1.1.0
 
