@@ -317,24 +317,44 @@ public class MainActivity extends Activity {
                 ready = true;
                 ArrayList<String> q;
                 synchronized (queue) { q = new ArrayList<String>(queue); queue.clear(); }
-                for (String s : q) evalEvent(s);
+                for (String s : q) evalScript(s);
             }
         });
     }
 
-    void emit(final String json) {
+    void emit(String json) {
+        // the script is made on the caller's thread (a folder of 8,000 photos is megabytes to quote): the main thread
+        // only hands it to the page
+        final String script = script(json);
         ui.post(new Runnable() {
             @Override
             public void run() {
-                if (!ready) { synchronized (queue) { if (queue.size() < 200) queue.add(json); } return; }
-                evalEvent(json);
+                if (!ready) { synchronized (queue) { if (queue.size() < 200) queue.add(script); } return; }
+                evalScript(script);
             }
         });
     }
 
-    private void evalEvent(String json) {
+    private void evalScript(String script) {
         if (web == null) return;
-        web.evaluateJavascript("window.__native&&window.__native(" + JSONObject.quote(json) + ")", null);
+        web.evaluateJavascript(script, null);
+    }
+
+    private static final char[] HEX = "0123456789abcdef".toCharArray();
+
+    /** The script that hands an event to the page: its JSON as a JS string (the page's JSON.parse is the quick way in). */
+    static String script(String json) {
+        int n = json.length();
+        StringBuilder b = new StringBuilder(n + n / 6 + 48);
+        b.append("window.__native&&window.__native(\"");
+        for (int i = 0; i < n; i++) {
+            char ch = json.charAt(i);
+            if (ch == '"' || ch == '\\') b.append('\\').append(ch);
+            else if (ch < 0x20 || ch == '\u2028' || ch == '\u2029') {
+                b.append("\\u").append(HEX[ch >> 12 & 15]).append(HEX[ch >> 8 & 15]).append(HEX[ch >> 4 & 15]).append(HEX[ch & 15]);
+            } else b.append(ch);
+        }
+        return b.append("\")").toString();
     }
 
     void toast(String msg) {
@@ -418,13 +438,15 @@ public class MainActivity extends Activity {
         return ioPool;
     }
 
+    /**
+     * Answers the page's request req with json, a JSON object as Files and the rest make it: put into the event as it
+     * is (a big folder's listing is megabytes; parsing it again and writing it out again took a while).
+     */
     void result(String req, String json) {
         try {
-            JSONObject o = new JSONObject();
-            o.put("t", "res");
-            o.put("req", req);
-            o.put("data", new JSONObject(json));
-            emit(o.toString());
+            String t = json == null ? "" : json.trim();
+            if (!t.startsWith("{") || !t.endsWith("}")) t = new JSONObject(t).toString();   // (throws when it isn't one)
+            emit("{\"t\":\"res\",\"req\":" + JSONObject.quote(req) + ",\"data\":" + t + "}");
         } catch (Throwable e) { /* ignore */ }
     }
 
