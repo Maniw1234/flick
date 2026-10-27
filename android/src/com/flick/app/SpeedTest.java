@@ -33,6 +33,9 @@ final class SpeedTest {
     /** {up, down} in bytes per second over l. Pure Java. */
     static long[] measure(final Wire.Link l, final String auth, int streams, final long ms) throws Exception {
         ExecutorService pool = Executors.newFixedThreadPool(streams);
+        // a PC that vanishes mid-test would leave a write blocked for good (writes have no timeout): cut it a little
+        // after the test should have ended
+        final java.util.concurrent.ScheduledExecutorService cutter = Executors.newSingleThreadScheduledExecutor();
         try {
             // up: each connection writes for ms, then says how much the PC counted
             final AtomicLong upBytes = new AtomicLong();
@@ -42,7 +45,10 @@ final class SpeedTest {
                 fs.add(pool.submit(new Callable<Void>() {
                     @Override
                     public Void call() throws Exception {
-                        Wire.Call c = Wire.Call.open(l, "POST", "/api/speed?" + auth, Wire.CHUNKED, "application/octet-stream", 15000);
+                        final Wire.Call c = Wire.Call.open(l, "POST", "/api/speed?" + auth, Wire.CHUNKED, "application/octet-stream", 15000);
+                        java.util.concurrent.ScheduledFuture<?> cut = cutter.schedule(new Runnable() {
+                            @Override public void run() { c.close(); }
+                        }, ms + 8000, java.util.concurrent.TimeUnit.MILLISECONDS);
                         try {
                             OutputStream out = c.body();
                             byte[] buf = new byte[256 * 1024];
@@ -51,7 +57,7 @@ final class SpeedTest {
                             Wire.Answer a = c.answer(4096);
                             if (a.code != 200) throw new java.io.IOException("http " + a.code);
                             upBytes.addAndGet(a.json().optLong("bytes", 0));
-                        } finally { c.close(); }
+                        } finally { cut.cancel(false); c.close(); }
                         return null;
                     }
                 }));
@@ -86,6 +92,7 @@ final class SpeedTest {
             return new long[]{(long) (upBytes.get() / upSecs), (long) (downBytes.get() / downSecs)};
         } finally {
             pool.shutdownNow();
+            cutter.shutdownNow();
         }
     }
 

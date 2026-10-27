@@ -169,11 +169,14 @@ final class Wire {
         private OutputStream body;
         private volatile boolean heard;                 // the PC's answer began
         private boolean answered, keepIt, released;     // all of the answer read; the PC keeps the connection open; done
+        private int readMs;                             // how long the PC may take to answer
+        private int firstMs;                            // (> 0) how long a kept connection may stay silent before the answer
 
-        private Call(Conn k, boolean reused, long length) {
+        private Call(Conn k, boolean reused, long length, int readMs) {
             this.k = k;
             this.reused = reused;
             this.length = length;
+            this.readMs = readMs;
             this.raw = k.raw;
             this.in = k.in;
         }
@@ -213,7 +216,7 @@ final class Wire {
         private static Call start(Conn k, boolean reused, long length, int readMs, byte[] head) throws IOException {
             try {
                 k.s.setSoTimeout(readMs);
-                Call c = new Call(k, reused, length);
+                Call c = new Call(k, reused, length, readMs);
                 c.raw.write(head);
                 if (length <= 0) c.raw.flush();
                 return c;
@@ -273,8 +276,10 @@ final class Wire {
         /** bodyDone: the request went out whole (else the connection can't take another one). */
         private Answer read(int max, boolean bodyDone) throws IOException {
             while (true) {
+                if (firstMs > 0 && !heard) k.s.setSoTimeout(firstMs);
                 String status = line(in);
                 if (status == null) throw new IOException("no answer");
+                if (firstMs > 0 && !heard) k.s.setSoTimeout(readMs);
                 heard = true;
                 int code = statusCode(status);
                 long clen = -1;
@@ -376,6 +381,9 @@ final class Wire {
     static Answer call(Link l, String method, String target, byte[] body, String type, int readMs) throws IOException {
         for (int attempt = 0; ; attempt++) {
             Call c = Call.open(l, method, target, body == null ? NO_BODY : body.length, type, readMs, null, attempt > 0);
+            // a kept connection to a PC that vanished meanwhile would stay silent until the read timeout: given a few
+            // seconds only, then the request goes once more over a new one (which fails at once if the PC is gone)
+            if (c.reused) c.firstMs = Math.min(readMs, 4000);
             try {
                 if (body != null && body.length > 0) c.body().write(body);
                 return c.answer(1024 * 1024);

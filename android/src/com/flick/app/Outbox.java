@@ -351,7 +351,7 @@ final class Outbox {
         synchronized (j) {
             if (j.finished()) return;
             if (RUNNING.equals(j.state)) { j.want = CANCELED; Watchdog.abort(j.stop); now = false; }
-            else now = true;
+            else { j.state = CANCELED; now = true; }               // (at once: kick() can't start it in between)
         }
         if (now) { settle(j, CANCELED, null); tellCancel(j); }
     }
@@ -511,7 +511,9 @@ final class Outbox {
         if (e instanceof Fatal) { settle(j, FAILED, e.getMessage()); return; }
         if (e instanceof Restart) {
             boolean again;
-            synchronized (j) { again = j.restarts < MAX_RESTARTS; if (again) { newAttempt(j); j.state = QUEUED; } }
+            String late;                                             // paused or canceled while this was failing
+            synchronized (j) { late = j.want; j.want = null; again = late == null && j.restarts < MAX_RESTARTS; if (again) { newAttempt(j); j.state = QUEUED; } }
+            if (lateWish(j, late)) return;
             env.log("send " + j.tid + " starts over: " + e.getMessage());
             if (!again) { settle(j, FAILED, "Couldn't send it to " + j.pcName); return; }
             save(j);
@@ -520,8 +522,12 @@ final class Outbox {
         }
         if (!(e instanceof IOException)) env.log("send " + j.tid + ": " + e);
         long delay;
+        String late;                                                 // paused or canceled while this was failing
         synchronized (j) {
-            if (!j.committed && now() - j.created > DRAG_MS) { delay = -1; }   // a drag that was never finished
+            late = j.want;
+            j.want = null;
+            if (late != null) { delay = 0; }
+            else if (!j.committed && now() - j.created > DRAG_MS) { delay = -1; }   // a drag that was never finished
             else {
                 j.fails++;
                 long now = now();
@@ -536,12 +542,25 @@ final class Outbox {
                 }
             }
         }
+        if (lateWish(j, late)) return;
         if (delay == -1) { settle(j, CANCELED, null); return; }
         if (delay == -2) { settle(j, FAILED, "Couldn't reach " + j.pcName); return; }
         env.log("send " + j.tid + " waits " + delay + " ms: " + e.getMessage());
         save(j);
         env.changed(j);
         try { timer.schedule(kickTask, delay + 20, TimeUnit.MILLISECONDS); } catch (Throwable x) { /* shutting down */ }
+    }
+
+    /** A pause or cancel the user asked for while the send was failing: done now, instead of being lost. */
+    private boolean lateWish(Job j, String want) {
+        if (CANCELED.equals(want)) { settle(j, CANCELED, null); tellCancel(j); return true; }
+        if (PAUSED.equals(want)) {
+            synchronized (j) { j.state = PAUSED; j.why = null; }
+            save(j);
+            env.changed(j);
+            return true;
+        }
+        return false;
     }
 
     private void settle(Job j, String state, String why) {
