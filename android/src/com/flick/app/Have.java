@@ -54,8 +54,16 @@ final class Have {
      * "none": the files are simply sent.
      */
     static Set<Integer> check(Wire.Link l, String auth, List<File> files, List<String> names) {
+        return check(l, auth, files, names, 0, null);
+    }
+
+    /**
+     * The same, also asking whether the PC has room for bytes (the whole send): full[0] is set when it hasn't (it
+     * answers 507), so the send can say so before any of it goes.
+     */
+    static Set<Integer> check(Wire.Link l, String auth, List<File> files, List<String> names, long bytes, boolean[] full) {
         Set<Integer> have = new HashSet<Integer>();
-        if (files.isEmpty()) return have;
+        if (files.isEmpty() && bytes <= 0) return have;
         try {
             JSONArray list = new JSONArray();
             for (int i = 0; i < files.size(); i++) {
@@ -68,10 +76,11 @@ final class Have {
                 o.put("size", size);
                 list.put(o);
             }
-            if (list.length() == 0) return have;
+            if (list.length() == 0 && bytes <= 0) return have;
             JSONObject body = new JSONObject();
             body.put("files", list);
-            Wire.Answer a = Wire.postJson(l, "/api/have?" + auth, body.toString(), 30000);
+            Wire.Answer a = Wire.postJson(l, "/api/have?" + auth + (bytes > 0 ? "&bytes=" + bytes : ""), body.toString(), 30000);
+            if (a.code == 507 && full != null) full[0] = true;
             if (a.code != 200) return have;
             JSONObject got = a.json().optJSONObject("have");
             if (got == null) return have;

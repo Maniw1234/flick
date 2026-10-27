@@ -12,19 +12,27 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.Charset;
+import java.util.ArrayDeque;
+import java.util.HashMap;
 import java.util.Locale;
+import java.util.Map;
 
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.SSLSocketFactory;
 
 /**
- * One HTTP/1.1 request to a PC over a connection of its own: TLS pinned to the PC's certificate, or plain to a port on
- * this phone (the Bluetooth link, which encrypts by itself). Sends use it instead of the local proxy the page goes
- * through: a file's bytes go straight onto the PC's connection in large writes, and any thread can cut a request by
- * closing it. No Android classes, so it runs on any JVM.
+ * One HTTP/1.1 request to a PC: TLS pinned to the PC's certificate, or plain to a port on this phone (the Bluetooth
+ * link, which encrypts by itself). Sends use it instead of the local proxy the page goes through: a file's bytes go
+ * straight onto the PC's connection in large writes, and any thread can cut a request by closing it. A request that got
+ * its whole answer leaves its connection for the next one to the same PC (the PC keeps an idle one 30 s), so a send's
+ * few requests (have, part, commit) don't each pay a TCP and a TLS handshake: over Wi-Fi those were most of a photo's
+ * time. No Android classes, so it runs on any JVM.
  */
 final class Wire {
     static volatile int CONNECT_MS = 5000;
+    static volatile boolean KEEP = true;                // keep connections for the next request (tests can turn it off)
+    private static final long IDLE_MS = 8000;           // a kept connection is used again only this long (the PC: 30 s)
+    private static final int IDLE_MAX = 8;              // kept per PC (a large file's parts use up to 6 at once)
     static final long CHUNKED = -1, NO_BODY = -2;
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final byte[] CRLF = {'\r', '\n'};
@@ -74,7 +82,65 @@ final class Wire {
             return o != null && o.host.equals(host) && o.port == port && (pin == null ? o.pin == null : pin.equals(o.pin));
         }
 
+        String key() { return host + ":" + port + ":" + pin; }
+
         @Override public String toString() { return host + ":" + port; }
+    }
+
+    /** An open connection to a PC: the socket to talk over, the TCP socket under it, and their buffered streams. */
+    private static final class Conn {
+        final Socket s, tcp;
+        final OutputStream raw;
+        final InputStream in;
+        final String key;
+        long since;                                     // when it finished its last request (kept idle since)
+
+        Conn(Socket[] ss, String key) throws IOException {
+            this.s = ss[0];
+            this.tcp = ss[1];
+            this.key = key;
+            try {
+                this.raw = new BufferedOutputStream(s.getOutputStream(), 64 * 1024);
+                this.in = new BufferedInputStream(s.getInputStream(), 16 * 1024);
+            } catch (IOException e) { close(); throw e; }
+        }
+
+        void close() { try { tcp.close(); } catch (IOException e) { /* ignore */ } }
+    }
+
+    private static final Map<String, ArrayDeque<Conn>> IDLE = new HashMap<String, ArrayDeque<Conn>>();
+
+    /** A kept connection to this PC that's fresh enough, or null. */
+    private static Conn take(Link l) {
+        String key = l.key();
+        long now = System.currentTimeMillis();
+        synchronized (IDLE) {
+            ArrayDeque<Conn> q = IDLE.get(key);
+            while (q != null && !q.isEmpty()) {
+                Conn k = q.pollLast();                  // the last one used: the least likely to have been closed
+                if (now - k.since < IDLE_MS && !k.tcp.isClosed()) return k;
+                k.close();
+            }
+        }
+        return null;
+    }
+
+    private static void keep(Conn k) {
+        synchronized (IDLE) {
+            ArrayDeque<Conn> q = IDLE.get(k.key);
+            if (q == null) IDLE.put(k.key, q = new ArrayDeque<Conn>());
+            k.since = System.currentTimeMillis();
+            q.addLast(k);
+            while (q.size() > IDLE_MAX) q.pollFirst().close();
+        }
+    }
+
+    /** Closes every kept connection (the PC changed, say). */
+    static void forget() {
+        synchronized (IDLE) {
+            for (ArrayDeque<Conn> q : IDLE.values()) for (Conn k : q) k.close();
+            IDLE.clear();
+        }
     }
 
     /** The PC's answer: its status and body (JSON for everything a send asks). */
@@ -94,49 +160,65 @@ final class Wire {
      * any thread (a write blocked on a vanished PC included).
      */
     static final class Call implements Closeable {
-        private final Socket s, tcp;
+        private final Conn k;
         private final OutputStream raw;
         private final InputStream in;
         private final long length;
+        final boolean reused;                           // over a kept connection
         private long written;
         private OutputStream body;
+        private volatile boolean heard;                 // the PC's answer began
+        private boolean answered, keepIt, released;     // all of the answer read; the PC keeps the connection open; done
 
-        private Call(Socket[] ss, long length) throws IOException {
-            this.s = ss[0];
-            this.tcp = ss[1];
+        private Call(Conn k, boolean reused, long length) {
+            this.k = k;
+            this.reused = reused;
             this.length = length;
-            this.raw = new BufferedOutputStream(s.getOutputStream(), 64 * 1024);
-            this.in = new BufferedInputStream(s.getInputStream(), 16 * 1024);
+            this.raw = k.raw;
+            this.in = k.in;
         }
 
         /** readMs: how long the PC may take to answer once the body is through. */
         static Call open(Link l, String method, String target, long length, String type, int readMs) throws IOException {
-            return open(l, method, target, length, type, readMs, null);
+            return open(l, method, target, length, type, readMs, null, false);
         }
 
         /** headers: more request headers, as "Name: value" lines each ending in \r\n (e.g. a Range), or null. */
         static Call open(Link l, String method, String target, long length, String type, int readMs, String headers) throws IOException {
-            Socket[] ss = l.dial();
-            Socket s = ss[0];
+            return open(l, method, target, length, type, readMs, headers, false);
+        }
+
+        /** fresh: over a new connection (not a kept one). */
+        static Call open(Link l, String method, String target, long length, String type, int readMs, String headers, boolean fresh) throws IOException {
+            StringBuilder h = new StringBuilder(target.length() + 160);
+            h.append(method).append(' ').append(target).append(" HTTP/1.1\r\n");
+            // the PC takes requests addressed to an IP (a web page can't make those through DNS tricks)
+            String host = !isIp(l.host) ? "127.0.0.1" : l.host.indexOf(':') >= 0 ? "[" + l.host + "]" : l.host;
+            h.append("Host: ").append(host).append(':').append(l.port).append("\r\n");
+            if (!KEEP) h.append("Connection: close\r\n");
+            if (length >= 0) h.append("Content-Length: ").append(length).append("\r\n");
+            else if (length == CHUNKED) h.append("Transfer-Encoding: chunked\r\n");
+            if (type != null) h.append("Content-Type: ").append(type).append("\r\n");
+            if (headers != null) h.append(headers);
+            h.append("\r\n");
+            byte[] head = h.toString().getBytes(UTF8);
+            Conn k = KEEP && !fresh ? take(l) : null;
+            if (k != null) {
+                try { return start(k, true, length, readMs, head); }
+                catch (IOException e) { /* the PC had closed it: a new one */ }
+            }
+            return start(new Conn(l.dial(), l.key()), false, length, readMs, head);
+        }
+
+        private static Call start(Conn k, boolean reused, long length, int readMs, byte[] head) throws IOException {
             try {
-                s.setSoTimeout(readMs);
-                Call c = new Call(ss, length);
-                StringBuilder h = new StringBuilder(target.length() + 160);
-                h.append(method).append(' ').append(target).append(" HTTP/1.1\r\n");
-                // the PC takes requests addressed to an IP (a web page can't make those through DNS tricks)
-                String host = !isIp(l.host) ? "127.0.0.1" : l.host.indexOf(':') >= 0 ? "[" + l.host + "]" : l.host;
-                h.append("Host: ").append(host).append(':').append(l.port).append("\r\n");
-                h.append("Connection: close\r\n");
-                if (length >= 0) h.append("Content-Length: ").append(length).append("\r\n");
-                else if (length == CHUNKED) h.append("Transfer-Encoding: chunked\r\n");
-                if (type != null) h.append("Content-Type: ").append(type).append("\r\n");
-                if (headers != null) h.append(headers);
-                h.append("\r\n");
-                c.raw.write(h.toString().getBytes(UTF8));
+                k.s.setSoTimeout(readMs);
+                Call c = new Call(k, reused, length);
+                c.raw.write(head);
                 if (length <= 0) c.raw.flush();
                 return c;
             } catch (IOException e) {
-                try { ss[1].close(); } catch (IOException x) { /* ignore */ }
+                k.close();
                 throw e;
             }
         }
@@ -174,12 +256,29 @@ final class Wire {
             if (length >= 0 && written != length) throw new IOException("body short");
             if (length == CHUNKED) raw.write("0\r\n\r\n".getBytes(UTF8));
             raw.flush();
+            return read(max, true);
+        }
+
+        /**
+         * The body couldn't be written (the connection broke): the PC may have answered before it closed it (no space
+         * on it, a send it canceled), and that answer says more than "cut off". Null when there's none to read.
+         */
+        Answer answerAfterCut(int max) {
+            try {
+                k.s.setSoTimeout(1500);
+                return read(max, false);
+            } catch (Throwable e) { return null; }
+        }
+
+        /** bodyDone: the request went out whole (else the connection can't take another one). */
+        private Answer read(int max, boolean bodyDone) throws IOException {
             while (true) {
                 String status = line(in);
                 if (status == null) throw new IOException("no answer");
+                heard = true;
                 int code = statusCode(status);
                 long clen = -1;
-                boolean chunked = false;
+                boolean chunked = false, close = false;
                 String h;
                 while ((h = line(in)) != null && h.length() > 0) {
                     int colon = h.indexOf(':');
@@ -187,10 +286,14 @@ final class Wire {
                     String name = h.substring(0, colon).trim().toLowerCase(Locale.US), value = h.substring(colon + 1).trim();
                     if (name.equals("content-length")) { try { clen = Long.parseLong(value); } catch (NumberFormatException e) { throw new IOException("bad answer"); } }
                     else if (name.equals("transfer-encoding") && value.toLowerCase(Locale.US).contains("chunked")) chunked = true;
+                    else if (name.equals("connection") && value.toLowerCase(Locale.US).contains("close")) close = true;
                 }
                 if (h == null) throw new IOException("answer cut off");
                 if (code == 100) continue;                       // "go on": the real answer follows
-                return new Answer(code, new String(readBody(in, clen, chunked, max), UTF8));
+                Answer a = new Answer(code, new String(readBody(in, clen, chunked, max), UTF8));
+                // read to its end: the connection can take the next request, unless the PC closes it
+                synchronized (this) { answered = clen >= 0 || chunked; keepIt = bodyDone && !close; }
+                return a;
             }
         }
 
@@ -202,6 +305,7 @@ final class Wire {
             raw.flush();
             String status = line(in);
             if (status == null) throw new IOException("no answer");
+            heard = true;
             code[0] = statusCode(status);
             len[0] = -1;
             String h;
@@ -212,12 +316,43 @@ final class Wire {
                 if (name.equalsIgnoreCase("content-length")) {
                     try { len[0] = Long.parseLong(h.substring(colon + 1).trim()); } catch (NumberFormatException e) { /* unknown */ }
                 } else if (range != null && name.equalsIgnoreCase("content-range")) range[0] = h.substring(colon + 1).trim();
+                else if (name.equalsIgnoreCase("connection") && h.substring(colon + 1).toLowerCase(Locale.US).contains("close")) closeAfter = true;
             }
             if (h == null) throw new IOException("answer cut off");
             return in;
         }
 
-        Socket socket() { return s; }
+        private boolean closeAfter;                     // the PC said it closes the connection after this answer
+
+        /**
+         * The body of an answer respond() began: exactly len bytes (len >= 0), after which it ends. Read to its end, the
+         * connection can take the next request; closing this stream leaves the connection to close().
+         */
+        InputStream body(final long len) {
+            final InputStream src = in;
+            return new InputStream() {
+                long left = len;
+                private void end() { if (left == 0) synchronized (Call.this) { answered = true; keepIt = !closeAfter && Math.max(0, length) == written; } }
+                @Override public int read() throws IOException {
+                    if (len >= 0 && left <= 0) { end(); return -1; }
+                    int r = src.read();
+                    if (r >= 0 && len >= 0) { left--; end(); }
+                    return r;
+                }
+                @Override public int read(byte[] b, int off, int n) throws IOException {
+                    if (n == 0) return 0;
+                    if (len >= 0 && left <= 0) { end(); return -1; }
+                    int r = src.read(b, off, len >= 0 ? (int) Math.min(n, left) : n);
+                    if (r > 0 && len >= 0) { left -= r; end(); }
+                    if (r < 0 && len >= 0 && left > 0) throw new IOException("answer cut off");
+                    return r;
+                }
+                @Override public int available() throws IOException { return len >= 0 ? (int) Math.min(src.available(), left) : src.available(); }
+                @Override public void close() { /* the connection is close()'s */ }
+            };
+        }
+
+        Socket socket() { return k.s; }
 
         /**
          * Ends it at once, from any thread: the TCP connection under it is closed, which also ends a write that is
@@ -225,18 +360,32 @@ final class Wire {
          */
         @Override
         public void close() {
-            try { tcp.close(); } catch (IOException e) { /* ignore */ }
+            boolean reuse;
+            synchronized (this) {
+                if (released) return;
+                released = true;
+                reuse = KEEP && answered && keepIt;
+            }
+            // a finished request leaves its connection for the next one; anything else (a cut, a request that never got
+            // its whole answer, a download read by its caller) closes it
+            if (reuse) keep(k); else k.close();
         }
     }
 
     /** A request with a small body (or none), answered in full. */
     static Answer call(Link l, String method, String target, byte[] body, String type, int readMs) throws IOException {
-        Call c = Call.open(l, method, target, body == null ? NO_BODY : body.length, type, readMs);
-        try {
-            if (body != null && body.length > 0) c.body().write(body);
-            return c.answer(1024 * 1024);
-        } finally {
-            c.close();
+        for (int attempt = 0; ; attempt++) {
+            Call c = Call.open(l, method, target, body == null ? NO_BODY : body.length, type, readMs, null, attempt > 0);
+            try {
+                if (body != null && body.length > 0) c.body().write(body);
+                return c.answer(1024 * 1024);
+            } catch (IOException e) {
+                // a kept connection the PC had closed meanwhile: once more over a new one (nothing was answered)
+                if (c.reused && !c.heard && attempt == 0) continue;
+                throw e;
+            } finally {
+                c.close();
+            }
         }
     }
 

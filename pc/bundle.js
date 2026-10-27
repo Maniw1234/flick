@@ -63,6 +63,13 @@ class BundleReceiver {
     this.first = true;                // the next entry is the stream's first
     this.nextNo = (opts && opts.first) || 0;   // the number an entry without its own "i" gets
     this.pos = 0;                     // where the open file's next bytes go
+    this.dirs = new Set();            // folders made already (each file doesn't make its folder again)
+  }
+
+  async _mkdir(d) {
+    if (this.dirs.has(d)) return;
+    await fs.promises.mkdir(d, { recursive: true });
+    this.dirs.add(d);
   }
 
   _top(seg0) { if (!this.tops.includes(seg0)) this.tops.push(seg0); }
@@ -92,7 +99,7 @@ class BundleReceiver {
     if (resume && (h.d || String(h.p) !== resume.p)) throw new Error('resume mismatch');
     if (h.d || segs.length > 1) this._top(segs[0]);   // a top-level file is recorded under the name it's actually staged as
     if (h.d) {
-      await fs.promises.mkdir(full, { recursive: true });
+      await this._mkdir(full);
       this.stage = 'hlen'; this.need = 4;
       if (this.hooks.onEntry) this.hooks.onEntry({ i: no, p: String(h.p), size: 0, dir: true });
       return;
@@ -106,15 +113,20 @@ class BundleReceiver {
       fd = await fs.promises.open(dest, 'r+');
       this.pos = resume.from;
     } else {
-      await fs.promises.mkdir(path.dirname(full), { recursive: true });
+      await this._mkdir(path.dirname(full));
       const ext = path.extname(full), base = full.slice(0, full.length - ext.length);
       if (!dest) {
+        // a name not taken: made new here ('wx': a file already there, from an earlier attempt, is never written over)
         dest = full; let i = 2;
-        while (this.taken.has(this._key(dest)) || fs.existsSync(dest)) dest = base + ' (' + i++ + ')' + ext;
+        for (;;) {
+          if (!this.taken.has(this._key(dest))) {
+            try { fd = await fs.promises.open(dest, 'wx'); break; } catch (e) { if (e.code !== 'EEXIST') throw e; }
+          }
+          dest = base + ' (' + i++ + ')' + ext;
+        }
         this.taken.set(this._key(dest), true);
         if (this.assigned) this.assigned.set(String(h.p), dest);
-      }
-      fd = await fs.promises.open(dest, 'w');
+      } else fd = await fs.promises.open(dest, 'w');
       this.pos = 0;
     }
     if (segs.length === 1) this._top(path.basename(dest));
@@ -131,8 +143,9 @@ class BundleReceiver {
   async _closeFile() {
     const fd = this.fd, cur = this.cur;
     this.fd = null; this.cur = null;
+    // the phone's date, set on the open file (no second open by name)
+    if (fd && cur && cur.mtime > 0) { const t = new Date(cur.mtime); await fd.utimes(t, t).catch(() => {}); }
     if (fd) await fd.close();
-    if (cur && cur.mtime > 0) { const t = new Date(cur.mtime); await fs.promises.utimes(cur.path, t, t).catch(() => {}); }
     this.stage = 'hlen'; this.need = 4;
     if (cur && this.hooks.onEntry) this.hooks.onEntry({ i: cur.i, p: cur.p, size: cur.size, dir: false });
   }

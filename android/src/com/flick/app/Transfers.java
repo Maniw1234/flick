@@ -100,7 +100,9 @@ final class Transfers {
     static final long PARALLEL_MIN = 8L * 1024 * 1024;
     private static final Object BUSY = new Object();
     private static int active;                         // guarded by BUSY, like the locks
-    private static WifiManager.WifiLock wifiLock;
+    // Wi-Fi kept out of power saving while files move (its sleep between packets slows every round trip and the whole
+    // rate): HIGH_PERF does it with the screen off too (up to Android 13), LOW_LATENCY with Flick on screen (Android 10+)
+    private static WifiManager.WifiLock wifiLock, wifiFast;
     private static PowerManager.WakeLock wakeLock;
 
     private void busy(boolean on) {
@@ -109,12 +111,20 @@ final class Transfers {
                 if (++active != 1) return;
                 try {
                     if (wifiLock == null) {
-                        WifiManager wm = (WifiManager) ctx.getSystemService(Context.WIFI_SERVICE);
-                        @SuppressWarnings("deprecation")
-                        int mode = Build.VERSION.SDK_INT >= 29 ? WifiManager.WIFI_MODE_FULL_LOW_LATENCY : WifiManager.WIFI_MODE_FULL_HIGH_PERF;
-                        if (wm != null) { wifiLock = wm.createWifiLock(mode, "flick-transfer"); wifiLock.setReferenceCounted(false); }
+                        WifiManager wm = (WifiManager) ctx.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                        if (wm != null) {
+                            @SuppressWarnings("deprecation")
+                            int high = WifiManager.WIFI_MODE_FULL_HIGH_PERF;
+                            wifiLock = wm.createWifiLock(high, "flick-transfer");
+                            wifiLock.setReferenceCounted(false);
+                            if (Build.VERSION.SDK_INT >= 29) {
+                                wifiFast = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "flick-transfer-fast");
+                                wifiFast.setReferenceCounted(false);
+                            }
+                        }
                     }
                     if (wifiLock != null) wifiLock.acquire();
+                    if (wifiFast != null) wifiFast.acquire();
                 } catch (Throwable e) { /* speed only */ }
                 try {
                     if (wakeLock == null) {
@@ -127,6 +137,7 @@ final class Transfers {
             } else {
                 if (active == 0 || --active != 0) return;
                 try { if (wifiLock != null && wifiLock.isHeld()) wifiLock.release(); } catch (Throwable e) { /* ignore */ }
+                try { if (wifiFast != null && wifiFast.isHeld()) wifiFast.release(); } catch (Throwable e) { /* ignore */ }
                 try { if (wakeLock != null && wakeLock.isHeld()) wakeLock.release(); } catch (Throwable e) { /* ignore */ }
                 TransferService.want(ctx, false);
             }
@@ -311,6 +322,7 @@ final class Transfers {
                 boolean ok = false;
                 JSONObject item = null;
                 HttpURLConnection c = null;
+                Wire.Call wc = null;
                 Watchdog.Guard g = null;
                 String why = null;
                 final String url = withoutParallel(rawUrl);
@@ -342,15 +354,31 @@ final class Transfers {
                         item = Files.fileJson(saved, null);
                         ok = true;
                     } else {
-                    c = (HttpURLConnection) new URL(url).openConnection();
-                    g = Watchdog.guard(null, c);                 // no abort for downloads; it still ends one that stalls
-                    c.setConnectTimeout(5000);
-                    c.setReadTimeout(60000);
-                    c.setUseCaches(false);
-                    int code = c.getResponseCode();
-                    if (code != 200) throw new IOException("http " + code);
-                    final long total = c.getContentLengthLong();
-                    InputStream in = g.watch(c.getInputStream());
+                    final long total;
+                    InputStream in;
+                    Object[] direct = Wire.direct(url);
+                    if (direct != null) {
+                        // straight to the PC (no hop through the page's local proxy), over a connection kept from the
+                        // request before when there is one
+                        wc = Wire.Call.open((Wire.Link) direct[0], "GET", (String) direct[1], Wire.NO_BODY, null, 60000);
+                        g = Watchdog.guard(null, wc);            // no abort for downloads; it still ends one that stalls
+                        int[] code = new int[1];
+                        long[] len = new long[1];
+                        wc.respond(code, len);
+                        if (code[0] != 200) throw new IOException("http " + code[0]);
+                        total = len[0];
+                        in = g.watch(wc.body(total));
+                    } else {
+                        c = (HttpURLConnection) new URL(url).openConnection();
+                        g = Watchdog.guard(null, c);             // no abort for downloads; it still ends one that stalls
+                        c.setConnectTimeout(5000);
+                        c.setReadTimeout(60000);
+                        c.setUseCaches(false);
+                        int code = c.getResponseCode();
+                        if (code != 200) throw new IOException("http " + code);
+                        total = c.getContentLengthLong();
+                        in = g.watch(c.getInputStream());
+                    }
                     Library.Progress prog = new Library.Progress() {
                         long last = 0;
                         @Override
@@ -398,6 +426,7 @@ final class Transfers {
                 } finally {
                     if (g != null) g.close();
                     if (c != null) c.disconnect();
+                    if (wc != null) wc.close();
                     busy(false);
                 }
                 event("down-done", "fid", fid, ok, item, why);

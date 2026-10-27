@@ -58,14 +58,17 @@ class ReceivedIndex {
   constructor(file, opts) {
     this.file = file;
     this.saveDir = (opts && opts.saveDir) || (() => null);
-    this.list = [];             // [{ p, s }] oldest first
+    this.map = new Map();       // lower-cased path -> { p, s }, oldest first (a file saved again moves to the end)
     this.fps = new Map();       // "path|size|mtime" -> fingerprint
     this.saveT = null;
+    this.dirList = null;        // { dir, at, names: Set of lower-cased names }: the save folder, read once for a while
     try {
       const j = JSON.parse(fs.readFileSync(file, 'utf8'));
-      if (Array.isArray(j.files)) this.list = j.files.filter((x) => x && typeof x.p === 'string' && x.s > 0).slice(-MAX_INDEX);
+      if (Array.isArray(j.files)) for (const x of j.files.slice(-MAX_INDEX)) if (x && typeof x.p === 'string' && x.s > 0) this.map.set(x.p.toLowerCase(), { p: x.p, s: x.s });
     } catch (e) { /* none yet */ }
   }
+
+  get list() { return [...this.map.values()]; }
 
   _save() {
     if (this.saveT) return;
@@ -77,13 +80,17 @@ class ReceivedIndex {
     if (this.saveT.unref) this.saveT.unref();
   }
 
+  // (a map lookup, not a scan of the whole list: receiving a folder of thousands of files adds thousands)
   _push(p, s) {
     if (!(s > 0)) return;
     const k = p.toLowerCase();
-    const i = this.list.findIndex((x) => x.p.toLowerCase() === k);
-    if (i >= 0) this.list.splice(i, 1);
-    this.list.push({ p, s });
-    if (this.list.length > MAX_INDEX) this.list.splice(0, this.list.length - MAX_INDEX);
+    this.map.delete(k);
+    this.map.set(k, { p, s });
+    this.dirList = null;
+    if (this.map.size > MAX_INDEX) {
+      let drop = this.map.size - MAX_INDEX;
+      for (const key of this.map.keys()) { if (drop-- <= 0) break; this.map.delete(key); }
+    }
   }
 
   /** A file Flick just saved. */
@@ -120,22 +127,38 @@ class ReceivedIndex {
     return fp;
   }
 
+  // the names in the save folder (lower-cased), read once and kept a few seconds: one listing instead of a look for
+  // each possible name of each file asked about
+  async _names(dir) {
+    const now = Date.now();
+    if (this.dirList && this.dirList.dir === dir && now - this.dirList.at < 5000) return this.dirList.names;
+    let names = null;
+    try { names = new Set((await fs.promises.readdir(dir)).map((n) => n.toLowerCase())); } catch (e) { names = null; }
+    this.dirList = { dir, at: now, names };
+    return names;
+  }
+
   /**
    * items: [{ k, name, size }] → { k: [fingerprint, ...] } for the items with a likely copy here.
    */
   async lookup(items) {
     const bySize = new Map();
-    for (const x of this.list) { const a = bySize.get(x.s); if (a) a.push(x.p); else bySize.set(x.s, [x.p]); }
+    for (const x of this.map.values()) { const a = bySize.get(x.s); if (a) a.push(x.p); else bySize.set(x.s, [x.p]); }
     const dir = this.saveDir();
+    const names = dir ? await this._names(dir) : null;
     const out = {};
-    let gone = false;
-    for (const it of items) {
+    const gone = [];
+    // the likely copies of each file: saved before with its size, or in the save folder under its name (or "name (2)"...);
+    // only those that exist are looked at, several files at a time
+    const one = async (it) => {
       const cands = new Set(bySize.get(it.size) || []);
       const name = path.basename(String(it.name || ''));
       if (dir && name && name !== '.' && name !== '..') {
         const ext = path.extname(name), base = name.slice(0, name.length - ext.length);
-        cands.add(path.join(dir, name));
-        for (let i = 2; i <= 9; i++) cands.add(path.join(dir, base + ' (' + i + ')' + ext));
+        for (let i = 1; i <= 9; i++) {
+          const n = i === 1 ? name : base + ' (' + i + ')' + ext;
+          if (!names || names.has(n.toLowerCase())) cands.add(path.join(dir, n));
+        }
       }
       const fps = new Set();
       let n = 0;
@@ -143,15 +166,17 @@ class ReceivedIndex {
         if (n >= MAX_CANDIDATES) break;
         const fp = await this._fp(p, it.size);
         if (fp) { fps.add(fp); n++; }
-        else if (bySize.has(it.size) && bySize.get(it.size).includes(p)) {
-          // a saved file that's gone or changed: forget it
-          const i = this.list.findIndex((x) => x.p === p);
-          if (i >= 0) { this.list.splice(i, 1); gone = true; }
-        }
+        else if (bySize.has(it.size) && bySize.get(it.size).includes(p)) gone.push(p);   // a saved file that's gone or changed
       }
       if (fps.size) out[it.k] = [...fps];
+    };
+    let next = 0;
+    const worker = async () => { while (next < items.length) await one(items[next++]); };
+    await Promise.all(Array.from({ length: Math.min(16, items.length) }, worker));
+    if (gone.length) {
+      for (const p of gone) this.map.delete(p.toLowerCase());
+      this._save();
     }
-    if (gone) this._save();
     return out;
   }
 }

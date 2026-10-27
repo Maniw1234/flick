@@ -730,7 +730,12 @@ class FlickServer extends EventEmitter {
 
   _json(res, code, obj) {
     this._cors(res);
-    res.writeHead(code, { 'Content-Type': 'application/json' });
+    // An answer before a large body has come in (no space, canceled, gone): the connection closes after it, so the
+    // phone's writes stop at once and it reads this answer, instead of the rest of the file being sent to be thrown away
+    // (phones keep their connections open for the next request).
+    const req = res.req;
+    const big = req && !req.complete && (+req.headers['content-length'] > 256 * 1024 || /chunked/i.test(String(req.headers['transfer-encoding'] || '')));
+    res.writeHead(code, big ? { 'Content-Type': 'application/json', Connection: 'close' } : { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(obj));
   }
 
@@ -1085,17 +1090,43 @@ class FlickServer extends EventEmitter {
       this.emit('upload-done', { tid, tmpPath: A.root, name: tops.length === 1 ? tops[0] : tops.length + ' items', size: received, ms: Date.now() - A.t0, streams: K,
         bundle: { tops, files: +(A.manifest && A.manifest.files) || 0, bytes: received } });
     };
+    // What comes in while the disk is busy is written in one go (up to 1 MB at a time): the TLS link hands over 16 KB
+    // at a time, and a disk write (and a pause and resume of the connection) for each was the PC's limit with many files.
+    // The connection is paused only when the disk falls well behind.
     const queue = [];
-    let busy = false, ended = false;
+    let queued = 0, busy = false, ended = false;
     const pump = async () => {
       busy = true;
-      try { while (queue.length && !over && !A.superseded) await rx.push(queue.shift()); } catch (e) { busy = false; return fail(e.message || 'bad bundle', 400); }
+      try {
+        while (queue.length && !over && !A.superseded) {
+          let chunk = queue.shift();
+          if (queue.length && chunk.length < 1 << 20) {
+            const parts = [chunk];
+            let n = chunk.length;
+            while (queue.length && n + queue[0].length <= 1 << 20) { n += queue[0].length; parts.push(queue.shift()); }
+            if (parts.length > 1) chunk = Buffer.concat(parts, n);
+          }
+          queued -= chunk.length;
+          await rx.push(chunk);
+          if (req.isPaused() && queued < 2 << 20 && !ended) req.resume();
+        }
+      } catch (e) {
+        busy = false;
+        // the disk (full, a file held by another program): 500, and the phone carries on from where it got; a body that
+        // isn't a proper bundle: 400, and it starts over
+        return fail(e.message || 'bad bundle', e && typeof e.code === 'string' && /^E[A-Z]+$/.test(e.code) ? 500 : 400);
+      }
       busy = false;
       if (over || A.superseded) return;
       if (ended) return complete();
-      req.resume();
     };
-    req.on('data', (chunk) => { if (over || A.superseded) return; queue.push(chunk); if (!busy) { req.pause(); pump(); } });
+    req.on('data', (chunk) => {
+      if (over || A.superseded) return;
+      queue.push(chunk);
+      queued += chunk.length;
+      if (queued > 8 << 20) req.pause();
+      if (!busy) pump();
+    });
     req.on('end', () => { ended = true; if (!busy) complete(); });
     req.on('aborted', () => fail('aborted'));
     req.on('error', () => fail('error'));
@@ -1299,8 +1330,9 @@ class FlickServer extends EventEmitter {
       }
       A.finished = true;
       this.assemblies.delete(tid);
-      this._remember(tid, A.att, 'done', A.resumable);
+      // done only once the file is safely closed: a phone asking again then hears "done" only for a file that's here
       try { await (await A.fdP).close(); } catch (e) { fs.unlink(A.path, () => {}); this.emit('upload-failed', { tid, why: 'disk' }); return; }
+      this._remember(tid, A.att, 'done', A.resumable);
       this.emit('upload-progress', { tid, received: total, total });
       this.emit('upload-done', { tid, tmpPath: A.path, name: A.name, size: total, ms: Date.now() - A.t0, parts });
     };
@@ -1387,8 +1419,9 @@ class FlickServer extends EventEmitter {
       }
       A.finished = true;
       this.assemblies.delete(tid);
-      this._remember(tid, att, 'done', A.resumable);
+      // (done only once the file is safely closed; otherwise the phone sends it again)
       try { await (await A.fdP).close(); } catch (e) { fs.unlink(A.path, () => {}); this.emit('upload-failed', { tid, why: 'disk' }); return answer(500, { ok: false, error: 'disk' }); }
+      this._remember(tid, att, 'done', A.resumable);
       this.emit('upload-progress', { tid, received: A.total, total: A.total });
       this.emit('upload-done', { tid, tmpPath: A.path, name: A.name, size: A.total, ms: Date.now() - A.t0, parts: A.parts });
       answer(200, { ok: true, done: true });
@@ -1532,6 +1565,9 @@ class FlickServer extends EventEmitter {
         this.emit('already-have', { tid, name: String(q.get('name') || '').slice(0, 300), files: Math.max(1, +q.get('files') || 1) });
         return this._json(res, 200, { ok: true });
       }
+      // (bytes: the whole send's size, asked before any of it goes: no room for it is said now, not halfway)
+      const need = Math.floor(Number(q.get('bytes'))) || 0;
+      if (need > 0 && !this._roomFor(need)) return this._json(res, 507, { ok: false, error: 'no space' });
       let list;
       try { list = JSON.parse(body).files; } catch (e) { return this._json(res, 400, { ok: false, error: 'bad list' }); }
       if (!Array.isArray(list) || list.length > 20000) return this._json(res, 400, { ok: false, error: 'bad list' });

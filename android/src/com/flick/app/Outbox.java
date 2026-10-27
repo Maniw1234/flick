@@ -98,6 +98,7 @@ final class Outbox {
         int port;
         boolean committed, checked, retried;
         boolean again;                                // tried again by the user: the PC takes it even if it was dropped there
+        boolean begun;                                // this attempt sent the PC data: ask how far it got before more
         String state = QUEUED, why, want, sig, refused;
         volatile String att;                          // written under this, read by the part threads
         int ways, restarts, fails;
@@ -192,6 +193,7 @@ final class Outbox {
             o.put("checked", checked);
             o.put("retried", retried);
             if (again) o.put("again", true);
+            o.put("begun", begun);
             o.put("state", state);
             if (why != null) o.put("why", why);
             if (refused != null) o.put("refused", refused);
@@ -227,6 +229,7 @@ final class Outbox {
             j.checked = o.optBoolean("checked", false);
             j.retried = o.optBoolean("retried", false);
             j.again = o.optBoolean("again", false);
+            j.begun = o.optBoolean("begun", true);       // (saved before this was kept: ask, to be safe)
             j.state = o.optString("state", QUEUED);
             j.why = o.has("why") ? o.optString("why") : null;
             j.refused = o.has("refused") ? o.optString("refused") : null;
@@ -561,6 +564,7 @@ final class Outbox {
         j.restarts++;
         j.sent.set(0);
         j.ways = 0;
+        j.begun = false;
     }
 
     // what the PC answered to a part, a stream or a commit
@@ -631,7 +635,9 @@ final class Outbox {
         }
         save(j);
         if (check) {
-            Set<Integer> have = Have.check(l, auth, Collections.singletonList(f), Collections.singletonList(it.name));
+            boolean[] full = new boolean[1];
+            Set<Integer> have = Have.check(l, auth, Collections.singletonList(f), Collections.singletonList(it.name), total, full);
+            if (full[0]) throw new Fatal("Not enough space on " + j.pcName);
             synchronized (j) { j.checked = true; if (have.contains(0)) j.had.add(0); }
             save(j);
             if (have.contains(0)) { tellHave(j, l, auth, it.name, 1); return SKIPPED; }
@@ -640,14 +646,17 @@ final class Outbox {
             return SKIPPED;
         }
         final int n;
-        synchronized (j) { n = j.ways; }
+        boolean begun;
+        synchronized (j) { n = j.ways; begun = j.begun; }
         final long size = (total + n - 1) / n;
         final long[] from = new long[n];
         final boolean[] done = new boolean[n];
-        Wire.Answer st = Wire.get(l, "/api/status?" + q(j, auth), 15000);
-        if (st.code == 403) check(j, st);
-        if (st.code == 410) { if (retried(j)) throw new Restart("tried again"); throw aborted(j, st); }
-        if (st.code == 200) {
+        // how far the PC got: only worth a round trip when this attempt has already sent it something
+        Wire.Answer st = begun ? Wire.get(l, "/api/status?" + q(j, auth), 15000) : null;
+        if (st != null && st.code == 403) check(j, st);
+        if (st != null && st.code == 410) { if (retried(j)) throw new Restart("tried again"); throw aborted(j, st); }
+        if (st != null && st.code == 507) check(j, st);
+        if (st != null && st.code == 200) {
             JSONObject o = st.json();
             if (o.optBoolean("done", false)) return DONE;
             JSONArray sv = o.optJSONArray("saved"), dn = o.optJSONArray("done");
@@ -667,59 +676,80 @@ final class Outbox {
         env.changed(j);
         final AtomicBoolean stop;
         synchronized (j) { stop = j.stop; }
-        // each part's checksum, read while the parts go (the PC checks what it got against them)
-        Future<String> sum = pool.submit(new Callable<String>() {
-            @Override public String call() throws Exception { return partSums(f, n, size, total, stop); }
-        });
-        try {
-            List<Future<?>> parts = new ArrayList<Future<?>>();
-            for (int i = 0; i < n; i++) {
-                if (done[i]) continue;
-                final int index = i;
+        markBegun(j);
+        // each part's checksum (the PC checks what it got against them): worked out from the bytes as they go; a part the
+        // PC has whole already is read for it
+        final String[] sums = new String[n];
+        List<Future<?>> parts = new ArrayList<Future<?>>();
+        for (int i = 0; i < n; i++) {
+            final int index = i;
+            final long off = i * size, len = Math.max(0, Math.min(size, total - off));
+            if (done[i]) {
                 parts.add(pool.submit(new Callable<Void>() {
-                    @Override public Void call() throws Exception {
-                        // one part failing stops the others at once (even one waiting for its answer): all of them
-                        // carry on together from where the PC stands
-                        try { sendPart(j, l, auth, f, it.name, index, n, size, total, from[index], stop); return null; }
-                        catch (Exception e) { Watchdog.abort(stop); throw e; }
-                    }
+                    @Override public Void call() throws Exception { sums[index] = rangeSum(f, off, len, stop); return null; }
                 }));
+                continue;
             }
-            finish(parts, stop);
-            String sha;
-            try { sha = sum.get(); }
-            catch (ExecutionException e) { throw e.getCause() instanceof IOException ? (IOException) e.getCause() : new IOException(e.getCause()); }
-            catch (InterruptedException e) { throw new IOException("interrupted"); }
-            commit(j, l, auth, sha, total, stop);
-        } finally {
-            sum.cancel(true);
+            parts.add(pool.submit(new Callable<Void>() {
+                @Override public Void call() throws Exception {
+                    // one part failing stops the others at once (even one waiting for its answer): all of them
+                    // carry on together from where the PC stands
+                    try { sums[index] = sendPart(j, l, auth, f, it.name, index, n, size, total, from[index], stop); return null; }
+                    catch (Exception e) { Watchdog.abort(stop); throw e; }
+                }
+            }));
         }
+        finish(parts, stop);
+        StringBuilder sha = new StringBuilder(n * 65);
+        for (int i = 0; i < n; i++) { if (i > 0) sha.append(','); sha.append(sums[i]); }
+        commit(j, l, auth, sha.toString(), total, stop);
         return DONE;
     }
 
-    private void sendPart(Job j, Wire.Link l, String auth, File f, String name, int index, int n, long size, long total, long from, AtomicBoolean stop) throws IOException {
+    /** This attempt is about to send the PC data: from now on a retry asks how far it got first. */
+    private void markBegun(Job j) {
+        boolean was;
+        synchronized (j) { was = j.begun; j.begun = true; }
+        if (!was) save(j);
+    }
+
+    /** Sends part index (from its byte from on); returns the SHA-256 of the whole part, worked out on the way. */
+    private String sendPart(Job j, Wire.Link l, String auth, File f, String name, int index, int n, long size, long total, long from, AtomicBoolean stop) throws IOException {
         long off = index * size, len = Math.max(0, Math.min(size, total - off));
         String target = "/api/part?" + q(j, auth) + "&parts=" + n + "&total=" + total + "&index=" + index + "&offset=" + off +
                 "&resume=1&from=" + from + "&verify=1&name=" + Wire.enc(name) + (j.committed() ? "&committed=1" : "");
-        Wire.Call c = Wire.Call.open(l, "POST", target, len - from, "application/octet-stream", READ_MS);
+        java.security.MessageDigest md = sha256();
+        RandomAccessFile raf = new RandomAccessFile(f, "r");
+        byte[] buf = new byte[BUF];
+        try {
+            // a part carried on from the middle: its checksum starts with the bytes the PC has already
+            if (from > 0) { raf.seek(off); hashFrom(raf, md, from, buf, stop); }
+        } catch (IOException e) {
+            try { raf.close(); } catch (IOException x) { /* ignore */ }
+            throw e;
+        }
+        Wire.Call c;
+        try { c = Wire.Call.open(l, "POST", target, len - from, "application/octet-stream", READ_MS); }
+        catch (IOException e) { try { raf.close(); } catch (IOException x) { /* ignore */ } throw e; }
         Watchdog.Guard g = Watchdog.guard(stop, c);
-        RandomAccessFile raf = null;
+        boolean through = false;
         try {
             OutputStream out = g.watch(c.body());
-            raf = new RandomAccessFile(f, "r");
             raf.seek(off + from);
-            byte[] buf = new byte[BUF];
             long left = len - from;
             while (left > 0) {
                 if (stop.get()) throw new IOException("stopped");
                 int r = raf.read(buf, 0, (int) Math.min(buf.length, left));
                 if (r < 0) throw new Restart("the file changed");
+                md.update(buf, 0, r);
                 out.write(buf, 0, r);
                 left -= r;
                 progress(j, r);
             }
             g.idle();
+            through = true;
             check(j, c.answer(64 * 1024));
+            return hex(md.digest());
         } catch (Fatal e) {
             throw e;
         } catch (Aborted e) {
@@ -727,36 +757,55 @@ final class Outbox {
         } catch (Restart e) {
             throw e;
         } catch (IOException e) {
+            if (!through) cutAnswer(j, c, g, stop);
             throw g.ended() != null ? new IOException(g.ended(), e) : e;
         } finally {
             g.close();
-            try { if (raf != null) raf.close(); } catch (IOException e) { /* ignore */ }
+            try { raf.close(); } catch (IOException e) { /* ignore */ }
             c.close();
         }
     }
 
-    /** The SHA-256 of each of the n parts of f (size bytes each, the last one shorter), comma-separated, in one read. */
-    static String partSums(File f, int n, long size, long total, AtomicBoolean stop) throws IOException {
-        java.security.MessageDigest md;
-        try { md = java.security.MessageDigest.getInstance("SHA-256"); } catch (Exception e) { throw new IOException("no SHA-256"); }
-        StringBuilder out = new StringBuilder(n * 65);
-        InputStream in = new java.io.FileInputStream(f);
+    /**
+     * A body that couldn't be written: the PC may have answered before closing the connection (no space, a send it
+     * canceled or doesn't have any more). That answer counts (its Fatal, Aborted or Restart is thrown); otherwise the
+     * caller treats it as a cut. Not when the cut was this phone's own (stopped, stalled).
+     */
+    private void cutAnswer(Job j, Wire.Call c, Watchdog.Guard g, AtomicBoolean stop) throws IOException {
+        if (g.ended() != null || stop.get()) return;
+        Wire.Answer a = c.answerAfterCut(64 * 1024);
+        if (a != null && a.code != 200) check(j, a);
+    }
+
+    private static java.security.MessageDigest sha256() throws IOException {
+        try { return java.security.MessageDigest.getInstance("SHA-256"); } catch (Exception e) { throw new IOException("no SHA-256"); }
+    }
+
+    private static void hashFrom(RandomAccessFile raf, java.security.MessageDigest md, long n, byte[] buf, AtomicBoolean stop) throws IOException {
+        while (n > 0) {
+            if (stop.get() || Thread.currentThread().isInterrupted()) throw new IOException("stopped");
+            int r = raf.read(buf, 0, (int) Math.min(buf.length, n));
+            if (r < 0) throw new Restart("the file changed");
+            md.update(buf, 0, r);
+            n -= r;
+        }
+    }
+
+    private static String hex(byte[] d) {
+        StringBuilder s = new StringBuilder(d.length * 2);
+        for (byte x : d) s.append(Character.forDigit((x >> 4) & 15, 16)).append(Character.forDigit(x & 15, 16));
+        return s.toString();
+    }
+
+    /** The SHA-256 of len bytes of f from off (a part the PC has whole already). */
+    static String rangeSum(File f, long off, long len, AtomicBoolean stop) throws IOException {
+        java.security.MessageDigest md = sha256();
+        RandomAccessFile raf = new RandomAccessFile(f, "r");
         try {
-            byte[] buf = new byte[1024 * 1024];
-            for (int i = 0; i < n; i++) {
-                long left = Math.max(0, Math.min(size, total - i * size));
-                while (left > 0) {
-                    if (stop.get() || Thread.currentThread().isInterrupted()) throw new IOException("stopped");
-                    int r = in.read(buf, 0, (int) Math.min(buf.length, left));
-                    if (r < 0) throw new Restart("the file changed");
-                    md.update(buf, 0, r);
-                    left -= r;
-                }
-                if (i > 0) out.append(',');
-                for (byte x : md.digest()) out.append(Character.forDigit((x >> 4) & 15, 16)).append(Character.forDigit(x & 15, 16));
-            }
-        } finally { in.close(); }
-        return out.toString();
+            raf.seek(off);
+            hashFrom(raf, md, len, new byte[1024 * 1024], stop);
+        } finally { raf.close(); }
+        return hex(md.digest());
     }
 
     /** Every part is in: the PC checks each part against the phone's checksums (worked out as they arrived). */
@@ -795,7 +844,11 @@ final class Outbox {
                 File f = files.get(i);
                 if (f != null && f.isFile() && !j.items.get(i).dir) { tops.add(f); names.add(j.items.get(i).name); at.add(i); }
             }
-            Set<Integer> have = Have.check(l, auth, tops, names);
+            long bytes = 0;
+            for (File f : files) if (f != null) bytes += f.isFile() ? f.length() : 0;
+            boolean[] full = new boolean[1];
+            Set<Integer> have = Have.check(l, auth, tops, names, bytes, full);
+            if (full[0]) throw new Fatal("Not enough space on " + j.pcName);
             synchronized (j) { j.checked = true; for (Integer k : have) j.had.add(at.get(k)); }
             save(j);
         }
@@ -824,10 +877,14 @@ final class Outbox {
         final int[] skip = new int[K];
         final long[] from = new long[K];
         final boolean[] done = new boolean[K];
-        Wire.Answer st = Wire.get(l, "/api/status?" + q(j, auth), 15000);
-        if (st.code == 403) check(j, st);
-        if (st.code == 410) { if (retried(j)) throw new Restart("tried again"); throw aborted(j, st); }
-        if (st.code == 200) {
+        boolean begun;
+        synchronized (j) { begun = j.begun; }
+        // how far the PC got: only worth a round trip when this attempt has already sent it something
+        Wire.Answer st = begun ? Wire.get(l, "/api/status?" + q(j, auth), 15000) : null;
+        if (st != null && st.code == 403) check(j, st);
+        if (st != null && st.code == 410) { if (retried(j)) throw new Restart("tried again"); throw aborted(j, st); }
+        if (st != null && st.code == 507) check(j, st);
+        if (st != null && st.code == 200) {
             JSONObject o = st.json();
             if (o.optBoolean("done", false)) return DONE;
             JSONArray nx = o.optJSONArray("next"), pt = o.optJSONArray("part"), dn = o.optJSONArray("done");
@@ -845,6 +902,7 @@ final class Outbox {
         for (int si = 0; si < K; si++) base += done[si] ? streams.get(si).bytes : streams.get(si).bytesBefore(skip[si]) + from[si];
         j.sent.set(base);
         env.changed(j);
+        markBegun(j);
         List<Future<?>> fs = new ArrayList<Future<?>>();
         for (int si = 0; si < K; si++) {
             if (done[si]) continue;
@@ -867,6 +925,7 @@ final class Outbox {
         Wire.Call c = Wire.Call.open(l, "POST", target, Wire.CHUNKED, "application/x-flick-bundle", 120000);
         Watchdog.Guard g = Watchdog.guard(stop, c);
         final long[] last = {0};
+        boolean through = false;
         try {
             OutputStream out = new BufferedOutputStream(g.watch(c.body()), BUF);
             b.write(out, stop, new Bundle.Progress() {
@@ -874,6 +933,7 @@ final class Outbox {
             }, skip, from);
             out.flush();
             g.idle();
+            through = true;
             check(j, c.answer(64 * 1024));
             return;
         } catch (Bundle.ResumeLost e) {
@@ -886,6 +946,7 @@ final class Outbox {
         } catch (Restart e) {
             throw e;
         } catch (IOException e) {
+            if (!through) cutAnswer(j, c, g, stop);
             throw g.ended() != null ? new IOException(g.ended(), e) : e;
         } finally {
             g.close();
