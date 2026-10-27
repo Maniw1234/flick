@@ -446,7 +446,7 @@
     st.ws = null; st.wsOpen = false; st.connected = false; st.trusted = false; st.awaitingApproval = false; st.connecting = false;
     st.pcProved = false;
     updateConn();
-    edgeOff();
+    linkEnded(false);
   }
 
   // The way to the PC. Over Bluetooth: the local port the app's Bluetooth link gives (Bluetooth encrypts that link
@@ -542,12 +542,7 @@
     st.wsOpen = false; st.connected = false; st.connecting = false; st.pcProved = false;
     clearInterval(pingT);
     updateConn();
-    edgeOff();
-    for (const [tid, p] of st.pending) {
-      if (p.phase === 'lifted') { st.pending.delete(tid); if (p.job) nc('sendCancel', tid); }
-      // the file already reached the PC; the "saved" note just can't arrive now
-      else if (p.phase === 'sent' && p.uploaded) { st.pending.delete(tid); restoreItems(itemsOf(p).filter((it) => it.path || st.keep)); }
-    }
+    linkEnded(false);
     st.pairAsked = false; st.awaitingApproval = false;
     // a pairing the PC already allowed can still be confirmed here (see 'paired'); one it hadn't is over
     if (!st.pairWait) st.pairOk = false;
@@ -555,6 +550,27 @@
     if (st.replaced) { st.wantResume = false; return; }
     if (was) { st.wantResume = true; if (!document.hidden) toast('Reconnecting to ' + st.pc.name + '…', 1800); }
     scheduleReconnect();
+  }
+
+  // What a link that ended (lost, closed here, or replaced by a new one: relink) leaves behind. A send still being
+  // dragged or held goes nowhere now (after a relink the session comes back, and the drag with it). One the PC has
+  // every byte of is settled: its 'saved' can't arrive now. One still on its way carries on in the app and settles
+  // by its up-done, as its 'saved' may be lost meanwhile. The PC's hover glow goes out.
+  function linkEnded(relink) {
+    for (const [tid, p] of st.pending) {
+      if (p.phase === 'lifted') {
+        if (relink) continue;
+        st.pending.delete(tid);
+        if (p.job) nc('sendCancel', tid); else nc('abort', tid);
+        // the card still under the finger isn't being sent any more: let go over the PC once connected again, it goes
+        // as a new send (the old one's id is canceled on the PC)
+        if (D && D.tid === tid && D.phase === 'drag') { D.sending = false; D.tid = rid(); } else unlift(itemsOf(p));
+      } else if (p.phase === 'sent') {
+        p.relinked = true;
+        if (p.uploaded) { if (relink) settleSoon(tid, p); else settleSent(tid, p); }
+      }
+    }
+    edgeOff();
   }
 
   let lostSince = 0;
@@ -769,6 +785,10 @@
         toast('Another phone is using ' + (st.pc ? st.pc.name : 'your PC') + ' now. Hold Connect to switch back.', 3200);
         break;
       case 'saved': if (linkTrusted()) onSaved(m); break;
+      case 'asking':                            // the PC asks its user first ("Ask each time"): see settleSent
+        if (linkTrusted() && st.pending.has(m.tid)) st.pending.get(m.tid).asking = true;
+        runHooks('ws', m);
+        break;
       case 'failed': if (linkTrusted()) onFailed(m); break;
       case 'incoming': if (linkTrusted()) onIncoming(m); break;
       case 'edge': if (linkTrusted()) onEdge(m); break;
@@ -2415,6 +2435,21 @@
     dropItems(gone, true);
     updateCount();
   }
+  // A send the PC has every byte of, settled without its 'saved' (lost with the link): as if it had come. When the PC
+  // asked its user first ("Ask each time"), the answer isn't known: its Flick-list files stay in the list.
+  function settleSent(tid, p) {
+    if (!p.asking) { onSaved({ tid }); return; }
+    st.pending.delete(tid);
+    restoreItems(itemsOf(p));
+  }
+  // The PC has every byte of a send that was let go of: its 'saved' follows at once, unless the PC sent it while the
+  // link was down (it isn't sent again). So the send settles by itself: soon when the link went down meanwhile, after
+  // a minute otherwise (a big folder can take a while to move into place on the PC), and after the PC's minute to
+  // ask its user when it asked.
+  function settleSoon(tid, p) {
+    clearTimeout(p.settleT);
+    p.settleT = setTimeout(() => { if (st.pending.get(tid) === p) settleSent(tid, p); }, p.asking ? 75000 : p.relinked ? 5000 : 60000);
+  }
 
   function onFailed(m) {
     // turned down on a PC set to "Ask each time": the send engine's job says so too (it may have sent every byte)
@@ -2474,7 +2509,7 @@
     if (!p) return;
     if (e.ok) {
       p.uploaded = true;
-      if (p.phase === 'sent' && !st.wsOpen) { st.pending.delete(e.tid); restoreItems(itemsOf(p).filter((it) => it.path || st.keep)); }
+      if (p.phase === 'sent') { if (st.wsOpen) settleSoon(e.tid, p); else settleSent(e.tid, p); }
       updateCount();
       return;
     }
