@@ -501,6 +501,10 @@
     clearTimeout(reconnectT);
     if (st.ws) { try { st.ws.close(); } catch (e) { /* ignore */ } }
     st.ws = null; st.wsOpen = false; st.connecting = true;
+    // A live session moves to a new link (a faster one, or the phone's new name): not connected until the PC says so
+    // again, so nothing is sent into the gap (a drop sent there was lost, and the PC threw the file away), and every
+    // try asks the PC to pick the session back up (else a retry left the phone "connected" and the PC not).
+    if (st.connected) { st.connected = false; st.wantResume = true; st.relinkAt = Date.now(); updateConn(); linkEnded(true); }
     prepareLink(st.pc).then((lk) => {
       if (gen !== wsGen) return;
       if (!lk) { st.connecting = false; scheduleReconnect(st.linkBlocked ? 20000 : 0); return; }
@@ -762,7 +766,7 @@
           G.hold = 1;
           pairHint('');
           flashScreen(() => { showScreen('main'); G.hold = 0; staggerIn(); });
-        } else if (st.wantResume) {
+        } else if (st.wantResume && Date.now() - (st.relinkAt || 0) > 5000) {    // (a quick move to a new link: quietly)
           toast('Connected to ' + st.pc.name, 1400);
         }
         st.wantResume = false;
