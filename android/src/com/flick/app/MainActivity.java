@@ -551,8 +551,13 @@ public class MainActivity extends Activity {
         importAll(uris, null);
     }
 
-    @SuppressWarnings("deprecation")
     private void handleIntent(Intent in) {
+        // what another app shared can hold anything (a class Flick doesn't know, say): it never takes Flick down
+        try { share(in); } catch (Throwable e) { Log.w(TAG, "share: " + e); }
+    }
+
+    @SuppressWarnings("deprecation")
+    private void share(Intent in) {
         // reopened from Recents, Android hands back the intent the app was first started with: an old share
         if (in == null || (in.getFlags() & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) return;
         String act = in.getAction();
@@ -566,8 +571,9 @@ public class MainActivity extends Activity {
                 if (t != null && t.length() > 0) text = t.toString();
             }
         } else if (Intent.ACTION_SEND_MULTIPLE.equals(act)) {
-            ArrayList<Uri> l = in.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
-            if (l != null) uris.addAll(l);
+            // only the Uris in it: Android doesn't check what the list holds (Strings, say)
+            ArrayList<?> l = in.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+            if (l != null) for (Object o : l) if (o instanceof Uri) uris.add((Uri) o);
         } else {
             return;
         }
@@ -587,25 +593,29 @@ public class MainActivity extends Activity {
         new Thread(new Runnable() {
             @Override
             public void run() {
-                JSONArray added = new JSONArray();
-                Library lib = Library.get(MainActivity.this);
-                if (uris != null) for (Uri u : uris) {
-                    try { added.put(lib.importUri(u)); } catch (Throwable e) { Log.w(TAG, "import failed " + e); }
-                }
-                if (text != null) {
-                    try {
-                        String title = text[1] != null && text[1].trim().length() > 0 ? text[1].trim() : "Shared text";
-                        added.put(lib.importText(text[0], title.length() > 60 ? title.substring(0, 60) : title));
-                    } catch (Throwable e) { /* ignore */ }
-                }
-                if (added.length() == 0) return;
-                try {
-                    JSONObject o = new JSONObject();
-                    o.put("t", "added");
-                    o.put("items", added);
-                    emit(o.toString());
-                } catch (Throwable e) { /* ignore */ }
+                try { importNow(uris, text); } catch (Throwable e) { Log.w(TAG, "import: " + e); }   // never a crash
             }
         }, "flick-import").start();
+    }
+
+    private void importNow(ArrayList<Uri> uris, String[] text) {
+        JSONArray added = new JSONArray();
+        Library lib = Library.get(this);
+        if (uris != null) for (Uri u : uris) {
+            try { added.put(lib.importUri(u)); } catch (Throwable e) { Log.w(TAG, "import failed " + e); }
+        }
+        if (text != null) {
+            try {
+                String title = text[1] != null && text[1].trim().length() > 0 ? text[1].trim() : "Shared text";
+                added.put(lib.importText(text[0], title.length() > 60 ? title.substring(0, 60) : title));
+            } catch (Throwable e) { /* ignore */ }
+        }
+        if (added.length() == 0) return;
+        try {
+            JSONObject o = new JSONObject();
+            o.put("t", "added");
+            o.put("items", added);
+            emit(o.toString());
+        } catch (Throwable e) { /* ignore */ }
     }
 }
