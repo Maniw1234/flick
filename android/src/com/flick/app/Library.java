@@ -43,6 +43,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
 
 /** The phone-side shelf of files: stored privately, with thumbnails. */
 public final class Library {
@@ -58,6 +59,11 @@ public final class Library {
     private final File root, thumbs, index;
     private final ArrayList<JSONObject> items = new ArrayList<JSONObject>();
     private static final SecureRandom RNG = new SecureRandom();
+    private String listCache;                        // listJson() until the list changes (guarded by this)
+    private final Object disk = new Object();        // one write of lib.json at a time
+    private long changes, written;                   // the list's version (this) and the one on disk (disk)
+    // removals finish here (lib.json, then the files), off the caller's thread: the page's bridge, say
+    private static final ExecutorService LATER = Transfers.pool("flick-lib", 1);
 
     private Library(Context c) {
         ctx = c;
@@ -82,24 +88,43 @@ public final class Library {
         } catch (Throwable e) { /* start empty */ }
     }
 
-    private synchronized void save() {
-        try {
+    /**
+     * Writes the list as it is now to lib.json. Called without holding the list's lock: the list is only copied under
+     * it, so finding and listing items never wait for the disk. A write overtaken by a newer one is skipped.
+     */
+    private void save() {
+        String data;
+        long v;
+        synchronized (this) {
             JSONArray a = new JSONArray();
             for (JSONObject o : items) a.put(o);
-            File tmp = new File(index.getPath() + ".tmp");
-            FileOutputStream out = new FileOutputStream(tmp);
-            out.write(a.toString().getBytes("UTF-8"));
-            out.getFD().sync();
-            out.close();
-            if (!tmp.renameTo(index)) { index.delete(); tmp.renameTo(index); }
-        } catch (Throwable e) { /* ignore */ }
+            data = a.toString();
+            v = ++changes;
+        }
+        synchronized (disk) {
+            if (v <= written) return;                // a newer list is on disk already
+            try {
+                File tmp = new File(index.getPath() + ".tmp");
+                FileOutputStream out = new FileOutputStream(tmp);
+                try {
+                    out.write(data.getBytes("UTF-8"));
+                    out.getFD().sync();
+                } finally { out.close(); }
+                if (!tmp.renameTo(index)) { index.delete(); tmp.renameTo(index); }
+                written = v;
+            } catch (Throwable e) { /* ignore */ }
+        }
     }
 
     // ------------------------------------------------------------ queries
+    /** The list for the page (made once per change: the History page asks for it on every redraw). */
     public synchronized String listJson() {
-        JSONArray a = new JSONArray();
-        for (JSONObject o : items) a.put(publicJson(o));
-        return a.toString();
+        if (listCache == null) {
+            JSONArray a = new JSONArray();
+            for (JSONObject o : items) a.put(publicJson(o));
+            listCache = a.toString();
+        }
+        return listCache;
     }
 
     public JSONObject publicJson(JSONObject o) {
@@ -131,9 +156,12 @@ public final class Library {
         return removeAll(Collections.singletonList(id)) > 0;
     }
 
-    /** Several items at once, with one rewrite of lib.json for all of them. Returns how many were removed. */
+    /**
+     * Several items at once, with one rewrite of lib.json for all of them. Returns how many were removed: they are off
+     * the list at once; lib.json and their files follow on Flick's own thread (a big video takes a moment to delete).
+     */
     public int removeAll(Collection<String> ids) {
-        ArrayList<String> gone = new ArrayList<String>();
+        final ArrayList<String> gone = new ArrayList<String>();
         synchronized (this) {
             for (String id : ids) {
                 JSONObject o = find(id);
@@ -142,12 +170,19 @@ public final class Library {
                 gone.add(o.optString("id"));
             }
             if (gone.isEmpty()) return 0;
-            save();
+            listCache = null;
         }
-        for (String id : gone) {
-            deleteTree(new File(root, id));
-            new File(thumbs, id + ".jpg").delete();
-        }
+        Runnable rest = new Runnable() {
+            @Override
+            public void run() {
+                save();
+                for (String id : gone) {
+                    deleteTree(new File(root, id));
+                    new File(thumbs, id + ".jpg").delete();
+                }
+            }
+        };
+        try { LATER.execute(rest); } catch (Throwable e) { rest.run(); }
         return gone.size();
     }
 
@@ -292,8 +327,9 @@ public final class Library {
         makeThumb(o, f);
         synchronized (this) {
             items.add(0, o);
-            save();
+            listCache = null;
         }
+        save();
         mark.delete();
         return publicJson(o);
     }
