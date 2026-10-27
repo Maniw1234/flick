@@ -6,6 +6,8 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Build;
+import android.os.CancellationSignal;
+import android.os.OperationCanceledException;
 import android.view.HapticFeedbackConstants;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
@@ -221,24 +223,57 @@ final class Bridge {
         return s.toString();
     }
 
+    // ---------------- the file view's listings ----------------
+    // The view shows one listing at a time, so a newer request (another tab, folder or order, or a search as it is
+    // typed) makes the ones before it pointless: one still waiting is answered at once without running, and the one
+    // running is cancelled (its MediaStore query stops). Either answers {error:"superseded"}, which the page, already
+    // on to the newer one, ignores.
+    private final Object views = new Object();
+    private long viewSeq;                                // the newest request (views)
+    private CancellationSignal viewRunning;              // the one running, if it is the newest (views)
+    static final String SUPERSEDED = "{\"error\":\"superseded\",\"items\":[]}";
+
+    interface Listing { String run(CancellationSignal cancel); }
+
+    private void listing(final String req, final Listing work) {
+        final long my;
+        CancellationSignal old;
+        synchronized (views) { my = ++viewSeq; old = viewRunning; viewRunning = null; }
+        if (old != null) old.cancel();
+        a.io().execute(new Runnable() {
+            @Override
+            public void run() {
+                CancellationSignal cancel = null;
+                synchronized (views) { if (my == viewSeq) viewRunning = cancel = new CancellationSignal(); }
+                String out = SUPERSEDED;
+                if (cancel != null) {
+                    try { out = work.run(cancel); }
+                    catch (OperationCanceledException e) { out = SUPERSEDED; }
+                    finally { synchronized (views) { if (viewRunning == cancel) viewRunning = null; } }
+                }
+                a.result(req, out);
+            }
+        });
+    }
+
     @JavascriptInterface
     public void listDirAsync(final String req, final String path) {
-        a.io().execute(new Runnable() { @Override public void run() { a.result(req, Files.listDir(a, path)); } });
+        listing(req, new Listing() { @Override public String run(CancellationSignal c) { return Files.listDir(a, path, c); } });
     }
 
     @JavascriptInterface
     public void queryAsync(final String req, final String cat, final int offset, final int limit) {
-        a.io().execute(new Runnable() { @Override public void run() { a.result(req, Files.query(a, cat, Math.max(0, offset), Math.max(1, Math.min(600, limit)))); } });
+        querySorted(req, cat, offset, limit, null, null);
     }
 
     /** queryAsync in another order (sort, see Files.query), only files whose name has the words of q ("" for all). */
     @JavascriptInterface
     public void querySorted(final String req, final String cat, final int offset, final int limit, final String sort, final String q) {
-        a.io().execute(new Runnable() {
+        listing(req, new Listing() {
             @Override
-            public void run() {
-                String words = q == null ? "" : q.length() > 100 ? q.substring(0, 100) : q;
-                a.result(req, Files.query(a, cat, Math.max(0, offset), Math.max(1, Math.min(600, limit)), sort, words));
+            public String run(CancellationSignal c) {
+                String words = q == null ? null : q.length() > 100 ? q.substring(0, 100) : q;
+                return Files.query(a, cat, Math.max(0, offset), Math.max(1, Math.min(600, limit)), sort, words, c);
             }
         });
     }
