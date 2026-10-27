@@ -544,7 +544,7 @@
     for (const [tid, p] of st.pending) {
       if (p.phase === 'lifted') { st.pending.delete(tid); if (p.job) nc('sendCancel', tid); }
       // the file already reached the PC; the "saved" note just can't arrive now
-      else if (p.phase === 'sent' && p.uploaded) { st.pending.delete(tid); for (const it of itemsOf(p)) if (it.path || st.keep) restoreItem(it); }
+      else if (p.phase === 'sent' && p.uploaded) { st.pending.delete(tid); restoreItems(itemsOf(p).filter((it) => it.path || st.keep)); }
     }
     st.pairAsked = false; st.awaitingApproval = false;
     // a pairing the PC already allowed can still be confirmed here (see 'paired'); one it hadn't is over
@@ -2378,16 +2378,21 @@
     toggleSel(it);
   }
 
-  // a sent file that stays on the phone comes back into the grid once its departure has finished playing
-  function restoreItem(item) {
-    const wait = Math.max(D && D.it === item ? 120 : 0, (item._sentAt || 0) + 750 - now());
-    if (wait > 0) { setTimeout(() => restoreItem(item), wait); return; }
-    const wasHidden = st.hidden.delete(item.id);
-    const el = cards.get(item.id);
-    if (el) { el.classList.remove('lifted'); el.classList.add('pop'); setTimeout(() => el.classList.remove('pop'), 600); }
-    else item._popIn = true;
-    if (wasHidden) layout(true);
-    updateCount();
+  // sent files that stay on the phone come back into the grid once their departure has finished playing; all of a
+  // send at once, with one layout (a big multi-send restored file by file counted the whole view for each)
+  function restoreItems(items) {
+    if (!items.length) return;
+    let wait = 0;
+    for (const it of items) wait = Math.max(wait, D && D.it === it ? 120 : 0, (it._sentAt || 0) + 750 - now());
+    if (wait > 0) { setTimeout(() => restoreItems(items), wait); return; }
+    let hid = false;
+    for (const it of items) {
+      if (st.hidden.delete(it.id)) hid = true;
+      const el = cards.get(it.id);
+      if (el) { el.classList.remove('lifted'); el.classList.add('pop'); setTimeout(() => el.classList.remove('pop'), 600); }
+      else it._popIn = true;
+    }
+    if (hid) layout(true); else updateCount();
   }
 
   function onSaved(m) {
@@ -2396,11 +2401,12 @@
     runHooks('sent', itemsOf(p));            // the history notes what reached the PC
     st.pending.delete(m.tid);
     // real phone files always stay; Flick-list items follow the "keep" setting
-    const gone = [];
+    const back = [], gone = [];
     for (const it of itemsOf(p)) {
-      if (it.path || st.keep) restoreItem(it);
+      if (it.path || st.keep) back.push(it);
       else gone.push(it.id);
     }
+    restoreItems(back);
     dropItems(gone, true);
     updateCount();
   }
@@ -2463,12 +2469,12 @@
     if (!p) return;
     if (e.ok) {
       p.uploaded = true;
-      if (p.phase === 'sent' && !st.wsOpen) { st.pending.delete(e.tid); for (const it of itemsOf(p)) if (it.path || st.keep) restoreItem(it); }
+      if (p.phase === 'sent' && !st.wsOpen) { st.pending.delete(e.tid); restoreItems(itemsOf(p).filter((it) => it.path || st.keep)); }
       updateCount();
       return;
     }
     // the app's send engine already tried (and waited) as long as it made sense; canceled from the transfer list: quietly
-    if (e.final && e.canceled) { st.pending.delete(e.tid); for (const it of itemsOf(p)) st.hidden.delete(it.id); for (const it of itemsOf(p)) restoreItem(it); layout(true); updateCount(); return; }
+    if (e.final && e.canceled) { st.pending.delete(e.tid); for (const it of itemsOf(p)) st.hidden.delete(it.id); restoreItems(itemsOf(p)); layout(true); return; }
     p.tries = (p.tries || 0) + 1;
     if (!e.final && p.tries < 2 && st.connected && st.pc) { startSend(e.tid, itemsOf(p), p.phase === 'sent'); return; } // one quick retry
     if (p.phase === 'sent') { wsSend({ t: 'cancel', tid: e.tid, failed: true }); onFailed({ tid: e.tid }); }
