@@ -7,7 +7,7 @@
   make a fist to grab the file open full screen, the selection or the lit-up file, then open your hand in front of the
   PC: the file lands where your hand is, or comes in from the edge on a PC without a camera. Open your hand over the
   phone again to put it back. A video that was playing carries on on the PC from the same second. The other way: copy
-  files on the PC, bring a fist over the phone and open it. Works on Windows, Mac and Linux, with or without a webcam.
+  files on the PC, bring a fist over the phone and open it (while Clipboard sync is on, as it is by default). Works on Windows, Mac and Linux, with or without a webcam.
   The phone's camera runs only while Flick is open and connected with Air grab on; the PC's only for a few seconds after
   a grab (Files > Air grab in Flick's window). Hand tracking runs on the device: no picture leaves it.
 

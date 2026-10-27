@@ -51,7 +51,9 @@ Pick files up with your hand and drop them on the PC, without touching the scree
   Move your fist toward the PC and open your hand in front of it: the file lands where your hand is (on a PC without a
   camera, or with the camera off in Flick's window, it comes in from the edge). Open your hand over the phone again to
   put the files back. A video that was playing carries on on the PC from the same second.
-- **PC to phone:** copy files on the PC (Ctrl+C, or Cmd+C on a Mac), bring a fist over the phone and open it.
+- **PC to phone:** copy files on the PC (Ctrl+C in File Explorer, Cmd+C in Finder, or Copy in a Linux file manager),
+  bring a fist over the phone, hold it there a moment and open it. A picture copied on its own (a screenshot) goes as a
+  PNG. This shares the PC's clipboard, so it works while Clipboard sync is on in Flick's window (it is by default).
 - **The cameras:** the phone's front camera runs only while Air grab is on, Flick is open on screen and a PC is
   connected. The PC's camera turns on only for the few seconds between a grab on the phone and the file landing
   (macOS asks once; turn it off in Flick's window: Files > Air grab). Hand tracking runs on each device, with
