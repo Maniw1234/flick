@@ -51,13 +51,17 @@ Pick files up with your hand and drop them on the PC, without touching the scree
   Move your fist toward the PC and open your hand in front of it: the file lands where your hand is (on a PC without a
   camera, or with the camera off in Flick's window, it comes in from the edge). Open your hand over the phone again to
   put the files back. A video that was playing carries on on the PC from the same second.
-- **PC to phone:** copy files on the PC (Ctrl+C in File Explorer, Cmd+C in Finder, or Copy in a Linux file manager),
-  bring a fist over the phone, hold it there a moment and open it. A picture copied on its own (a screenshot) goes as a
-  PNG. This shares the PC's clipboard, so it works while Clipboard sync is on in Flick's window (it is by default).
+- **PC to phone:** with Flick open on the phone, select files on the PC (in File Explorer, on the desktop or in
+  Finder), hold your open hand up in front of the screen and close it into a fist: the files are in your hand (their
+  card follows it). Take the fist to the phone and open it over the phone: they go there. Opening your hand in front of
+  the PC again puts them back. On Linux, file managers don't say what's selected: copy the files (Ctrl+C) instead of
+  selecting them.
 - **The cameras:** the phone's front camera runs only while Air grab is on, Flick is open on screen and a PC is
-  connected. The PC's camera turns on only for the few seconds between a grab on the phone and the file landing
-  (macOS asks once; turn it off in Flick's window: Files > Air grab). Hand tracking runs on each device, with
-  MediaPipe's hand models on Flick's own WebAssembly engine (`hand/`); no picture leaves the device.
+  connected. The PC's camera turns on only for a few seconds: after a grab on the phone, until the file lands, and
+  after you select files on the PC while Flick is open on the phone (at most 45 seconds in any 2 minutes). macOS asks
+  once for the camera, and once to let Flick ask Finder what's selected; turn the PC's camera off in Flick's window:
+  Files > Air grab. Hand tracking runs on each device, with MediaPipe's hand models on Flick's own WebAssembly engine
+  (`hand/`); no picture leaves the device.
 
 ## What's in here
 

@@ -244,6 +244,16 @@
     A.haptic('soft');
   }
 
+  // the PC gets ready for a grab in front of it (selecting files there turns its camera on) only while this phone can
+  // catch: Air grab on, Flick open, the camera watching
+  let saidReady = null;
+  function tellReady(force) {
+    const r = camState === 'on' && A.st.connected && (A.st.pcProto || 1) >= AIR_PROTO;
+    if (r === saidReady && !force) return;
+    saidReady = r;
+    if (A.st.connected) A.wsSend({ t: 'air-ready', on: r });
+  }
+
   function catchFromPc() {
     if (!A.st.connected) return;
     if ((A.st.pcProto || 1) < AIR_PROTO) { A.toast(X.OLD_PC, 2600); return; }
@@ -257,8 +267,14 @@
 
   A.on('ws', (m) => {
     if (m.t === 'air-none') {
-      A.toast(m.why === 'off' ? 'Clipboard sync is off on ' + X.pcName() + ': turn it on in Flick’s window to catch files'
-        : 'Copy files on ' + X.pcName() + ' first, then catch them here', 3000);
+      // nothing picked up on the PC: how to, or why it can't be done there
+      const pc = X.pcName();
+      A.toast(m.why === 'camoff' ? 'Air grab is off in Flick’s window on ' + pc + ': turn it on to grab files there'
+        : m.why === 'nocamera' ? pc + ' has no camera Flick can use, so files there can’t be grabbed by hand'
+          : 'Select files on ' + pc + ', grab them with a fist in front of the screen, then open it here', 3200);
+    } else if (m.t === 'air-held') {
+      // a fist picked files up in front of the PC: they come here when it opens over the phone
+      if (+m.n > 0) A.toast((+m.n > 1 ? m.n + ' files' : String(m.name || 'A file')) + ' in your hand: open it over the phone', 3200);
     } else if (m.t === 'air-land' && m.tid && m.tid === M.tid) {
       // the PC's camera saw the fist open in front of it: the files go there. Out of this camera's view, at once; still
       // in view, only if the hand moved well away from where it grabbed (this camera knows best where it is)
@@ -307,6 +323,7 @@
           onResult: (r) => stream.push(r),
           onState: (s, d) => {
             camState = s;
+            tellReady();
             // said once until Flick comes back to the screen: no camera, a camera Android won't give, one that's busy
             if ((s === 'denied' || s === 'nocamera' || s === 'error') && !deniedSaid) {
               deniedSaid = true;
@@ -340,7 +357,7 @@
     stream.reset();
   }
 
-  A.on('conn', () => update());
+  A.on('conn', () => { saidReady = null; update(); tellReady(true); });
   A.on('native', (e) => {
     if (e.t === 'pause') { paused = true; update(); }
     else if (e.t === 'resume') { paused = false; deniedSaid = false; if (/denied|nocamera|error/.test(camState)) camState = 'off'; update(); }

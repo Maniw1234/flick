@@ -199,9 +199,6 @@ class Features {
     try { Promise.resolve(this.el.shell.openExternal(url)).catch((e) => this.log('could not open a link: ' + e.message)); } catch (e) { this.log('could not open a link: ' + e.message); }
   }
 
-  /** Air grab (air.js): is what's on the clipboard something a phone put there? (a catch never sends it back) */
-  clipFromPhone() { return this.clip.heldFromPhone().catch(() => false); }
-
   // ---------- from the phone ----------
   async _clipIn(m) {
     let ok = false;

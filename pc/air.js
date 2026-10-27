@@ -1,45 +1,52 @@
 'use strict';
-// Air grab, the PC side (the phone's features/air.js picks files up with the hand over its front camera):
+// Air grab, the PC side (the phone's features/air.js picks files up with the hand over its front camera).
+// Phone to PC:
 //   lift (air)  the file waits at the screen's edge on the phone's side, and this PC's camera (when it has one and the
 //               user lets Flick use it) starts looking for the hand
 //   the hand    seen in front of the PC holding the file (a fist), the file follows it; when it opens, the phone is
 //               told ('air-land') and the file lands right there
 //   air-go      the phone let go: the file lands where the camera sees the hand open (within a moment), or comes in
 //               from the edge as a throw does. A video that was playing carries on here from the same second.
-//   air-catch   a fist that opened over the phone: the files copied on this PC go to it (or 'air-none')
-// The camera runs in a hidden window (air/air.html) only from a lift until the file has landed (half a minute at
-// most). Its pictures never leave that window: the hand tracker (the phone app's, hand/) only reports where a hand is.
+// PC to phone:
+//   air-ready   a phone has Air grab on and Flick open: selecting files on this PC (selwatch.js) turns the camera on
+//               for a few seconds
+//   the hand    an open hand closing into a fist in front of the screen picks the selected files up: their card
+//               follows the fist, and waits at the screen's edge on the phone's side once the hand has left
+//   air-catch   a fist that opened over the phone: the files it carries go there (or 'air-none')
+// The camera runs in a hidden window (air/air.html) only for those few seconds (half a minute at most, 45 s in any 2
+// minutes). Its pictures never leave that window: the hand tracker (the phone app's, hand/) only reports where a hand is.
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { pathToFileURL } = require('url');
-const { clipFiles } = require('./clipfiles');
+const { SelWatch } = require('./selwatch');
 
 const HAND_FILE = /^[a-z0-9-]+\.(wasm|fhm|js)$/;
 const WAIT_MS = 1800;        // after the phone let go, how long the camera may still see the hand open
 const SEEN_MS = 2500;        // a hand that opened this recently counts for a file the phone lets go of now
-const CAM_MAX_MS = 30000;    // the camera never runs longer than this for one grab
+const CAM_MAX_MS = 30000;    // the camera never runs longer than this at a time
 const FOLLOW_MAX_MS = 10000; // a file following a fist in front of the PC lands after this even if it never opens
 const LIFT_MAX_MS = 90000;   // a file held this long without being let go of is put back
 const CAM_BUDGET_MS = 45000; // the camera runs at most this long in any 2 minutes (however many grabs ask for it)
+const ARM_MS = 10000;        // selecting files: the camera looks for the grab this long
+const HELD_MS = 20000;       // files picked up on the PC wait this long for the phone to catch them
+const HAND_MORE_MS = 4000;   // a hand in view while the camera waits for the grab: it waits this much longer
 const IDLE_CLOSE_MS = 3 * 60000;
 
 /**
  * o: { electron, store, log, fx(type, data), server, preload, appDir, isMac, overlaySize() -> {width, height},
- *      side() -> 'left'|'right', phoneScreen() -> {w, h}, land(t, msg), expire(t), sendPaths(paths), tmpDir,
- *      changed(), clipShared() -> bool, clipFromPhone() -> Promise<bool> }
+ *      side() -> 'left'|'right', phoneScreen() -> {w, h}, land(t, msg), expire(t), sendPaths(paths, opts), thumbFor(p),
+ *      kindOf(name), changed(), liftMaxMs, debug, selwatch (tests: a stand-in) }
  */
 function attach(o) {
-  const { BrowserWindow, ipcMain, session, systemPreferences, clipboard, nativeImage } = o.electron;
+  const { BrowserWindow, ipcMain, session, systemPreferences } = o.electron;
   const log = (...a) => o.log('air:', ...a);
   // the hand tracker's files: in a built app next to this file (hand/), when run from the source the phone app's
   const HAND = [path.join(o.appDir, 'hand'), path.join(o.appDir, '..', 'phone', 'hand')].find((d) => fs.existsSync(path.join(d, 'hand.js')));
   const camOn = () => o.store.airCam !== false && !!HAND;
 
   let win = null, ready = null, camState = 'off', idleT = null, camT = null, macAsked = false;
-  const lifted = new Map();    // tid -> { t, m, peek, at, go, waitT, video, device }
-  let lastOpen = null;         // { x, y, at }: where the camera last saw a hand open
-  let lastCatch = 0;
+  const lifted = new Map();    // tid -> { t, m, at, go, landed, waitT, video, device }: files a hand carries from a phone
+  let lastOpen = null;         // { x, y, at }: where the camera last saw the carrying fist open
   let hand = null;             // { x, y, pose, at }: the hand the camera sees now
   const camRuns = [];          // [from, to] (to: null while on): when the camera ran, for its budget
   function camUsed(now) {
@@ -47,6 +54,16 @@ function attach(o) {
     for (const [a, b] of camRuns) ms += Math.max(0, (b || now) - Math.max(a, now - 120000));
     while (camRuns.length && camRuns[0][1] && camRuns[0][1] < now - 120000) camRuns.shift();
     return ms;
+  }
+
+  // PC to phone: the phones ready to catch, what's selected, and what a fist picked up
+  const phones = new Set();    // devices with Air grab on and Flick open
+  const G = { sel: [], armedAt: 0, armedUntil: 0, armT: null, open: false, held: null, n: 0 };
+  const sel = o.selwatch || new SelWatch({ log: o.log });
+  sel.on('change', (s) => onSelection(s));
+  function watchSelection() {
+    if (phones.size && camOn()) sel.start();
+    else { sel.stop(); disarm(); }
   }
 
   // ---- the camera window
@@ -68,7 +85,7 @@ function attach(o) {
   function send(ch, d) { if (win && !win.isDestroyed()) win.webContents.send(ch, d); }
   function closeLater() {
     clearTimeout(idleT);
-    idleT = setTimeout(() => { if (!lifted.size && win && !win.isDestroyed()) win.destroy(); }, IDLE_CLOSE_MS);
+    idleT = setTimeout(() => { if (!needCam() && win && !win.isDestroyed()) win.destroy(); }, IDLE_CLOSE_MS);
     if (idleT.unref) idleT.unref();
   }
 
@@ -92,6 +109,12 @@ function attach(o) {
   });
   ipcMain.on('air:event', (e, ev) => { if (win && e.sender === win.webContents && ev) onHand(ev); });
 
+  // the camera is wanted while a hand carries a phone's file here, for a few seconds after files are selected, and
+  // while a fist in view holds files it picked up
+  function needCam() {
+    return [...lifted.values()].some((x) => !x.landed) || Date.now() < G.armedUntil || !!(G.held && G.held.state === 'hand');
+  }
+
   async function startCam() {
     if (!camOn()) return false;
     // macOS asks the user once (with Info.plist's NSCameraUsageDescription); a no stays a no
@@ -109,8 +132,8 @@ function attach(o) {
     if (camUsed(Date.now()) >= CAM_BUDGET_MS) { log('camera: resting (it ran ' + Math.round(camUsed(Date.now()) / 1000) + ' s in 2 minutes)'); stopCam(); return false; }
     clearTimeout(idleT);
     if (!(await ensureWin())) return false;
-    // (macOS' question can take a while: the file may have landed meanwhile)
-    if (![...lifted.values()].some((x) => !x.landed)) { closeLater(); return false; }
+    // (macOS' question can take a while: it may not be wanted any more)
+    if (!needCam()) { closeLater(); return false; }
     send('air:start');
     if (!camRuns.length || camRuns[camRuns.length - 1][1]) camRuns.push([Date.now(), null]);
     clearTimeout(camT);
@@ -120,17 +143,18 @@ function attach(o) {
   function stopCam() {
     clearTimeout(camT);
     hand = null;
+    G.open = false;
     const r = camRuns[camRuns.length - 1];
     if (r && !r[1]) r[1] = Date.now();
     send('air:stop');
     closeLater();
   }
-  function stopCamIfIdle() { if (![...lifted.values()].some((a) => !a.landed)) stopCam(); }
+  function stopCamIfIdle() { if (!needCam()) stopCam(); }
 
   // ---- where a hand in the camera's view is on the screen. The camera faces the user: the view is mirrored, so the
   // hand moves on the screen the way it moves in front of it. Held in front of the screen, the hand fills the middle of
   // the camera's view across, and its lower part down (the camera sits at the top of the screen); a card following
-  // the fist shows where it will land.
+  // the fist shows where it is.
   function toScreen(pos) {
     const s = o.overlaySize();
     const cl = (v) => Math.max(0, Math.min(1, v));
@@ -141,25 +165,29 @@ function attach(o) {
   function onHand(ev) {
     const now = Date.now();
     const a = newest();
-    if (o.debug && ev.type !== 'move') log('hand', ev.type, ev.pose || '', a ? a.t.tid + (a.go ? ' (let go)' : '') + (a.sawFist ? ' fist seen' : '') : '-');
+    if (o.debug && ev.type !== 'move') log('hand', ev.type, ev.pose || '', a ? a.t.tid + (a.go ? ' (let go)' : '') + (a.sawFist ? ' fist seen' : '') : G.held ? 'holding ' + G.held.state : Date.now() < G.armedUntil ? 'armed' : '-');
+    if (ev.type === 'leave') hand = null;
+    else if (Array.isArray(ev.pos)) { const p = toScreen(ev.pos); hand = { x: p.x, y: p.y, pose: ev.pose, at: now }; }
+    if (a) onCarry(ev, a, now);         // a phone's file on its way here comes first
+    else onPick(ev, now);
+  }
+
+  // ---- phone to PC: the hand carrying a phone's file
+  function onCarry(ev, a, now) {
     if (ev.type === 'leave') {
-      hand = null;
-      if (!a) return;
       a.sawFist = 0;                                     // a hand coming back is a new one until seen as a fist
       // the fist it followed went out of view: the file goes back to waiting at the edge
       if (a.follow) { a.follow = false; o.fx('air', { tid: a.t.tid, off: true }); bob(a); }
       return;
     }
-    if (!Array.isArray(ev.pos)) return;
-    const p = toScreen(ev.pos);
-    hand = { x: p.x, y: p.y, pose: ev.pose, at: now };
-    if (!a) return;
+    if (!hand) return;
+    const p = hand;
     if (ev.pose === 'fist') {
       a.sawFist = now;                                   // the hand carrying it, in front of this PC
       // once the phone has let go, the fist carries the file here: it follows, and lands where the hand opens
       if (a.go) {
         a.follow = true;
-        a.followAt = p;
+        a.followAt = { x: p.x, y: p.y };
         o.fx('air', { tid: a.t.tid, x: p.x, y: p.y });
         clearTimeout(a.waitT);
         a.waitT = setTimeout(() => land(a, a.follow ? a.followAt : null), WAIT_MS);
@@ -177,13 +205,13 @@ function attach(o) {
   }
 
   // the file waits at the edge (a third of it in view), bobbing a little
-  function peekMsg(a, bob) {
+  function peekMsg(a, bobY) {
     const m = a.m, ps = o.phoneScreen();
     const pw = m.pw || ps.w, ph = m.ph || ps.h;
     const w = m.w || 160, h = m.h || 160;
     const y0 = typeof m.y === 'number' ? Math.max(40, Math.min(ph - h - 40, m.y)) : ph / 2 - h / 2;
     const x = o.side() === 'right' ? -w * 0.32 : pw - w * 0.68;
-    return { tid: a.t.tid, x, y: y0 + (bob || 0), w, h, r: 0, s: 1.04, vx: 0, vy: 0, pw, ph };
+    return { tid: a.t.tid, x, y: y0 + (bobY || 0), w, h, r: 0, s: 1.04, vx: 0, vy: 0, pw, ph };
   }
   function bob(a) {
     clearInterval(a.bobT);
@@ -212,12 +240,112 @@ function attach(o) {
     stopCamIfIdle();
   }
 
+  // ---- PC to phone: selecting files, picking them up, and the phone catching them
+  function onSelection(s) {
+    G.sel = (s && s.paths) || [];
+    if (!G.sel.length || !phones.size) { disarm(); return; }
+    // just selected (or copied, on Linux): the camera looks for the grab for a few seconds
+    G.armedAt = Date.now();
+    armUntil(G.armedAt + ARM_MS);
+    if (o.debug) log('selected', G.sel.length, 'file(s): the camera looks for a grab');
+    startCam();
+  }
+  function armUntil(t) {
+    G.armedUntil = t;
+    clearTimeout(G.armT);
+    G.armT = setTimeout(stopCamIfIdle, Math.max(0, t - Date.now()) + 50);
+  }
+  function disarm() {
+    G.armedUntil = 0;
+    clearTimeout(G.armT);
+    stopCamIfIdle();
+  }
+  function tellPhones(msg) { if (o.server) for (const d of phones) o.server.pushToPhone(msg, d); }
+
+  function onPick(ev, now) {
+    const h = G.held;
+    if (ev.type === 'leave') {
+      G.open = false;
+      // the fist went out of view with the files: they wait at the edge on the phone's side for the phone to catch them
+      if (h && h.state === 'hand') toEdge(h);
+      return;
+    }
+    if (!hand) return;
+    // a hand in view while the camera waits for the grab: a few more seconds (within the camera's half minute)
+    if (!h && now < G.armedUntil) {
+      const t = Math.min(G.armedAt + CAM_MAX_MS, now + HAND_MORE_MS);
+      if (t > G.armedUntil + 500) armUntil(t);
+    }
+    if (ev.type === 'enter') G.open = ev.pose === 'open';
+    if (ev.pose === 'open' && (ev.type === 'pose' || ev.type === 'enter')) {
+      G.open = true;
+      if (h && h.state === 'hand') putBack(h);           // opened in front of the PC again: put back
+      return;
+    }
+    if (h && h.state === 'hand') {
+      if (ev.type === 'move' || ev.type === 'pose') { h.x = hand.x; h.y = hand.y; o.fx('air-out', { id: h.id, x: hand.x, y: hand.y }); }
+      return;
+    }
+    // the grab: an open hand closing into a fist, a moment after files were selected, with a phone ready to catch
+    if (ev.type === 'pose' && ev.pose === 'fist' && G.open && now < G.armedUntil && G.sel.length && phones.size && !h) pick(hand);
+  }
+
+  async function pick(p) {
+    const paths = G.sel.filter((f) => { try { fs.accessSync(f); return true; } catch (e) { return false; } }).slice(0, 100);
+    if (!paths.length) return;
+    const h = G.held = { id: 'air-out-' + (++G.n), paths, at: Date.now(), state: 'hand', x: p.x, y: p.y };
+    armUntil(Date.now() + HELD_MS);                      // the camera keeps watching the fist (put back, or gone)
+    const name = path.basename(paths[0]);
+    log('picked up', paths.length, 'file(s)');
+    tellPhones({ t: 'air-held', n: paths.length, name });
+    let th = null;
+    try { th = o.thumbFor ? await o.thumbFor(paths[0]) : null; } catch (e) { th = null; }
+    if (G.held !== h) return;                            // put back or caught while the picture was being made
+    const aspect = th ? th.w / th.h : 0.72;
+    const cw = 150, ch = Math.round(Math.max(110, Math.min(220, cw / Math.max(0.55, Math.min(1.8, aspect)))));
+    const kind = o.kindOf ? o.kindOf(name) : 'doc';
+    const ext = (/\.([^.]+)$/.exec(name) || [])[1] || '';
+    o.fx('air-out', {
+      id: h.id, x: h.x, y: h.y, name: paths.length > 1 ? paths.length + ' items' : name, count: paths.length, kind,
+      badge: kind === 'doc' ? (ext || 'file').toUpperCase().slice(0, 4) : '', thumb: th && th.url, card: { w: cw, h: ch },
+    });
+    h.expireT = setTimeout(() => { if (G.held === h) drop(h, 'not caught in time'); }, HELD_MS);
+  }
+  function toEdge(h) {
+    h.state = 'edge';
+    o.fx('air-out', { id: h.id, edge: true });
+    G.armedUntil = 0;
+    clearTimeout(G.armT);
+    stopCamIfIdle();
+  }
+  // (the camera stays on a moment, for a grab again)
+  function putBack(h) { armUntil(Math.min(G.armedUntil, Date.now() + HAND_MORE_MS)); drop(h, 'put back'); }
+  function drop(h, why) {
+    clearTimeout(h.expireT);
+    if (G.held === h) G.held = null;
+    o.fx('air-out', { id: h.id, drop: true });
+    tellPhones({ t: 'air-held', n: 0 });
+    log('files', why);
+    stopCamIfIdle();
+  }
+
   return {
     get camState() { return camState; },
     get handDir() { return HAND; },
     get window() { return win; },                          // tests (main.js' test control)
-    /** tests (main.js' test control): a hand event as the camera window would send it */
+    /** tests (main.js' test control): a hand event as the camera window would send it, a selection as selwatch.js would */
     testHand(ev) { onHand(ev); },
+    testSelect(paths) { onSelection({ kind: 'folder', paths }); },
+    get state() { return { phones: [...phones], armed: Date.now() < G.armedUntil, held: G.held && { n: G.held.paths.length, state: G.held.state }, sel: G.sel.length, watching: sel.running }; },
+
+    /** a phone has Air grab on and Flick open (or not any more): selecting files here gets ready for a grab */
+    phoneReady(device, on) {
+      if (!device) return;
+      if (on) phones.add(device); else phones.delete(device);
+      watchSelection();
+    },
+    /** the camera setting changed (Flick's window) */
+    settingChanged() { watchSelection(); },
 
     /** a file picked up by a hand over the phone */
     lifted(t, m) {
@@ -259,22 +387,23 @@ function attach(o) {
       stopCamIfIdle();
     },
 
-    /** a fist opened over the phone: the files copied here go to it (one catch every 2 seconds at most) */
-    async catchFiles(device) {
-      const now = Date.now();
-      if (now - lastCatch < 2000) return 0;
-      lastCatch = now;
-      const none = (why) => { if (o.server) o.server.pushToPhone({ t: 'air-none', why }, device); log('catch: ' + (why === 'off' ? 'Clipboard sync is off' : 'nothing copied')); return 0; };
-      // the clipboard is shared with phones only while Clipboard sync is on (Flick's window, Phone features)
-      if (o.clipShared && !o.clipShared()) return none('off');
-      // what a phone put on the clipboard (Clipboard sync) isn't something the user copied here
-      if (o.clipFromPhone && (await o.clipFromPhone())) return none('empty');
-      let paths = await clipFiles();
-      if (!paths.length) paths = await clipPicture();
-      if (!paths.length) return none('empty');
-      log('catch', paths.length, 'file(s)');
-      o.sendPaths(paths);
-      return paths.length;
+    /** a fist opened over the phone: the files a fist picked up here go to it */
+    catchFiles(device) {
+      const h = G.held;
+      if (!h) {
+        // nothing picked up: the phone says how, or why it can't be done here (the camera off, or none Flick can use)
+        const why = o.store.airCam === false ? 'camoff' : !HAND || /denied|nocamera|error/.test(camState) ? 'nocamera' : 'nothing';
+        if (o.server) o.server.pushToPhone({ t: 'air-none', why }, device);
+        log('catch: nothing picked up' + (why === 'nothing' ? '' : ' (' + why + ')'));
+        return 0;
+      }
+      clearTimeout(h.expireT);
+      G.held = null;
+      o.fx('air-out', { id: h.id, go: true });          // the card goes into the phone
+      log('caught', h.paths.length, 'file(s)');
+      o.sendPaths(h.paths, { fx: false, y: h.y });
+      stopCamIfIdle();
+      return h.paths.length;
     },
 
     /** a video that was playing on the phone, received here: it carries on from that second in a window of its own */
@@ -303,37 +432,13 @@ function attach(o) {
       p.loadFile(path.join(__dirname, 'air', 'player.html'), { query: { src: pathToFileURL(file).href, t: String(Math.max(0, +t || 0)), name: path.basename(file) } });
     },
 
-    stop() { for (const tid of [...lifted.keys()]) this.cancel(tid); if (win && !win.isDestroyed()) win.destroy(); },
+    stop() {
+      sel.stop();
+      for (const tid of [...lifted.keys()]) this.cancel(tid);
+      if (G.held) drop(G.held, 'Flick closed');
+      if (win && !win.isDestroyed()) win.destroy();
+    },
   };
-
-  // a picture copied on its own (a screenshot, an image copied from a page): saved as a PNG to send
-  async function clipPicture() {
-    try {
-      let png = null;
-      if (typeof clipboard.read === 'function' && typeof clipboard.has === 'function') {
-        if (await clipboard.has('image/png')) {
-          for (const it of (await clipboard.read()) || []) {
-            if (!(it.types || []).includes('image/png')) continue;
-            const b = await it.getType('image/png');
-            png = Buffer.isBuffer(b) ? b : Buffer.from(await b.arrayBuffer());
-            break;
-          }
-        }
-      } else if (typeof clipboard.readImage === 'function') {
-        const img = clipboard.readImage();
-        if (img && !img.isEmpty()) png = img.toPNG();
-      }
-      if (!png || !png.length) return [];
-      const dir = path.join(o.tmpDir || os.tmpdir(), 'flick-air');
-      fs.mkdirSync(dir, { recursive: true });
-      for (const f of fs.readdirSync(dir)) { try { const p = path.join(dir, f); if (Date.now() - fs.statSync(p).mtimeMs > 86400000) fs.unlinkSync(p); } catch (e) { /* ignore */ } }
-      const d = new Date(), two = (n) => String(n).padStart(2, '0');
-      const name = `Copied picture ${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}.${two(d.getMinutes())}.${two(d.getSeconds())}.png`;
-      const p = path.join(dir, name);
-      fs.writeFileSync(p, png);
-      return [p];
-    } catch (e) { log('clipboard picture', e.message); return []; }
-  }
 }
 
 module.exports = { attach };

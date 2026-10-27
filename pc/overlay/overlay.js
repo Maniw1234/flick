@@ -6,7 +6,7 @@
   const on = (ch, fn) => { handlers[ch] = fn; api.on(ch, fn); };
   window.__fx = (ch, d) => { if (handlers[ch]) handlers[ch](d); };   // test hook
   window.__cards = () => [...cards.values()].map((c) => ({ id: c.id, state: c.state, x: Math.round(c.pose.x), y: Math.round(c.pose.y),
-    target: c.target ? { x: Math.round(c.target.x), y: Math.round(c.target.y) } : null }));   // test hook
+    target: c.target ? { x: Math.round(c.target.x), y: Math.round(c.target.y) } : null, edge: !!c.airEdge }));   // test hook
 
   const R = window.GFX, A = window.SFX;
   const canvas = document.getElementById('gl');
@@ -347,6 +347,34 @@
     c.air = { x: +m.x || 0, y: +m.y || 0, at: now() };
     kick();
   });
+  // Air grab, PC to phone (pc/air.js): files a fist picked up in front of the screen. Their card follows the fist
+  // ({ x, y } on this screen), waits at the edge on the phone's side once the hand has left ({ edge }), goes into the
+  // phone when it catches them ({ go }), or is put back ({ drop }). The first message carries the card's face.
+  on('fx:air-out', (m) => {
+    if (!m || !m.id) return;
+    let c = cards.get(m.id);
+    if (m.drop) { if (c && c.state === 'airout') { c.state = 'fade'; c.t0 = now(); } kick(); return; }
+    if (m.go) {
+      if (c && c.state === 'airout') { c.state = 'out'; c.t0 = now(); if (theme.outgoing) theme.outgoing(E, c); }
+      kick();
+      return;
+    }
+    if (!c) {
+      if (!m.name) return;                              // its face hasn't come yet
+      c = new Card(m.id, m);
+      cards.set(m.id, c);
+      c.state = 'airout'; c.t0 = now();
+      c.pose.x = +m.x || 0; c.pose.y = +m.y || 0;
+      c.pose.sx = c.pose.sy = 0.6;                       // grows into the hand
+      c.prev = Object.assign({}, c.pose);
+      c.air = { x: c.pose.x, y: c.pose.y, at: now() };
+      E.A.tone && E.A.tone({ type: 'sine', f0: 520, f1: 880, sweep: 0.12, dur: 0.16, gain: 0.02, attack: 0.005 });
+    }
+    if (c.state !== 'airout') return;
+    if (m.edge) c.airEdge = now();
+    else if (typeof m.x === 'number') { c.air = { x: +m.x, y: +m.y, at: now() }; c.airEdge = 0; }
+    kick();
+  });
   on('fx:drop', (m) => {
     if (!m) return;
     let c = cards.get(m.tid);
@@ -589,6 +617,22 @@
         c.pose.sx = c.pose.sy = damp(c.pose.sx || 1, 0.92, dt, 120);
         c.pose.rz = damp(c.pose.rz || 0, 0, dt, 90); c.pose.rx = 0; c.pose.ry = 0;
         if (t - a.at > 45000) { c.state = 'cancel'; c.t0 = t; }
+        break;
+      }
+      case 'airout': {
+        // picked up in front of the PC: in the hand, or waiting at the edge on the phone's side for the phone to catch it
+        c.visible = true;
+        let tx, ty;
+        if (c.airEdge) {
+          tx = E.edgeX() + E.dirIn() * (c.w * 0.18);       // two thirds of it past the edge, toward the phone
+          ty = clamp(c.air.y, c.h / 2 + 30, E.floorY() - c.h / 2 - 30) + Math.sin(t / 210) * 4;
+        } else { tx = c.air.x; ty = c.air.y + Math.sin(t / 240) * 3; }
+        c.pose.x = damp(c.pose.x, tx, dt, c.airEdge ? 110 : 60);
+        c.pose.y = damp(c.pose.y, ty, dt, 60);
+        c.pose.z = damp(c.pose.z || 0, c.airEdge ? 0 : 26, dt, 120);
+        c.pose.sx = c.pose.sy = damp(c.pose.sx || 1, c.airEdge ? 1 : 0.92, dt, 90);
+        c.pose.rz = damp(c.pose.rz || 0, 0, dt, 90); c.pose.rx = 0; c.pose.ry = 0;
+        if (t - c.t0 > 60000) { c.state = 'fade'; c.t0 = t; }   // pc/air.js lets it go well before this
         break;
       }
       case 'flight': {

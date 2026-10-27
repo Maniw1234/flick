@@ -93,7 +93,7 @@ const DEFAULTS = {
   id: null, name: null, side: 'right', anchor: 0.5, size: 1, saveDir: IS_LINUX ? 'downloads' : 'desktop', sound: true,
   startup: true, edgeSend: true, devices: {}, firstRun: true, displayId: null, theme: 'roadster',
   openAfter: false, showSpeed: true, sendTo: true, autoUpdate: true, bluetooth: false, quickShare: false,
-  airCam: true,                // Air grab: this PC's camera sees where the hand opens (air.js)
+  airCam: true,                // Air grab: this PC's camera sees where the hand opens, and a fist picking files up (air.js)
 };
 const readJson = (f) => { try { const o = JSON.parse(fs.readFileSync(f, 'utf8')); return o && typeof o === 'object' ? o : null; } catch (e) { return null; } };
 // settings.json, or its last good copy if it was damaged (a crash or power cut mid-save must not lose the pairings)
@@ -508,7 +508,7 @@ function flushSendQueue() {
   if (fresh) setTimeout(() => sendPathsToPhone(q), 1200);
 }
 
-async function sendPathsToPhone(list, screenY) {
+async function sendPathsToPhone(list, screenY, opts) {
   if (!server || !server.connected) return 0;
   const paths = expandPaths(list);
   if (!paths.length) return 0;
@@ -529,7 +529,7 @@ async function sendPathsToPhone(list, screenY) {
     const aspect = th ? th.w / th.h : 0.72;
     const cw = 150, ch = Math.round(Math.max(110, Math.min(220, cw / Math.max(0.55, Math.min(1.8, aspect)))));
     const y = oy + Math.min(i, shown) * 22;
-    if (i < shown) fx('outgoing', { fid: offer.fid, name, thumb: th && th.url, kind, badge: kind === 'doc' ? (ext || 'file').toUpperCase().slice(0, 4) : '', y, card: { w: cw, h: ch } });
+    if (i < shown && !(opts && opts.fx === false)) fx('outgoing', { fid: offer.fid, name, thumb: th && th.url, kind, badge: kind === 'doc' ? (ext || 'file').toUpperCase().slice(0, 4) : '', y, card: { w: cw, h: ch } });
     server.pushToPhone({
       t: 'incoming', fid: offer.fid, name, size: offer.size, mime, kind, ext,
       thumb: th && th.url, aspect, y: phoneYFromOverlayY(y), url: '/api/file/' + encodeURIComponent(offer.fid), delay: Math.min(i, shown) * 90,
@@ -820,7 +820,7 @@ ipcMain.on('panel:set', (_e, { key, value }) => {
     case 'autoUpdate': store.autoUpdate = !!value; break;
     case 'bluetooth': store.bluetooth = !!value; applyBluetooth(); break;
     case 'quickShare': store.quickShare = !!value; applyQuickShare(); break;
-    case 'airCam': store.airCam = !!value; break;
+    case 'airCam': store.airCam = !!value; if (air) air.settingChanged(); break;
     default: return;
   }
   saveStore();
@@ -1339,6 +1339,7 @@ function wireServer() {
     ensureCatcher();
     // cards still held by the phone that left (another connected phone's stay)
     for (const t of transfers.values()) if (t.state === 'lifted' && (!s || !server.ownerOf(t.tid) || server.ownerOf(t.tid) === s.device)) { if (air) air.cancel(t.tid); fx('cancel', { tid: t.tid }); discard(t); }
+    if (air && s) air.phoneReady(s.device, false);
   });
   server.on('active', () => { pushPanelState(); ensureCatcher(); });   // another phone is in use: its name, its height
   server.on('pair-request', (s) => {
@@ -1386,8 +1387,10 @@ function wireServer() {
     if (t.upload === 'done') finalize(t);
     clearTimeout(t.timer);
   });
-  // a hand that opened over the phone: the files copied on this PC go to it
+  // a fist that opened over the phone: the files a fist picked up in front of this PC go to it
   server.on('air-catch', (m) => { if (air) air.catchFiles(m.device); });
+  // a phone with Air grab on and Flick open: selecting files here gets the camera ready for a grab (air.js)
+  server.on('air-ready', (m) => { if (air) air.phoneReady(m.device, !!m.on); });
   server.on('move', (m) => { const t = transfers.get(m.tid); if (t) t.seen = Date.now(); fx('move', m); });
   server.on('drop', (m) => {
     const t = tState(m.tid);
@@ -1808,7 +1811,9 @@ app.whenReady().then(async () => {
     electron: require('electron'), store, log, fx, server, preload: PRELOAD, appDir: __dirname, isMac: IS_MAC,
     tmpDir: app.getPath('temp'), side: () => store.side, phoneScreen,
     overlaySize: () => { const b = overlayBounds(); return { width: b.width, height: b.height }; },
-    land: (t, msg) => airLand(t, msg), sendPaths: (paths) => sendPathsToPhone(paths), changed: () => pushPanelState(),
+    land: (t, msg) => airLand(t, msg), changed: () => pushPanelState(), thumbFor, kindOf,
+    // files a fist picked up here, caught by the phone: their card already flies (opts.fx false), from its height
+    sendPaths: (paths, opts) => sendPathsToPhone(paths, opts && typeof opts.y === 'number' ? overlayBounds().y + opts.y : undefined, opts),
     // held without being let go of for very long: put back, and the phone is told (it shows the file wasn't sent)
     expire: (t) => {
       if (transfers.get(t.tid) !== t || t.state !== 'lifted') return;     // (a newer transfer may have its id now)
@@ -1819,8 +1824,6 @@ app.whenReady().then(async () => {
       gone.set(t.tid, Date.now());
       discard(t);
     },
-    // a catch shares the clipboard: only while Clipboard sync is on, and never what a phone put on it
-    clipShared: () => store.clipSync !== false, clipFromPhone: () => (feats ? feats.clipFromPhone() : Promise.resolve(false)),
     liftMaxMs: (TEST_MODE && +process.env.FLICK_TEST_AIR_HOLD_MS) || undefined,      // tests can shorten the 90 s
     debug: TEST_MODE,                                                                  // tests: hand events in the log
   });
@@ -1852,6 +1855,8 @@ function startTestControl() {
       if (u.pathname.startsWith('/f/') && feats) return feats.test(u, res);    // the phone features (features.js)
       if (u.pathname === '/fb/state' && fb) return res.end(JSON.stringify(Object.assign({ outbox: fb.outbox, url: fb._url() }, fb.info())));
       if (u.pathname === '/air' && air) { air.testHand(JSON.parse(u.searchParams.get('ev') || '{}')); return res.end('ok'); }   // a hand the camera "sees"
+      if (u.pathname === '/air-select' && air) { air.testSelect(JSON.parse(u.searchParams.get('paths') || '[]')); return res.end('ok'); }   // files "selected"
+      if (u.pathname === '/air-state' && air) return res.end(JSON.stringify(air.state));
       if (u.pathname === '/fb/flush' && fb) { await fb.flush(); return res.end(JSON.stringify(fb.info())); }
       if (u.pathname === '/capture') {
         const w = u.searchParams.get('w') === 'panel' ? panel : u.searchParams.get('w') === 'air' && air ? air.window : overlay;

@@ -51,13 +51,14 @@
     $('openAfter').checked = !!s.openAfter;
     $('showSpeed').checked = !!s.showSpeed;
     $('airCam').checked = s.airCam !== false;
-    // a camera Flick tried and couldn't use (none, or the system doesn't allow it): files come in from the edge
+    // a camera Flick tried and couldn't use (none, or the system doesn't allow it): files come in from the edge, and
+    // nothing here can be picked up by hand
     $('airCamSub').textContent = s.airCam !== false && s.airCamState === 'denied'
       ? (s.os === 'mac' ? 'macOS doesn’t let Flick use the camera: allow it in System Settings › Privacy & Security › Camera.'
         : s.os === 'win' ? 'Windows doesn’t let Flick use the camera: turn on “Let desktop apps access your camera” in Settings › Privacy & security › Camera.'
-          : 'Flick can’t use this PC’s camera, so files come in from the edge.')
-      : s.airCam !== false && s.airCamState === 'nocamera' ? 'This PC has no camera Flick can use, so files come in from the edge.'
-        : 'After you grab a file on your phone, this PC’s camera looks for your hand for a few seconds. Off: files come in from the edge.';
+          : 'Flick can’t use this PC’s camera: files from your phone come in from the edge, and files here can’t be grabbed by hand.')
+      : s.airCam !== false && s.airCamState === 'nocamera' ? 'This PC has no camera Flick can use: files from your phone come in from the edge, and files here can’t be grabbed by hand.'
+        : 'Files from your phone land where your hand opens, and a fist picks up the files you select here. The camera turns on for a few seconds only, while Flick is open on your phone.';
     $('sendTo').checked = !!s.sendTo;
     $('sendToRow').hidden = !s.isWin && s.os !== 'linux';     // a Mac always has Open With and the Dock icon
     const words = OS_TEXT[s.os];

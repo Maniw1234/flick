@@ -686,9 +686,9 @@ class FlickServer extends EventEmitter {
         this.emit('pair-request', Object.assign(this._publicSession(s), { code: s.pairCode, upgrade: !!(was && was.token && !was.tls) }));
         break;
       }
-      // protocol 8: Air grab ('air-go': the hand let go of what it lifted; 'air-catch': a hand asks for the files copied
-      // here)
-      case 'lift': case 'move': case 'drop': case 'cancel': case 'send': case 'air-go': case 'air-catch':
+      // protocol 8: Air grab ('air-go': the hand let go of what it lifted; 'air-catch': a fist opened over the phone, for
+      // the files a fist picked up here; 'air-ready': the phone has Air grab on and Flick open, or not any more)
+      case 'lift': case 'move': case 'drop': case 'cancel': case 'send': case 'air-go': case 'air-catch': case 'air-ready':
         if (s.trusted && (this.session === s || (s.connected && this.sessions.get(s.device) === s))) {
           // a fling makes this the phone in use; its replies ('saved', 'failed') go back to it
           if (m.t === 'lift' || m.t === 'send' || m.t === 'air-catch') this.use(s.device);

@@ -97,7 +97,9 @@ p.update({
     # every Bonjour service Flick advertises or looks for: Quick Share (pc/quickshare.js, through pc/mdns.js)
     'NSBonjourServices': ['_FC9F5ED42C8A._tcp'],
     # Air grab: after a file is grabbed on the phone, the camera looks for the hand for a few seconds (pc/air.js)
-    'NSCameraUsageDescription': 'After you grab a file on your phone, Flick looks for your hand for a few seconds so the file lands where your hand opens. Nothing is recorded.',
+    'NSCameraUsageDescription': 'Air grab: for a few seconds after you grab a file on your phone, or select files here, Flick looks for your hand. Nothing is recorded.',
+    # Air grab: which files are selected in Finder (pc/selwatch.js); macOS asks once
+    'NSAppleEventsUsageDescription': 'Air grab: Flick asks Finder which files you selected, so a fist in front of the screen can pick them up.',
     # any file or folder can be dropped on Flick in the Dock or opened with it (it goes to the phone); Flick is never
     # the default app for anything
     'CFBundleDocumentTypes': [{'CFBundleTypeName': 'Any file', 'CFBundleTypeRole': 'Viewer',

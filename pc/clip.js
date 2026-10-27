@@ -193,20 +193,7 @@ class ClipWatch {
     this._setLink(t);
     const im = kind === 'text' ? null : await this._image();
     this.last.img = im ? im.fp : '';
-    // what a phone put here, to tell it apart from what the user copies on the PC (heldFromPhone)
-    this.lastPut = { kind, text: this.last.text, img: this.last.img };
     return true;
-  }
-
-  /** Is the clipboard still holding what a phone put on it (and not something copied on the PC since)? */
-  heldFromPhone() {
-    return this._serial(async () => {
-      const p = this.lastPut;
-      if (!p) return false;
-      if (p.kind === 'text') { const t = await this._text(); return !!t && sha(t) === p.text; }
-      const im = await this._image();
-      return !!im && im.fp === p.img;
-    });
   }
 }
 
