@@ -2588,49 +2588,85 @@
   document.addEventListener('contextmenu', (e) => e.preventDefault());
 
   // ------------------------------------------------------------------ incoming (PC -> phone)
-  function onIncoming(m) { setTimeout(() => incomingNow(m), m.delay || 0); }
-  function incomingNow(m) {
-    if (st.screen !== 'main') showScreen('main');
-    const aspect = clamp(m.aspect || 1.33, 0.5, 2);
-    const it = {
-      id: 'in-' + m.fid, fid: m.fid, name: m.name, size: m.size, mime: m.mime, kind: m.kind === 'image' || m.kind === 'video' ? m.kind : (m.ext === 'pdf' ? 'pdf' : 'doc'),
-      // the PC's thumbnail is only ever a small inline picture; anything else (a URL) would make the phone fetch it
-      ext: m.ext, added: Date.now(), mtime: Date.now(), thumb: typeof m.thumb === 'string' && /^data:image\/(jpeg|png|webp|gif);base64,/.test(m.thumb) ? m.thumb : null,
-      w: m.kind === 'image' || m.kind === 'video' ? Math.round(aspect * 1000) : 0, h: 1000, incoming: true,
-    };
+  // A file downloads as soon as the PC offers it; its card comes in when the PC's card reaches the phone (m.delay).
+  // Cards due together (a big batch: the PC staggers only the first dozen) are laid out once a frame and only a few
+  // of them fly in; a file that arrives before its card has landed shows once it has.
+  const IN = { q: [], raf: 0, fly: [], flyRaf: 0, wait: new Set(), got: new Map(), tickAt: 0 };
+  function onIncoming(m) {
     (st.incoming = st.incoming || new Map()).set(m.fid, String(m.name || 'file'));
-    V.items.unshift(it);
-    V.total++;
-    if (scroller.scrollTop > 40) scroller.scrollTo({ top: 0, behavior: 'smooth' });
-    layout(true);
-    // fetched first: scrolled far down, its card isn't drawn yet (it shows once the view is back at the top)
+    IN.wait.add(m.fid);
     const tok = pref.get(tokenKey(st.pc.id), '');
     const url = linkBase() + m.url + '?device=' + encodeURIComponent(DEVICE) + '&token=' + encodeURIComponent(tok) + parallelArg();
     nc('download', m.fid, url, m.name, String(m.size || 0), m.mime || '');
-    const el = cards.get(it.id);
-    if (!el) return;
+    setTimeout(() => { IN.q.push(m); if (!IN.raf) IN.raf = requestAnimationFrame(incomingNow); }, m.delay || 0);
+  }
+  function incomingNow() {
+    IN.raf = 0;
+    const batch = IN.q.splice(0);
+    if (st.screen !== 'main') showScreen('main');
+    const its = batch.map((m) => {
+      const aspect = clamp(m.aspect || 1.33, 0.5, 2);
+      return {
+        id: 'in-' + m.fid, fid: m.fid, name: m.name, size: m.size, mime: m.mime, kind: m.kind === 'image' || m.kind === 'video' ? m.kind : (m.ext === 'pdf' ? 'pdf' : 'doc'),
+        // the PC's thumbnail is only ever a small inline picture; anything else (a URL) would make the phone fetch it
+        ext: m.ext, added: Date.now(), mtime: Date.now(), thumb: typeof m.thumb === 'string' && /^data:image\/(jpeg|png|webp|gif);base64,/.test(m.thumb) ? m.thumb : null,
+        w: m.kind === 'image' || m.kind === 'video' ? Math.round(aspect * 1000) : 0, h: 1000, incoming: true,
+      };
+    });
+    for (const it of its) V.items.unshift(it);
+    V.total += its.length;
+    if (scroller.scrollTop > 40) scroller.scrollTo({ top: 0, behavior: 'smooth' });
+    layout(true);
+    let flew = 0;
+    its.forEach((it, i) => {
+      setCardProgress(it.id, 0);
+      // (scrolled far down, its card isn't drawn yet: it shows once the view is back at the top)
+      const el = cards.get(it.id);
+      if (el && flew < 2 && IN.fly.length < 8) { flyIn(it, batch[i], el); flew++; } else landed(it.fid);
+    });
+    if (flew) haptic('tick');
+  }
+  function flyIn(it, m, el) {
     el.classList.add('ghost');
     const target = el.querySelector('.thumb');
     const w = VIEW.list ? LR.th : it._w, h = it._th;   // (a list row's thumbnail is small and square)
-    const f = makeFloat(it, { width: w, height: h }, target);
     const y0 = clamp((typeof m.y === 'number' ? m.y : innerHeight / 2) - h / 2, 20, innerHeight - h - 20);
-    const sx = st.side === 'right' ? -w - 8 : innerWidth + 8;
-    const mx = st.side === 'right' ? 26 : innerWidth - w - 26;
+    const g = { fid: it.fid, el, target, f: makeFloat(it, { width: w, height: h }, target), y0, t0: now(),
+      sx: st.side === 'right' ? -w - 8 : innerWidth + 8, mx: st.side === 'right' ? 26 : innerWidth - w - 26 };
+    flyAt(g, g.t0, null);
     egFlash(y0 + h / 2);
-    haptic('tick');
-    const t0 = now();
-    (function anim(t) {
-      const u1 = clamp((t - t0) / 210, 0, 1);
-      const u2 = clamp((t - t0 - 170) / 380, 0, 1);
-      const rr = target.getBoundingClientRect();
-      let x, y, s, r;
-      if (u2 <= 0) { const e = easeOut(u1); x = lerp(sx, mx, e); y = y0; s = 1.07; r = (st.side === 'right' ? 6 : -6) * (1 - e); }
-      else { const e = easeInOut(u2); x = lerp(mx, rr.left, e); y = lerp(y0, rr.top, e); s = lerp(1.07, 1, e); r = 0; }
-      f.style.transform = 'translate3d(' + x + 'px,' + y + 'px,0) rotate(' + r + 'deg) scale(' + s + ')';
-      if (u2 < 1) requestAnimationFrame(anim);
-      else { el.classList.remove('ghost'); f.remove(); haptic('soft'); }
-    })(t0);
-    setCardProgress(it.id, 0);
+    IN.fly.push(g);
+    if (!IN.flyRaf) IN.flyRaf = requestAnimationFrame(flyFrame);
+  }
+  // in from the edge, then onto its card (rr: where the card is now)
+  function flyAt(g, t, rr) {
+    const u1 = clamp((t - g.t0) / 210, 0, 1);
+    const u2 = clamp((t - g.t0 - 170) / 380, 0, 1);
+    let x, y, s, r;
+    if (u2 <= 0 || !rr) { const e = easeOut(u1); x = lerp(g.sx, g.mx, e); y = g.y0; s = 1.07; r = (st.side === 'right' ? 6 : -6) * (1 - e); }
+    else { const e = easeInOut(u2); x = lerp(g.mx, rr.left, e); y = lerp(g.y0, rr.top, e); s = lerp(1.07, 1, e); r = 0; }
+    g.f.style.transform = 'translate3d(' + x + 'px,' + y + 'px,0) rotate(' + r + 'deg) scale(' + s + ')';
+  }
+  // every card flying in moves on: their places are read first, then they all move (one layout a frame, not one each)
+  function flyFrame(t) {
+    IN.flyRaf = 0;
+    const rects = IN.fly.map((g) => (g.target.isConnected ? g.target.getBoundingClientRect() : null));
+    IN.fly = IN.fly.filter((g, i) => {
+      if (rects[i] && t - g.t0 < 550) { flyAt(g, t, rects[i]); return true; }
+      // landed, or its card left the grid (pushed out of the drawn part by more files): it has no place to fly to
+      g.el.classList.remove('ghost');
+      g.f.remove();
+      if (rects[i]) haptic('soft');
+      landed(g.fid);
+      return false;
+    });
+    if (IN.fly.length) IN.flyRaf = requestAnimationFrame(flyFrame);
+  }
+  // its card is in the grid now: a download that finished meanwhile shows
+  function landed(fid) {
+    IN.wait.delete(fid);
+    const e = IN.got.get(fid);
+    if (e) { IN.got.delete(fid); onDownDone(e); }
   }
 
   function onDown(e) {
@@ -2638,6 +2674,7 @@
     if (it && e.total) setCardProgress(it.id, e.got / e.total);
   }
   function onDownDone(e) {
+    if (IN.wait.has(e.fid)) { IN.got.set(e.fid, e); return; }    // its card hasn't landed yet (see landed)
     const idx = V.items.findIndex((x) => x.fid === e.fid);
     const name = (st.incoming && st.incoming.get(e.fid)) || (idx >= 0 ? V.items[idx].name : 'a file');
     if (st.incoming) st.incoming.delete(e.fid);
@@ -2658,7 +2695,7 @@
     if (nel) nel.animate([{ filter: 'brightness(1.6)' }, { filter: 'brightness(1)' }], { duration: 420, easing: 'ease-out' });
     wsSend({ t: 'incoming-done', fid: e.fid });
     if (real.path && /\/Download\/Flick\//.test(real.path)) toast('Saved to Downloads › Flick', 1600);
-    haptic('tick');
+    if (now() - IN.tickAt > 150) { IN.tickAt = now(); haptic('tick'); }   // a batch finishing buzzes once, not per file
   }
 
   // ------------------------------------------------------------------ native events
