@@ -28,7 +28,7 @@ echo "== copy app"
 mkdir -p "$APP/resources/app"
 # every module at the top of pc/ ships (a new one can't be forgotten here), plus the folders the windows load
 cp "$PC"/*.js "$PC/package.json" "$APP/resources/app/"
-for d in overlay panel catcher assets phone-app web; do if [ -d "$PC/$d" ]; then cp -r "$PC/$d" "$APP/resources/app/"; fi; done
+for d in overlay panel catcher assets phone-app web air; do if [ -d "$PC/$d" ]; then cp -r "$PC/$d" "$APP/resources/app/"; fi; done
 # Air grab's hand tracker (the phone app's): this PC's camera sees where the hand opens (pc/air.js)
 cp -r "$ROOT/phone/hand" "$APP/resources/app/hand"
 # the phone app ships inside the PC app, so phones can update over Wi-Fi from here
