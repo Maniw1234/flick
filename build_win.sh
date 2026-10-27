@@ -37,6 +37,8 @@ cp -r "$ROOT/phone/hand" "$APP/resources/app/hand"
 mkdir -p "$APP/resources/app/bin"
 "$MINGW_CC" -O2 -s -Wall -o "$APP/resources/app/bin/flick-bt.exe" "$ROOT/native/flick-bt.c" -lws2_32
 "$MINGW_CC" -O2 -s -Wall -o "$APP/resources/app/bin/flick-keys.exe" "$ROOT/native/flick-keys.c" -luser32
+# marks a file sparse before it's written in parts (see native/flick-sparse.c and pc/server.js)
+"$MINGW_CC" -O2 -s -Wall -municode -o "$APP/resources/app/bin/flick-sparse.exe" "$ROOT/native/flick-sparse.c"
 # the phone app ships inside the PC app, so phones can update over Wi-Fi from here
 node -e "const i=require('$PC/apkinfo').apkInfo('$APP/resources/app/phone-app/Flick.apk'); if (i.package !== 'com.flick.app') process.exit(1); console.log('phone app', i.name, '(' + i.code + ')')"
 # record which Electron this code was built for (an update for another Electron needs the full installer)

@@ -15,6 +15,20 @@ const { acceptUpgrade } = require('./ws');
 const { BundleReceiver } = require('./bundle');
 const { PhoneApi } = require('./phoneapi');
 
+// Windows: marks a file sparse with bin/flick-sparse.exe (see native/flick-sparse.c) before it's written in parts. Best
+// effort: without the helper, or on a drive that can't (FAT), the file is written as before.
+const SPARSE_EXE = path.join(__dirname, 'bin', 'flick-sparse.exe');
+let sparseOk = null;
+function markSparse(file) {
+  if (sparseOk === null) sparseOk = fs.existsSync(SPARSE_EXE);
+  if (!sparseOk) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    try {
+      require('child_process').execFile(SPARSE_EXE, [file], { windowsHide: true, timeout: 3000 }, (e) => resolve(!e));
+    } catch (e) { resolve(false); }
+  });
+}
+
 // 2: large files in parallel parts (/api/part) and byte ranges; 3: bundles over several streams; 4: encrypted links
 // (TLS on the same port, a pinned certificate) and a sign-in that never sends the pairing token (see "sign-in");
 // 5: several phones at once, the background link (/api/events), clipboard, links, notifications, folder sync (phoneapi.js);
@@ -1254,7 +1268,12 @@ class FlickServer extends EventEmitter {
       // pre-size the file; if that fails (disk full) close it again rather than leaking the handle. Opened for
       // reading too: a checked transfer reads the assembled file back (_checkAssembly)
       asm.fdP = fs.promises.open(p, 'w+').then(async (fd) => {
-        try { if (total) await fd.truncate(total); } catch (e) { await fd.close().catch(() => {}); throw e; }
+        try {
+          // Windows: parts written at once, far into an ordinary file, make NTFS fill everything before each part's
+          // first write with zeros (most of the file written twice, and a stall at the start): sparse first, it doesn't
+          if (parts > 1 && process.platform === 'win32') await markSparse(p);
+          if (total) await fd.truncate(total);
+        } catch (e) { await fd.close().catch(() => {}); throw e; }
         return fd;
       });
       asm.fdP.catch(() => {});
