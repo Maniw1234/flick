@@ -126,18 +126,20 @@
     if (v) { try { v.pause(); v.removeAttribute('src'); v.load(); } catch (e) { /* ignore */ } }
     s._vid = null; s._img = null;
   }
-  // the whole photo (a thumbnail shows until it has loaded); "" from the app: the thumbnail is all there is
+  // the whole photo (a thumbnail shows until it has loaded); "" from the app: the thumbnail is all there is.
+  // s._loading: the file whose photo is on its way; a slide given another file meanwhile loads that one's own (when
+  // it was only "loading", a photo swiped to quickly kept its blurry thumbnail)
   function loadFull(s) {
     const it = s._it;
-    if (!it || kind(it) !== 'image' || s._full || s._loading) return;
+    if (!it || kind(it) !== 'image' || s._full || s._loading === it) return;
     const url = mediaUrl(it);
     if (!url) return;
-    s._loading = true;
+    s._loading = it;
     const im = new Image();
     im.decoding = 'async';
     im.onload = () => {
       const show = () => {
-        s._loading = false;
+        if (s._loading === it) s._loading = null;
         if (s._it !== it || !s._img) return;
         im.className = 'pvimg'; im.alt = ''; im.draggable = false;
         s._img.replaceWith(im);
@@ -145,7 +147,7 @@
       };
       if (im.decode) im.decode().then(show, show); else show();
     };
-    im.onerror = () => { s._loading = false; };
+    im.onerror = () => { if (s._loading === it) s._loading = null; };
     im.src = url;
   }
   function place(dx) {
