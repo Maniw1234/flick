@@ -83,7 +83,9 @@
     if (M.mode === 'hover' && e.pose === 'fist') grab();
     else if (M.mode === 'carry' && e.pose === 'open') released(e.pos);
     else if (M.mode === 'catch' && e.pose === 'open') {
-      if (Date.now() - M.catchT < 4000) catchFromPc();
+      // a fist held over the phone for a moment, then opened (a hand that only passes through a fist doesn't count)
+      const ms = Date.now() - M.catchT;
+      if (ms >= 250 && ms < 4000) catchFromPc();
       M.mode = 'hover';
     }
   }
@@ -287,7 +289,11 @@
           onResult: (r) => stream.push(r),
           onState: (s, d) => {
             camState = s;
-            if (s === 'denied' && !deniedSaid) { deniedSaid = true; A.toast('Flick can’t use the camera', 2400); }
+            // said once until Flick comes back to the screen: no camera, a camera Android won't give, one that's busy
+            if ((s === 'denied' || s === 'nocamera' || s === 'error') && !deniedSaid) {
+              deniedSaid = true;
+              A.toast(s === 'nocamera' ? 'Air grab needs a front camera' : s === 'denied' ? 'Flick can’t use the camera' : 'The camera is busy (another app may be using it)', 2600);
+            }
             if (s === 'error' || s === 'nocamera') console.log('air: ' + s + ' ' + (d || ''));
           },
         });
@@ -304,7 +310,7 @@
   async function update() {
     if (wanted()) {
       try { await build(); } catch (e) { console.log('air: ' + e); return; }
-      if (wanted() && camState !== 'on' && camState !== 'starting' && camState !== 'denied') cam.start();
+      if (wanted() && camState !== 'on' && camState !== 'starting' && !/denied|nocamera/.test(camState)) cam.start();
       return;
     }
     if (!cam || camState === 'off') return;
@@ -319,7 +325,7 @@
   A.on('conn', () => update());
   A.on('native', (e) => {
     if (e.t === 'pause') { paused = true; update(); }
-    else if (e.t === 'resume') { paused = false; deniedSaid = false; if (camState === 'denied') camState = 'off'; update(); }
+    else if (e.t === 'resume') { paused = false; deniedSaid = false; if (/denied|nocamera|error/.test(camState)) camState = 'off'; update(); }
     else if (e.t === 'camera') {
       on = camOk();
       A.pref.set('air', on ? '1' : '');

@@ -36,6 +36,7 @@ function attach(o) {
   let win = null, ready = null, camState = 'off', idleT = null, camT = null, macAsked = false;
   const lifted = new Map();    // tid -> { t, m, peek, at, go, waitT, video, device }
   let lastOpen = null;         // { x, y, at }: where the camera last saw a hand open
+  let lastCatch = 0;
   let hand = null;             // { x, y, pose, at }: the hand the camera sees now
 
   // ---- the camera window
@@ -222,8 +223,11 @@ function attach(o) {
       stopCamIfIdle();
     },
 
-    /** a fist opened over the phone: the files copied here go to it */
+    /** a fist opened over the phone: the files copied here go to it (one catch every 2 seconds at most) */
     async catchFiles(device) {
+      const now = Date.now();
+      if (now - lastCatch < 2000) return 0;
+      lastCatch = now;
       let paths = await clipFiles(clipboard);
       if (!paths.length) paths = await clipPicture();
       if (!paths.length) { if (o.server) o.server.pushToPhone({ t: 'air-none' }, device); log('catch: nothing copied'); return 0; }
