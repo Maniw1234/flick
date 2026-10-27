@@ -54,7 +54,7 @@
   // view for a moment) | sent (they went; the hand is still in view) | catch (a fist that came in from outside: files
   // from the PC when it opens). pos, size: the hand in the camera's view (0..1); x, y: on the screen
   const M = { mode: 'idle', wasOpen: false, x: 0, y: 0, pos: [0.5, 0.5], size: 0, grabPos: null, grabSize: 0, tid: null, items: null, video: null,
-    catchT: 0, goT: 0, touch: 0, paint: null, painted: null, hint: 0 };
+    catchT: 0, goT: 0, hideT: 0, inT: 0, touch: 0, paint: null, painted: null, hint: 0 };
 
   function onEvent(type, e) {
     if (type === 'move') move(e);
@@ -151,6 +151,8 @@
   }
 
   function showHeld(items, rect) {
+    clearTimeout(M.hideT);                                // an earlier carry's exit mustn't hide this one
+    clearTimeout(M.inT);
     held.textContent = '';
     // the picture its card already shows, else the phone's thumbnail
     const card = cardEl(items[0].id), ci = card && card.querySelector('.thumb img.ok');
@@ -168,9 +170,10 @@
     held.style.transition = '';
     held.classList.add('in');                             // a slower move into the hand, then it follows the hand
     place(held, M.x, M.y);
-    setTimeout(() => held.classList.remove('in'), 300);
+    M.inT = setTimeout(() => held.classList.remove('in'), 300);
   }
-  function hideHeld() { held.hidden = true; held.className = 'airheld'; held.textContent = ''; }
+  function hideHeld() { clearTimeout(M.hideT); held.hidden = true; held.className = 'airheld'; held.textContent = ''; }
+  function hideHeldIn(ms) { clearTimeout(M.hideT); M.hideT = setTimeout(hideHeld, ms); }
 
   function leave(e) {
     spot.hidden = true;
@@ -191,24 +194,28 @@
 
   // the hand opened while carrying: over the phone, where it grabbed, it puts the files back; moved well away (toward
   // the PC, which this camera may still see) or up, it lets them go
-  function released(pos) {
+  const movedAway = (pos) => {
     const g = M.grabPos || pos;
-    const moved = Math.hypot(pos[0] - g[0], pos[1] - g[1]) > 0.28 || (M.grabSize && M.size && M.size < M.grabSize * 0.6);
-    if (moved) { go(); M.mode = 'sent'; } else putBack();
+    return Math.hypot(pos[0] - g[0], pos[1] - g[1]) > 0.28 || !!(M.grabSize && M.size && M.size < M.grabSize * 0.6);
+  };
+  function released(pos) {
+    if (movedAway(pos)) { go(); M.mode = 'sent'; } else putBack();
   }
 
   function go() {
     const tid = M.tid;
     M.tid = null;
     M.wasOpen = false;
-    if (!tid) { hideHeld(); return; }
-    A.airGo(tid, { video: M.video });
+    clearTimeout(M.goT);
+    const video = M.video;
     M.video = null;
+    // (the send may be over already: the PC put it back after a very long hold, or the link dropped)
+    if (!tid || !A.airGo(tid, { video })) { hideHeld(); return; }
     // off the side of the phone that faces the PC
     held.classList.remove('gone');
     held.classList.add('thrown');
     place(held, A.st.side === 'right' ? -90 : innerWidth + 90, M.y, 0.7);
-    setTimeout(hideHeld, 420);
+    hideHeldIn(420);
   }
 
   function putBack() {
@@ -223,7 +230,7 @@
     held.classList.add('back');
     if (r) place(held, r.left + r.width / 2, r.top + r.height / 2, clamp(r.width / 84, 0.6, 3));
     else held.classList.add('gone');
-    setTimeout(hideHeld, 360);
+    hideHeldIn(360);
     A.haptic('soft');
   }
 
@@ -239,13 +246,14 @@
   }
 
   A.on('ws', (m) => {
-    if (m.t === 'air-none') A.toast('Copy files on ' + X.pcName() + ' first, then catch them here', 2800);
-    // the PC's camera saw the hand open in front of it: the files go there
-    else if (m.t === 'air-land' && m.tid && m.tid === M.tid && (M.mode === 'carry' || M.mode === 'away')) {
-      clearTimeout(M.goT);
-      const inView = M.mode === 'carry';
-      go();
-      M.mode = inView ? 'sent' : 'idle';
+    if (m.t === 'air-none') {
+      A.toast(m.why === 'off' ? 'Clipboard sync is off on ' + X.pcName() + ': turn it on in Flick’s window to catch files'
+        : 'Copy files on ' + X.pcName() + ' first, then catch them here', 3000);
+    } else if (m.t === 'air-land' && m.tid && m.tid === M.tid) {
+      // the PC's camera saw the fist open in front of it: the files go there. Out of this camera's view, at once; still
+      // in view, only if the hand moved well away from where it grabbed (this camera knows best where it is)
+      if (M.mode === 'away') { M.mode = 'idle'; go(); }
+      else if (M.mode === 'carry' && movedAway(M.pos)) { go(); M.mode = 'sent'; }
     }
   });
 

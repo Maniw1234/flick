@@ -64,33 +64,41 @@
     async start() {
       if (this.on) return true;
       this.on = true;
+      // each start has its own number: a start that a stop() (and maybe another start) overtook while it waited for
+      // the tracker or the camera gives up, and closes the camera it opened itself
+      const gen = (this.gen = (this.gen || 0) + 1);
+      const current = () => this.on && this.gen === gen;
       this.state('starting');
       try {
         await this._worker();
       } catch (err) {
-        this.on = false;
-        this.state('error', String((err && err.message) || err));
+        if (current()) { this.on = false; this.state('error', String((err && err.message) || err)); }
         return false;
       }
-      if (!this.on) return false;
+      if (!current()) return false;
+      let stream;
       try {
         const md = navigator.mediaDevices;
         if (!md || !md.getUserMedia) throw Object.assign(new Error('no camera'), { name: 'NotFoundError' });
         const video = { width: { ideal: 320 }, height: { ideal: 240 }, frameRate: { ideal: 15, max: 30 } };
         if (this.o.facing) video.facingMode = this.o.facing;
         if (this.o.deviceId) video.deviceId = { exact: this.o.deviceId };
-        this.stream = await md.getUserMedia({ video, audio: false });
+        stream = await md.getUserMedia({ video, audio: false });
       } catch (err) {
-        this.on = false;
-        const n = err && err.name;
-        this.state(n === 'NotAllowedError' || n === 'SecurityError' ? 'denied' : n === 'NotFoundError' || n === 'OverconstrainedError' ? 'nocamera' : 'error', String((err && err.message) || err));
+        if (current()) {
+          this.on = false;
+          const n = err && err.name;
+          this.state(n === 'NotAllowedError' || n === 'SecurityError' ? 'denied' : n === 'NotFoundError' || n === 'OverconstrainedError' ? 'nocamera' : 'error', String((err && err.message) || err));
+        }
         return false;
       }
-      if (!this.on) { this._release(); return false; }
+      if (!current()) { for (const t of stream.getTracks()) try { t.stop(); } catch (e) { /* ignore */ } return false; }
+      this.stream = stream;
       const v = (this.video = document.createElement('video'));
       v.muted = true; v.playsInline = true; v.setAttribute('playsinline', ''); v.autoplay = true;
-      v.srcObject = this.stream;
+      v.srcObject = stream;
       try { await v.play(); } catch (e) { /* plays once data comes */ }
+      if (!current()) return false;                 // stop() released this stream meanwhile
       this.cv = document.createElement('canvas');
       this.cx = this.cv.getContext('2d', { willReadFrequently: true });
       this.state('on');
@@ -100,6 +108,7 @@
 
     stop() {
       this.on = false;
+      this.gen = (this.gen || 0) + 1;
       clearTimeout(this.timer);
       this._release();
       if (this.worker) this.worker.postMessage({ t: 'reset' });

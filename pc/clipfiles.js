@@ -1,7 +1,8 @@
 'use strict';
 // The files copied on this PC (Ctrl+C or Cmd+C in File Explorer, Finder or a Linux file manager), for Air grab's catch
-// (pc/air.js): Windows through PowerShell (the clipboard's file list), macOS through osascript (the pasteboard's file
-// URLs), Linux through wl-paste or xclip (text/uri-list, or GNOME's own list). Paths copied as text count too.
+// (pc/air.js): Windows through PowerShell (the clipboard's file list), macOS through osascript (the pasteboard items'
+// file URLs), Linux through wl-paste or xclip (text/uri-list, or GNOME's own list). Only a real list of copied files
+// counts: never text that looks like a path (a phone can put text on this clipboard, and must not pick files that way).
 const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
@@ -30,15 +31,6 @@ function fromUriList(text) {
   return out;
 }
 
-/** Text that is nothing but paths of existing files or folders (one per line, quotes allowed), as paths */
-function fromText(text) {
-  const lines = String(text || '').split(/\r?\n/).map((l) => l.trim().replace(/^"(.*)"$/, '$1')).filter(Boolean);
-  if (!lines.length || lines.length > MAX) return [];
-  const uris = fromUriList(lines.join('\n'));
-  if (uris.length === lines.length) return uris;
-  return lines.every((l) => path.isAbsolute(l) && exists(l)) ? lines : [];
-}
-
 const PS = '$ErrorActionPreference="SilentlyContinue";[Console]::OutputEncoding=[Text.Encoding]::UTF8;' +
   'Add-Type -AssemblyName System.Windows.Forms;foreach($f in [Windows.Forms.Clipboard]::GetFileDropList()){[Console]::Out.WriteLine($f)}';
 async function windows() {
@@ -47,10 +39,11 @@ async function windows() {
   return String(out || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
 }
 
-const JXA = 'ObjC.import("AppKit");var pb=$.NSPasteboard.generalPasteboard;var o=$.NSMutableDictionary.alloc.init;' +
-  'o.setObjectForKey($.NSNumber.numberWithBool(true),$("NSPasteboardURLReadingFileURLsOnlyKey"));' +
-  'var a=pb.readObjectsForClassesOptions($.NSArray.arrayWithObject($.NSURL),o);var r=[];' +
-  'if(a){for(var i=0;i<a.count;i++){r.push(ObjC.unwrap(a.objectAtIndex(i).path));}}r.join("\\n");';
+// each pasteboard item's own file URL (public.file-url: what Finder puts there), never one made from plain text
+const JXA = 'ObjC.import("AppKit");var it=$.NSPasteboard.generalPasteboard.pasteboardItems;var r=[];' +
+  'if(it&&!it.isNil()){for(var i=0;i<it.count;i++){var s=it.objectAtIndex(i).stringForType("public.file-url");' +
+  'if(!s||s.isNil())continue;var u=$.NSURL.URLWithString(s);if(!u||u.isNil())continue;var f=u.filePathURL;' +
+  'if(f&&!f.isNil())r.push(ObjC.unwrap(f.path));}}r.join("\\n");';
 async function mac() {
   const out = await run('/usr/bin/osascript', ['-l', 'JavaScript', '-e', JXA]);
   return String(out || '').split('\n').map((l) => l.trim()).filter((l) => l.startsWith('/'));
@@ -71,18 +64,15 @@ async function linux() {
 }
 
 /**
- * The copied files, existing ones only (at most 500). clipboard: Electron's, for paths copied as text.
+ * The copied files, existing ones only (at most 500).
  * @returns {Promise<string[]>}
  */
-async function clipFiles(clipboard) {
+async function clipFiles() {
   let list = [];
   try { list = process.platform === 'win32' ? await windows() : process.platform === 'darwin' ? await mac() : await linux(); }
   catch (e) { list = []; }
-  if (!list.length && clipboard && typeof clipboard.readText === 'function') {
-    try { list = fromText(await clipboard.readText()); } catch (e) { list = []; }
-  }
   const seen = new Set();
   return list.filter((p) => path.isAbsolute(p) && !seen.has(p) && seen.add(p) && exists(p)).slice(0, MAX);
 }
 
-module.exports = { clipFiles, fromUriList, fromText };
+module.exports = { clipFiles, fromUriList };

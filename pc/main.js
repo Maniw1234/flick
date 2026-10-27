@@ -1311,6 +1311,7 @@ async function finalize(t) {
 
 function discard(t) {
   unask(t);
+  if (air) air.cancel(t.tid);                    // a card a hand held (Air grab) stops waiting too
   if (t.tmpPath && t.bundle) fs.rm(t.tmpPath, { recursive: true, force: true }, () => {});
   else if (t.tmpPath) fs.unlink(t.tmpPath, () => {});
   transfers.delete(t.tid);
@@ -1802,6 +1803,19 @@ app.whenReady().then(async () => {
     tmpDir: app.getPath('temp'), side: () => store.side, phoneScreen,
     overlaySize: () => { const b = overlayBounds(); return { width: b.width, height: b.height }; },
     land: (t, msg) => airLand(t, msg), sendPaths: (paths) => sendPathsToPhone(paths), changed: () => pushPanelState(),
+    // held without being let go of for very long: put back, and the phone is told (it shows the file wasn't sent)
+    expire: (t) => {
+      if (t.state !== 'lifted') return;
+      log('transfer', t.tid, 'held by a hand too long: put back');
+      fx('cancel', { tid: t.tid });
+      if (server) { server.pushToPhone({ t: 'failed', tid: t.tid, why: 'held' }); server.abortUpload(t.tid); }
+      clearTimeout(t.failT);
+      gone.set(t.tid, Date.now());
+      discard(t);
+    },
+    // a catch shares the clipboard: only while Clipboard sync is on, and never what a phone put on it
+    clipShared: () => store.clipSync !== false, clipFromPhone: () => (feats ? feats.clipFromPhone() : Promise.resolve(false)),
+    liftMaxMs: (TEST_MODE && +process.env.FLICK_TEST_AIR_HOLD_MS) || undefined,      // tests can shorten the 90 s
   });
   createTray();
   applyStartup();
@@ -1830,6 +1844,7 @@ function startTestControl() {
     try {
       if (u.pathname.startsWith('/f/') && feats) return feats.test(u, res);    // the phone features (features.js)
       if (u.pathname === '/fb/state' && fb) return res.end(JSON.stringify(Object.assign({ outbox: fb.outbox, url: fb._url() }, fb.info())));
+      if (u.pathname === '/air' && air) { air.testHand(JSON.parse(u.searchParams.get('ev') || '{}')); return res.end('ok'); }   // a hand the camera "sees"
       if (u.pathname === '/fb/flush' && fb) { await fb.flush(); return res.end(JSON.stringify(fb.info())); }
       if (u.pathname === '/capture') {
         const w = u.searchParams.get('w') === 'panel' ? panel : overlay;

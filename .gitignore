@@ -12,3 +12,6 @@ password.txt
 
 # the phone app the PC app carries: built by build_apk.sh or by the release workflow (ci/phone_app.sh)
 pc/phone-app/
+
+# Python bytecode (hand/convert.py)
+__pycache__/
