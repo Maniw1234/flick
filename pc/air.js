@@ -105,10 +105,8 @@ function attach(o) {
         try { if (!(await systemPreferences.askForMediaAccess('camera'))) return denied(); } catch (err) { return false; }
       }
     }
-    // never on for long: a grab after another keeps it going, but endless grabs don't keep it on
-    const now = Date.now();
-    const running = camRuns.length && !camRuns[camRuns.length - 1][1];
-    if (!running && camUsed(now) > CAM_BUDGET_MS) { log('camera: rested (it ran ' + Math.round(camUsed(now) / 1000) + ' s in 2 minutes)'); return false; }
+    // never on for long: however many grabs ask for it, at most CAM_BUDGET_MS in any 2 minutes
+    if (camUsed(Date.now()) >= CAM_BUDGET_MS) { log('camera: resting (it ran ' + Math.round(camUsed(Date.now()) / 1000) + ' s in 2 minutes)'); stopCam(); return false; }
     clearTimeout(idleT);
     if (!(await ensureWin())) return false;
     // (macOS' question can take a while: the file may have landed meanwhile)
@@ -116,7 +114,7 @@ function attach(o) {
     send('air:start');
     if (!camRuns.length || camRuns[camRuns.length - 1][1]) camRuns.push([Date.now(), null]);
     clearTimeout(camT);
-    camT = setTimeout(stopCam, CAM_MAX_MS);
+    camT = setTimeout(stopCam, Math.max(1000, Math.min(CAM_MAX_MS, CAM_BUDGET_MS - camUsed(Date.now()))));
     return true;
   }
   function stopCam() {
@@ -143,10 +141,13 @@ function attach(o) {
   function onHand(ev) {
     const now = Date.now();
     const a = newest();
+    if (o.debug && ev.type !== 'move') log('hand', ev.type, ev.pose || '', a ? a.t.tid + (a.go ? ' (let go)' : '') + (a.sawFist ? ' fist seen' : '') : '-');
     if (ev.type === 'leave') {
       hand = null;
+      if (!a) return;
+      a.sawFist = 0;                                     // a hand coming back is a new one until seen as a fist
       // the fist it followed went out of view: the file goes back to waiting at the edge
-      if (a && a.follow) { a.follow = false; o.fx('air', { tid: a.t.tid, off: true }); bob(a); }
+      if (a.follow) { a.follow = false; o.fx('air', { tid: a.t.tid, off: true }); bob(a); }
       return;
     }
     if (!Array.isArray(ev.pos)) return;
@@ -165,14 +166,14 @@ function attach(o) {
       }
       return;
     }
-    // an open hand counts only as that fist opening: the user's other hand, or one never seen closed, sends nothing
-    if ((ev.type === 'pose' || ev.type === 'enter') && ev.pose === 'open' && a.sawFist) {
-      lastOpen = { x: p.x, y: p.y, at: now };
-      if (a.go) { land(a, p); return; }
-      // the phone still has it: it lets go now (if it agrees), and the file lands here once it says so ('air-go')
-      a.landAt = lastOpen;
-      if (o.server) o.server.pushToPhone({ t: 'air-land', tid: a.t.tid }, a.device);
-    }
+    if (ev.pose !== 'open' || (ev.type !== 'pose' && ev.type !== 'enter')) return;
+    // once the phone has let go, a hand opening (or coming into view open) picks where it lands
+    if (a.go) { lastOpen = { x: p.x, y: p.y, at: now }; land(a, p); return; }
+    // before that, only the fist this camera saw (without it leaving the view) opening tells the phone to let go:
+    // another hand, or one never seen closed, sends nothing
+    if (ev.type !== 'pose' || !a.sawFist) return;
+    lastOpen = a.landAt = { x: p.x, y: p.y, at: now };
+    if (o.server) o.server.pushToPhone({ t: 'air-land', tid: a.t.tid }, a.device);
   }
 
   // the file waits at the edge (a third of it in view), bobbing a little
@@ -214,6 +215,7 @@ function attach(o) {
   return {
     get camState() { return camState; },
     get handDir() { return HAND; },
+    get window() { return win; },                          // tests (main.js' test control)
     /** tests (main.js' test control): a hand event as the camera window would send it */
     testHand(ev) { onHand(ev); },
 

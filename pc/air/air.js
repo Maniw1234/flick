@@ -23,6 +23,8 @@
     });
     cam = new window.FlickHandCam({
       worker: () => window.FlickHandWorker.inline(),  // this window shows nothing: the tracker can run on its page
+      size: 640,                                      // a hand in front of a screen is farther from its camera
+      reader: true,                                   // this window is never shown: frames straight from the track
       files: async () => {
         const out = {};
         for (const n of FILES) {
@@ -34,6 +36,7 @@
       onResult: (r) => stream.push(r),
       onState: (state, detail) => api.send('air:state', { state, detail: detail ? String(detail).slice(0, 200) : '' }),
     });
+    window.__air = { cam: () => cam, stream: () => stream };   // tests (main.js' test control)
     // frames the tracker skipped (nothing moving) still let a hand that went out of view leave
     setInterval(() => { if (cam && cam.on) stream.push({ t: performance.now() }); }, 200);
   })();

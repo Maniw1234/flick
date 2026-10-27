@@ -2404,6 +2404,8 @@
   function onFailed(m) {
     // turned down on a PC set to "Ask each time": the send engine's job says so too (it may have sent every byte)
     if ((m.why === 'declined' || m.why === 'timeout') && st.jobs.has(m.tid)) nc('sendRefused', m.tid, m.why);
+    // Air grab: held without being let go of for very long, the PC put it back: so does the phone
+    if (m.why === 'held') { if (st.jobs.has(m.tid)) nc('sendCancel', m.tid); else nc('abort', m.tid); }
     const p = st.pending.get(m.tid);
     if (!p) return;
     st.pending.delete(m.tid);
@@ -2417,7 +2419,8 @@
     haptic('reject');
     const what = items.length > 1 ? items.length + ' items' : midName(p.item.name), pcName = st.pc ? st.pc.name : 'your PC';
     // a PC set to "Ask each time": its user said no, or nobody answered there within a minute
-    toast(m.why === 'declined' ? pcName + ' declined ' + what : m.why === 'timeout' ? 'Not accepted on ' + pcName + ' in time' : 'Couldn’t send ' + what, 2600);
+    toast(m.why === 'declined' ? pcName + ' declined ' + what : m.why === 'timeout' ? 'Not accepted on ' + pcName + ' in time'
+      : m.why === 'held' ? 'Not sent: ' + what + ' was held too long' : 'Couldn’t send ' + what, 2600);
     updateCount();
   }
 

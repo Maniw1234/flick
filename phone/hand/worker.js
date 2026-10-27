@@ -53,11 +53,17 @@
     };
   }
 
-  // a worker-like object running on the page itself
+  // a worker-like object running on the page itself. Its messages go through a MessageChannel, not timers: a hidden
+  // page's timers are held back to a few a second (the PC's camera window is never shown)
   function inline() {
     const w = { onmessage: null, onerror: null, terminate() {} };
-    const port = { onmessage: null, postMessage(m) { setTimeout(() => { if (w.onmessage) w.onmessage({ data: m }); }, 0); } };
-    w.postMessage = (m) => setTimeout(() => port.onmessage({ data: m }), 0);
+    const port = { onmessage: null };
+    const ch = new MessageChannel(), q = [];
+    ch.port1.onmessage = () => { const f = q.shift(); if (f) f(); };
+    const soon = (f) => { q.push(f); ch.port2.postMessage(0); };
+    port.postMessage = (m) => soon(() => { if (w.onmessage) w.onmessage({ data: m }); });
+    w.postMessage = (m) => soon(() => port.onmessage({ data: m }));
+    w.terminate = () => { try { ch.port1.close(); } catch (e) { /* ignore */ } };
     attach(port);
     return w;
   }

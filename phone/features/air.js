@@ -90,10 +90,20 @@
     }
   }
 
+  // the send a hand carries ended without it (the PC put it back after a very long hold, the link dropped)
+  function carryOver() {
+    if (!M.tid || A.st.pending.has(M.tid)) return false;
+    Object.assign(M, { tid: null, mode: 'hover', video: null });
+    clearTimeout(M.goT);
+    hideHeld();
+    return true;
+  }
+
   function move(e) {
     const [x, y] = toScreen(e.pos);
     M.x = x; M.y = y;
     M.pos = e.pos; M.size = e.size || 0;
+    if (M.mode === 'carry' && carryOver()) return;
     if (M.mode === 'carry') { place(held, x, y); return; }
     if (M.mode !== 'hover') return;
     const pv = preview();

@@ -1370,6 +1370,7 @@ function wireServer() {
     t.seen = Date.now();
     t.info = liftInfo(m, t);
     fx('lift', t.info);
+    t.air = !!m.air;
     if (m.air && air) air.lifted(t, m);            // picked up by a hand: it waits at the edge (air.js)
   });
   // Air grab: the hand let go of what it lifted. The transfer goes on as a dropped one; its card lands where this PC's
@@ -1503,7 +1504,11 @@ function wireServer() {
     t.failT = setTimeout(() => {
       if (transfers.get(tid) !== t || t.upload !== 'failed' || t.done) return;
       if (t.state === 'dropped') { fx('failed', { tid }); server.pushToPhone({ t: 'failed', tid, why: 'upload' }); hist({ dir: 'in', tid, name: t.name, size: 0, ok: false, how: 'fling' }); }
-      else if (t.state === 'lifted') fx('cancel', { tid });
+      else if (t.state === 'lifted') {
+        fx('cancel', { tid });
+        if (t.air) server.pushToPhone({ t: 'failed', tid, why: 'upload' });   // a hand still holds it on the phone
+      }
+      if (air) air.cancel(tid);
       unask(t);
       transfers.delete(tid);
     }, 15000);
@@ -1805,7 +1810,7 @@ app.whenReady().then(async () => {
     land: (t, msg) => airLand(t, msg), sendPaths: (paths) => sendPathsToPhone(paths), changed: () => pushPanelState(),
     // held without being let go of for very long: put back, and the phone is told (it shows the file wasn't sent)
     expire: (t) => {
-      if (t.state !== 'lifted') return;
+      if (transfers.get(t.tid) !== t || t.state !== 'lifted') return;     // (a newer transfer may have its id now)
       log('transfer', t.tid, 'held by a hand too long: put back');
       fx('cancel', { tid: t.tid });
       if (server) { server.pushToPhone({ t: 'failed', tid: t.tid, why: 'held' }); server.abortUpload(t.tid); }
@@ -1816,6 +1821,7 @@ app.whenReady().then(async () => {
     // a catch shares the clipboard: only while Clipboard sync is on, and never what a phone put on it
     clipShared: () => store.clipSync !== false, clipFromPhone: () => (feats ? feats.clipFromPhone() : Promise.resolve(false)),
     liftMaxMs: (TEST_MODE && +process.env.FLICK_TEST_AIR_HOLD_MS) || undefined,      // tests can shorten the 90 s
+    debug: TEST_MODE,                                                                  // tests: hand events in the log
   });
   createTray();
   applyStartup();
@@ -1847,7 +1853,7 @@ function startTestControl() {
       if (u.pathname === '/air' && air) { air.testHand(JSON.parse(u.searchParams.get('ev') || '{}')); return res.end('ok'); }   // a hand the camera "sees"
       if (u.pathname === '/fb/flush' && fb) { await fb.flush(); return res.end(JSON.stringify(fb.info())); }
       if (u.pathname === '/capture') {
-        const w = u.searchParams.get('w') === 'panel' ? panel : overlay;
+        const w = u.searchParams.get('w') === 'panel' ? panel : u.searchParams.get('w') === 'air' && air ? air.window : overlay;
         const img = await w.webContents.capturePage();
         fs.writeFileSync(u.searchParams.get('out'), img.toPNG());
         return res.end('ok');
@@ -1862,7 +1868,7 @@ function startTestControl() {
         }));
       }
       if (u.pathname === '/eval') {
-        const w = u.searchParams.get('w') === 'panel' ? panel : overlay;
+        const w = u.searchParams.get('w') === 'panel' ? panel : u.searchParams.get('w') === 'air' && air ? air.window : overlay;
         const r = await w.webContents.executeJavaScript(u.searchParams.get('js'));
         return res.end(JSON.stringify(r));
       }

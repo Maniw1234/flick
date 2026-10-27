@@ -5,16 +5,28 @@
 //     worker: () => new Worker(...),          // a worker running hand.js + worker.js
 //     files: async () => ({ 'hand-simd.wasm': ArrayBuffer, 'hand.wasm': ..., 'palm.fhm': ..., 'landmark.fhm': ... }),
 //     facing: 'user',                         // the phone's front camera; a PC takes its default camera
+//     size: 320,                              // the frames' long side (a PC's hand is farther away: 640)
+//     reader: false,                          // frames straight from the camera's track (the PC's hidden window)
 //     onResult(r) {},                         // r: { hand, g, w, h, t } for every frame the tracker looked at
 //     onState(s, detail) {},                  // 'starting' | 'on' | 'off' | 'denied' | 'nocamera' | 'error'
 //   });
 //   await cam.start(); ... cam.stop();
 //
 // Frames: about 6 a second while no hand is in view (the tracker skips frames where nothing moves), as many as the
-// tracker manages (up to 25) while one is followed.
+// tracker manages while one is near.
 (function (root) {
   'use strict';
   const MAX_SIDE = 320;
+
+  // a 0 ms wait that a hidden page doesn't slow down: Chromium holds a hidden page's timers back to a few a second
+  // (the PC's camera window is never shown), while messages go at once
+  const soon = (() => {
+    if (typeof MessageChannel === 'undefined') return (f) => setTimeout(f, 0);
+    const ch = new MessageChannel(), q = [];
+    ch.port1.onmessage = () => { const f = q.shift(); if (f) f(); };
+    if (ch.port1.unref) ch.port1.unref();          // (Node, in tests: not a reason to keep running)
+    return (f) => { q.push(f); ch.port2.postMessage(0); };
+  })();
 
   class FlickHandCam {
     constructor(opts) {
@@ -80,7 +92,8 @@
       try {
         const md = navigator.mediaDevices;
         if (!md || !md.getUserMedia) throw Object.assign(new Error('no camera'), { name: 'NotFoundError' });
-        const video = { width: { ideal: 320 }, height: { ideal: 240 }, frameRate: { ideal: 15, max: 30 } };
+        const side = this.o.size || MAX_SIDE;
+        const video = { width: { ideal: side }, height: { ideal: Math.round(side * 3 / 4) }, frameRate: { ideal: 15, max: 30 } };
         if (this.o.facing) video.facingMode = this.o.facing;
         if (this.o.deviceId) video.deviceId = { exact: this.o.deviceId };
         stream = await md.getUserMedia({ video, audio: false });
@@ -94,6 +107,13 @@
       }
       if (!current()) { for (const t of stream.getTracks()) try { t.stop(); } catch (e) { /* ignore */ } return false; }
       this.stream = stream;
+      // a page that is never shown (the PC's camera window) draws a video element only a few times a second: there the
+      // frames come straight from the camera's track, each one once
+      if (this.o.reader && typeof MediaStreamTrackProcessor === 'function' && typeof OffscreenCanvas === 'function') {
+        this.state('on');
+        this._read(stream.getVideoTracks()[0], gen);
+        return true;
+      }
       const v = (this.video = document.createElement('video'));
       v.muted = true; v.playsInline = true; v.setAttribute('playsinline', ''); v.autoplay = true;
       v.srcObject = stream;
@@ -118,30 +138,63 @@
     _release() {
       if (this.stream) for (const t of this.stream.getTracks()) try { t.stop(); } catch (e) { /* ignore */ }
       this.stream = null;
+      if (this.rd) { try { this.rd.cancel().catch(() => {}); } catch (e) { /* ignore */ } this.rd = null; }
       if (this.video) { try { this.video.srcObject = null; } catch (e) { /* ignore */ } this.video = null; }
     }
 
+    // the next frame: at once while a hand is near (as fast as the tracker goes), else after a short rest; never while
+    // the tracker still has one (its result asks for the next)
     _tick() {
       clearTimeout(this.timer);
-      if (!this.on) return;
-      const now = performance.now();
-      const handNear = now - this.seen < 1200;
-      const wait = this.busy ? 8 : handNear ? 0 : 160;
-      this.timer = setTimeout(() => {
-        if (!this.on) return;
-        if (!this.busy) this._grab();
-        this._tick();
-      }, wait);
+      if (!this.on || this.busy || this.rd) return;    // (frames read from the track come by themselves)
+      const go = () => {
+        if (!this.on || this.busy) return;
+        if (!this._grab()) this.timer = setTimeout(() => this._tick(), 40);    // no picture yet
+      };
+      if (performance.now() - this.seen < 1200) soon(go);
+      else this.timer = setTimeout(go, 160);
+    }
+
+    // frames from the camera's track as they come (reader: true): one at a time to the tracker, every third one while
+    // no hand is near (about 5 a second)
+    async _read(track, gen) {
+      let rd;
+      try { rd = this.rd = new MediaStreamTrackProcessor({ track }).readable.getReader(); } catch (e) { return; }
+      let n = 0;
+      try {
+        for (;;) {
+          const { value: f, done } = await rd.read();
+          if (done) break;
+          if (!this.on || this.gen !== gen) { f.close(); break; }
+          const near = performance.now() - this.seen < 1200;
+          if (this.busy || (!near && n++ % 3 !== 0)) { f.close(); continue; }
+          const k = Math.min(1, (this.o.size || MAX_SIDE) / Math.max(f.displayWidth, f.displayHeight));
+          const w = Math.round(f.displayWidth * k), h = Math.round(f.displayHeight * k);
+          if (!this.oc || this.oc.width !== w || this.oc.height !== h) {
+            this.oc = new OffscreenCanvas(w, h);
+            this.ox = this.oc.getContext('2d', { willReadFrequently: true });
+            this.bufs = [];
+          }
+          this.ox.drawImage(f, 0, 0, w, h);
+          f.close();
+          this._send(this.ox.getImageData(0, 0, w, h), w, h);
+        }
+      } catch (e) { /* the camera stopped */ }
     }
 
     _grab() {
       const v = this.video;
-      if (!v || v.readyState < 2 || !v.videoWidth) return;
-      const k = Math.min(1, MAX_SIDE / Math.max(v.videoWidth, v.videoHeight));
+      if (!v || v.readyState < 2 || !v.videoWidth) return false;
+      const k = Math.min(1, (this.o.size || MAX_SIDE) / Math.max(v.videoWidth, v.videoHeight));
       const w = Math.round(v.videoWidth * k), h = Math.round(v.videoHeight * k);
       if (this.cv.width !== w || this.cv.height !== h) { this.cv.width = w; this.cv.height = h; this.bufs = []; }
       this.cx.drawImage(v, 0, 0, w, h);
-      const img = this.cx.getImageData(0, 0, w, h);
+      this._send(this.cx.getImageData(0, 0, w, h), w, h);
+      return true;
+    }
+
+    // one frame's pixels to the tracker
+    _send(img, w, h) {
       let buf = this.bufs.pop();
       if (!buf || buf.byteLength !== img.data.length) buf = new ArrayBuffer(img.data.length);
       new Uint8Array(buf).set(img.data);
@@ -150,21 +203,27 @@
       if (look) this.looked = now;
       this.busy = true;
       this.sent = now;
-      this.worker.postMessage({ t: 'frame', id: ++this.id, buf, w, h, look }, [buf]);
       this.w = w; this.h = h;
+      // a tracker that never answers (it shouldn't) doesn't stop the camera's frames for good
+      clearTimeout(this.busyT);
+      this.busyT = setTimeout(() => { this.busy = false; this._tick(); }, 3000);
+      this.worker.postMessage({ t: 'frame', id: ++this.id, buf, w, h, look }, [buf]);
     }
 
     _result(m) {
       if (m.t !== 'result') return;
+      clearTimeout(this.busyT);
       this.busy = false;
       if (m.buf) this.bufs.push(m.buf);
       if (!this.on) return;
-      if (m.skipped) return;
-      this.stats.frames++;
-      this.stats.ms = this.stats.ms * 0.9 + (m.ms || 0) * 0.1;
-      const now = performance.now();
-      if (m.hand) this.seen = now;
-      if (this.o.onResult) try { this.o.onResult({ hand: m.hand, g: m.g, w: this.w, h: this.h, t: now }); } catch (e) { /* ignore */ }
+      if (!m.skipped) {
+        this.stats.frames++;
+        this.stats.ms = this.stats.ms * 0.9 + (m.ms || 0) * 0.1;
+        const now = performance.now();
+        if (m.hand) this.seen = now;
+        if (this.o.onResult) try { this.o.onResult({ hand: m.hand, g: m.g, w: this.w, h: this.h, t: now }); } catch (e) { /* ignore */ }
+      }
+      if (!this.rd) this._tick();                   // (frames read from the track come by themselves)
     }
   }
 
