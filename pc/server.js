@@ -1463,7 +1463,9 @@ class FlickServer extends EventEmitter {
         this._remember(tid, att, 'aborted', A.resumable);
         this._dropAssembly(A, true);           // dropped quietly: the phone sends the file again (or gives up and says so)
         this.emit('log', 'upload ' + tid + ' refused: ' + why);
-        return answer(why === 'checksum' ? 422 : 500, { ok: false, error: why });
+        // 422 for any check that failed (a wrong checksum, a file that can't be read back whole): the phone starts over.
+        // (A 500 made it ask again, hear "aborted" and show the send as canceled on the PC.)
+        return answer(422, { ok: false, error: why });
       }
       A.finished = true;
       this.assemblies.delete(tid);
