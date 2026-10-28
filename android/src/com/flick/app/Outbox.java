@@ -108,6 +108,7 @@ final class Outbox {
         boolean committed, checked, retried;
         boolean again;                                // tried again by the user: the PC takes it even if it was dropped there
         boolean begun;                                // this attempt sent the PC data: ask how far it got before more
+        boolean retake;                               // paused and resumed before the pause took effect (see failed)
         String state = QUEUED, why, want, sig, refused;
         volatile String att;                          // written under this, read by the part threads
         int ways, restarts, fails;
@@ -347,7 +348,7 @@ final class Outbox {
         synchronized (j) {
             if (PAUSED.equals(j.state)) { j.state = QUEUED; j.why = null; j.fails = 0; j.refusals = 0; j.waitingSince = 0; }
             else if (WAITING.equals(j.state)) j.wakeAt = 0;
-            else if (RUNNING.equals(j.state) && PAUSED.equals(j.want)) j.want = null;
+            else if (RUNNING.equals(j.state) && PAUSED.equals(j.want)) { j.want = null; j.retake = true; }
             else return;
         }
         save(j);
@@ -467,6 +468,7 @@ final class Outbox {
                     if (!due || running >= MAX_RUNNING) continue;
                     j.state = RUNNING;
                     j.want = null;
+                    j.retake = false;
                     j.stop = new AtomicBoolean(false);
                     running++;
                     start.add(j);
@@ -532,6 +534,11 @@ final class Outbox {
             env.changed(j);
             return;                                                  // runJob's kick() starts it again
         }
+        // paused and resumed again before the pause took effect: this try was cut for the pause, and carries on at once
+        // (it used to wait as for a PC that can't be reached, showing "Waiting for" it meanwhile)
+        boolean retake;
+        synchronized (j) { retake = j.retake; j.retake = false; if (retake) j.state = QUEUED; }
+        if (retake) { save(j); env.changed(j); return; }             // runJob's kick() starts it again
         if (!(e instanceof IOException)) env.log("send " + j.tid + ": " + e);
         long delay;
         String late;                                                 // paused or canceled while this was failing
