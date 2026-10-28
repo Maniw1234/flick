@@ -297,6 +297,33 @@ final class Bridge {
         return Thumbs.base64(a, path, Thumbs.parse(mtime), Thumbs.parse(mid), (int) Thumbs.parse(mt));
     }
 
+    // thumbnails for a card being lifted, off the page's thread (one being made for the grid is waited for here)
+    private static final ExecutorService LIFT_THUMBS = Transfers.pool("flick-thumb-lift", 1);
+
+    /**
+     * thumbPath / thumb for up to 3 items (a JSON array of {path, mtime, mid, mt} or {id}) without holding up the page:
+     * answered as a "res" event {thumbs: [the base64 JPEG, or "" when there is none, for each]}.
+     */
+    @JavascriptInterface
+    public void thumbsAsync(final String req, final String items) {
+        LIFT_THUMBS.execute(new Runnable() {
+            @Override
+            public void run() {
+                JSONArray out = new JSONArray();
+                try {
+                    JSONArray arr = new JSONArray(items);
+                    for (int i = 0; i < arr.length() && i < 3; i++) {
+                        JSONObject x = arr.optJSONObject(i);
+                        if (x == null) out.put("");
+                        else if (x.has("path")) out.put(Thumbs.base64(a, x.optString("path"), x.optLong("mtime", 0), x.optLong("mid", 0), x.optInt("mt", 0)));
+                        else out.put(Library.get(a).thumbBase64(x.optString("id", "")));
+                    }
+                } catch (Throwable e) { Bg.warn("thumbnails", e); }
+                a.result(req, "{\"thumbs\":" + out + "}");
+            }
+        });
+    }
+
     @JavascriptInterface public void uploadPath(String tid, String path, String url) { a.transfers().uploadPath(tid, path, url); }
 
     @JavascriptInterface

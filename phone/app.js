@@ -2075,6 +2075,17 @@
     if (b && b !== true) { it.thumbData = 'data:image/jpeg;base64,' + b; return it.thumbData; }
     return null;
   }
+  // The thumbnails a lift shows on the PC (nativeThumb of the first item, sheetThumbs of the next two), fetched by the
+  // app without holding up the page: nativeThumb then finds them on the items. Resolves once they're in, or after ms.
+  function thumbsAhead(items, ms) {
+    const want = items.slice(0, 3).filter((x, i) => !x.dir && !x.thumbData && (i === 0 || x.kind === 'image' || x.kind === 'video'));
+    if (!want.length || !NV || typeof NV.thumbsAsync !== 'function') return Promise.resolve();
+    const list = want.map((x) => (x.path ? { path: x.path, mtime: x.mtime || 0, mid: x.mid || 0, mt: x.mt || 0 } : { id: String(x.id) }));
+    return nreqT(ms, 'thumbsAsync', JSON.stringify(list)).then((r) => {
+      const got = r && Array.isArray(r.thumbs) ? r.thumbs : [];
+      want.forEach((x, i) => { if (typeof got[i] === 'string' && got[i] && !x.thumbData) x.thumbData = 'data:image/jpeg;base64,' + got[i]; });
+    }, () => {});
+  }
 
   // the native side splits large files into this many parts when the PC understands it
   const parallelArg = () => ((st.pcProto || 1) >= 2 && settings.parallel && !(st.pc && st.pc.via === 'bluetooth') ? '&parallel=4' : '');
@@ -2131,12 +2142,26 @@
     if (D.how !== 'press') beginSend();
     D.raf = requestAnimationFrame(dragFrame);
   }
+  // The send starts (sendStart) and the PC hears of it ('lift', with the thumbnails) once the card is drawn under the
+  // finger and the app has read the thumbnails off the page's thread: both used to freeze the card as it was lifted.
+  // Letting go before then starts it at once, so 'lift' still goes before 'drop'.
   function beginSend() {
     if (!D || D.sending || !st.connected) return;
-    D.sending = true;
-    st.pending.set(D.tid, { item: D.it, items: D.items, phase: 'lifted' });
-    startSend(D.tid, D.items);
-    wsSend({ t: 'lift', tid: D.tid, file: fileInfo(D.items), thumb: nativeThumb(D.it), thumbs: sheetThumbs(D.items), w: D.w, h: D.h, pw: innerWidth, ph: innerHeight });
+    const d = D;
+    if (!d.starting) {
+      const go = d.starting = () => {
+        if (D !== d || d.phase !== 'drag' || d.sending) return;         // put back (or gone) meanwhile
+        if (!st.connected) { d.starting = null; return; }                // (asked again once connected)
+        d.sending = true;
+        st.pending.set(d.tid, { item: d.it, items: d.items, phase: 'lifted' });
+        startSend(d.tid, d.items);
+        wsSend({ t: 'lift', tid: d.tid, file: fileInfo(d.items), thumb: nativeThumb(d.it), thumbs: sheetThumbs(d.items), w: d.w, h: d.h, pw: innerWidth, ph: innerHeight });
+      };
+      const after = () => requestAnimationFrame(() => setTimeout(go, 0));    // after the next frame is on screen
+      thumbsAhead(d.items, 600).then(after, after);
+    }
+    // while the finger moves (startDrag, dragMove) it waits for that; letting go (dragEnd) needs it now
+    if (!(window.event && window.event.type === 'touchmove')) d.starting();
   }
   function unlift(items) { for (const x of items) { const e2 = cards.get(x.id); if (e2) e2.classList.remove('lifted'); } }
 
