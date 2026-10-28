@@ -123,6 +123,7 @@ function writeStore() {
         try { await fh.writeFile(JSON.stringify(store, null, 2)); await fh.sync(); } finally { await fh.close(); }
         if (app.isQuitting) return;                     // quitting: writeStoreNow writes it, and has the newest
         if (storeWhole) await fs.promises.copyFile(SETTINGS, SETTINGS + '.bak').catch(() => {});
+        if (app.isQuitting) return;                     // (it may have come meanwhile: this copy is older than its)
         storeWhole = false;
         // (briefly locked by an antivirus: copied instead)
         try { await fs.promises.rename(tmp, SETTINGS); }
