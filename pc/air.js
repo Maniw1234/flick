@@ -249,9 +249,11 @@ function attach(o) {
     if (ev.type === 'leave') {
       const sawFist = a.sawFist;
       a.sawFist = 0;                                     // a hand coming back is a new one until seen as a fist
-      // the fist it followed lost as it opened (the tracker loses an opening hand now and then): it opened there
+      // the fist it followed lost as it opened (the tracker loses an opening hand now and then): it opened there. Also
+      // one only seen before the phone let go: the phone's word can come between its last frame and the hand counting
+      // as gone
       const opening = ev.raw === 'open' || (ev.pose === 'fist' && ev.raw === 'other');
-      if (a.go && a.follow && opening && Array.isArray(ev.aim)) {
+      if (a.go && (a.follow || sawFist) && opening && Array.isArray(ev.aim)) {
         const q = toScreen(ev.aim);
         lastOpen = { x: q.x, y: q.y, at: now };
         land(a, q);
