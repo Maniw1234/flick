@@ -586,6 +586,19 @@
     ws.onerror = () => { /* onclose follows */ };
   }
 
+  // Flick back in front: a link that went quiet meanwhile (the PC asleep, another network) is found out at once. It
+  // showed "connected" until the pings noticed (up to half a minute), and a file flicked then went nowhere.
+  function checkLink() {
+    const gen = wsGen, at = Date.now();
+    if (!wsSend({ t: 'ping', ts: at })) return;
+    setTimeout(() => {
+      if (gen !== wsGen || !st.wsOpen || (st.lastRx || 0) >= at) return;
+      wsGen++;
+      try { st.ws.close(); } catch (x) { /* ignore */ }
+      linkLost();
+    }, 4000);
+  }
+
   function linkLost() {
     const was = st.connected;
     st.wsOpen = false; st.connected = false; st.connecting = false; st.pcProved = false;
@@ -2878,6 +2891,7 @@
         refreshStorage(false);
         if (Date.now() - UPD.ghAt > 3600e3) checkGitHub(false);
         if (st.pc && !st.wsOpen && !st.connecting) openLink(st.trusted);
+        else if (st.wsOpen) checkLink();
         break;
       case 'pause': nc('discover', false); break;
       default: break;
