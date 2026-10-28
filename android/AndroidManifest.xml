@@ -57,7 +57,7 @@
             android:exported="true"
             android:launchMode="singleTask"
             android:screenOrientation="portrait"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|uiMode|density|navigation|fontScale|locale|layoutDirection|colorMode|touchscreen|mcc|mnc"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|uiMode|density|navigation|fontScale|locale|layoutDirection|colorMode|touchscreen|mcc|mnc|fontWeightAdjustment|grammaticalGender"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -153,7 +153,7 @@
             android:excludeFromRecents="true"
             android:noHistory="true"
             android:taskAffinity=""
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|uiMode|density|navigation|fontScale|locale|layoutDirection" />
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|uiMode|density|navigation|fontScale|locale|layoutDirection|colorMode|touchscreen|mcc|mnc|fontWeightAdjustment|grammaticalGender" />
 
         <!-- home-screen widget -->
         <receiver
