@@ -78,6 +78,11 @@ class Updater {
 
   /** Checks GitHub once. Returns the new state: current | ready (restart to apply) | installer | unsigned | error. */
   async check() {
+    this.checking = (this.checking || 0) + 1;      // (an update being unpacked: markHealthy leaves the folders alone)
+    try { return await this._check(); } finally { this.checking--; }
+  }
+
+  async _check() {
     let rel;
     try {
       rel = JSON.parse((await this._get(API, 'application/vnd.github+json', 2 * 1024 * 1024)).toString('utf8'));
@@ -148,13 +153,19 @@ class Updater {
     try { const b = JSON.parse(require('fs').readFileSync(require('path').join(this.root, 'bad.json'), 'utf8')); return Array.isArray(b) ? b : []; } catch (e) { return []; }
   }
 
-  /** The running version started fine: stop counting failed starts, and tidy up old copies. */
+  /**
+   * The running version started fine: stop counting failed starts, and tidy up old copies. Not while an update is
+   * being unpacked (Flick started a second time meanwhile): that would delete the folder it is writing, and the update
+   * would be installed with files missing. The next start tidies up.
+   */
   markHealthy(boot) {
     try {
       const cur = core.readCurrent(this.root);
       if (boot && boot.dir && cur && cur.dir === boot.dir) {
         if (cur.tries) { cur.tries = 0; core.writeCurrent(this.root, cur); }
-        core.pruneUpdates(this.root, [cur.dir, 'bad.json']);
+        if (!this.checking) core.pruneUpdates(this.root, [cur.dir, 'bad.json']);
+      } else if (this.checking) {
+        // (whether this copy is the newest is known once the check that's under way is over)
       } else if (!cur || !core.newer(cur.version, this.version) || cur.tries >= 3) {
         // the installed copy is newest (or the update kept failing): downloaded copies aren't needed
         if (cur && cur.tries >= 3) {
