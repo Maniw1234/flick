@@ -116,6 +116,7 @@ final class Outbox {
         long total, ended, waitingSince, wakeAt;
         final Set<Integer> had = new HashSet<Integer>();
         AtomicBoolean stop = new AtomicBoolean(false);
+        final Object disk = new Object();             // its record is written by one thread at a time (see save)
         // progress (any thread)
         final AtomicLong sent = new AtomicLong();
         private double rate;
@@ -1071,14 +1072,18 @@ final class Outbox {
     // ------------------------------------------------------------ written down
     private void save(Job j) {
         if (dead) return;
-        try {
-            byte[] b = j.save().toString().getBytes("UTF-8");
-            File tmp = new File(dir, j.tid + ".json.tmp"), f = new File(dir, j.tid + ".json");
-            OutputStream o = new FileOutputStream(tmp);
-            try { o.write(b); } finally { o.close(); }
-            if (!tmp.renameTo(f)) { f.delete(); tmp.renameTo(f); }
-        } catch (Throwable e) {
-            env.log("outbox: can't save " + j.tid + ": " + e);
+        // one thread at a time: two at once (the send itself, and the page moving it to the PC's new address, say) wrote
+        // over each other's half-made file, and could leave a damaged record or none (the send lost on the next start)
+        synchronized (j.disk) {
+            try {
+                byte[] b = j.save().toString().getBytes("UTF-8");
+                File tmp = new File(dir, j.tid + ".json.tmp"), f = new File(dir, j.tid + ".json");
+                OutputStream o = new FileOutputStream(tmp);
+                try { o.write(b); } finally { o.close(); }
+                if (!tmp.renameTo(f)) { f.delete(); tmp.renameTo(f); }
+            } catch (Throwable e) {
+                env.log("outbox: can't save " + j.tid + ": " + e);
+            }
         }
     }
 
