@@ -100,11 +100,16 @@ function query(name, type) {
   return Buffer.concat([h, encodeName(name), t]);
 }
 
-// IPv4 addresses of this PC (no link-local 169.254.x.x), with their netmasks
-function lanIPv4() {
+// IPv4 addresses of this PC (no link-local 169.254.x.x), with their netmasks. Every packet on the network is checked
+// against them, so they're asked of the system at most every few seconds (fresh: now, for the network-change check).
+let addrs = null, addrsAt = 0;
+function lanIPv4(fresh) {
+  const now = Date.now();
+  if (addrs && !fresh && now - addrsAt < 3000) return addrs;
   const out = [];
   const ifs = os.networkInterfaces();
   for (const k of Object.keys(ifs)) for (const a of ifs[k] || []) if (a.family === 'IPv4' && !a.internal && !a.address.startsWith('169.254.')) out.push({ address: a.address, netmask: a.netmask || '255.255.255.0' });
+  addrs = out; addrsAt = now;
   return out;
 }
 const ip4 = (s) => s.split('.').reduce((n, x) => ((n << 8) | (+x & 255)) >>> 0, 0);
@@ -133,7 +138,7 @@ class MdnsService extends EventEmitter {
     this.svc = svc;
     this.log = log || (() => {});
     this.sock = null;
-    this.timers = [];
+    this.timers = new Set();    // (an announcement's timer leaves it once it has fired)
     this.joined = new Set();
   }
 
@@ -156,11 +161,15 @@ class MdnsService extends EventEmitter {
 
   /** The answer to one incoming packet (null when it isn't about us). Exposed for tests. */
   answer(pkt, src, legacy) {
+    // most of what's heard is other devices' answers and questions about other services: those are let go first
+    if (pkt.length < 12 || (pkt.readUInt16BE(2) & 0x8000)) return null;
     let q;
     try { q = decode(pkt); } catch (e) { return null; }
     if (q.response) return null;
-    const r = this.records(legacy ? 10 : null, addressesFor(src), legacy);
     const lc = (x) => String(x).toLowerCase();
+    const ours = [lc(this.svc.type), lc(this.fullName), lc(this.svc.host), '_services._dns-sd._udp.local'];
+    if (!q.questions.some((qu) => ours.includes(lc(qu.name)))) return null;
+    const r = this.records(legacy ? 10 : null, addressesFor(src), legacy);
     const ans = [], add = [];
     let unicast = false;
     for (const qu of q.questions) {
@@ -212,14 +221,14 @@ class MdnsService extends EventEmitter {
       this.announce();
     });
     // networks come and go (a hotspot, a cable): join new ones and tell them about us
-    this.timers.push(setInterval(() => { if (this.bound && this.join()) this.announce(); }, 15000));
-    this.timers.push(setInterval(() => { if (this.bound) this.announce(1); }, 60000));
+    this.timers.add(setInterval(() => { if (this.bound && this.join()) this.announce(); }, 15000));
+    this.timers.add(setInterval(() => { if (this.bound) this.announce(1); }, 60000));
   }
 
   join() {
     if (!this.sock) return false;
     let added = false;
-    const now = new Set(lanIPv4().map((a) => a.address));
+    const now = new Set(lanIPv4(true).map((a) => a.address));
     for (const ip of [...this.joined]) if (!now.has(ip)) this.joined.delete(ip);
     for (const ip of now) {
       if (this.joined.has(ip)) continue;
@@ -243,12 +252,15 @@ class MdnsService extends EventEmitter {
   announce(times) {
     const pkt = (ip) => { const r = this.records(null, [ip]); return response(0, [r.ptr, r.srv, r.txt, ...r.a]); };
     const n = times || 2;
-    for (let i = 0; i < n; i++) this.timers.push(setTimeout(() => this.send(pkt), i * 1000));
+    for (let i = 0; i < n; i++) {
+      const t = setTimeout(() => { this.timers.delete(t); this.send(pkt); }, i * 1000);
+      this.timers.add(t);
+    }
   }
 
   stop() {
     for (const t of this.timers) { clearInterval(t); clearTimeout(t); }
-    this.timers = [];
+    this.timers.clear();
     if (this.sock) {
       // goodbye: the same records with a TTL of 0
       try { const r = this.records(0); this.send(response(0, [r.ptr, r.srv, r.txt])); } catch (e) { /* ignore */ }
