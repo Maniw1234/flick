@@ -297,13 +297,15 @@ final class Parallel {
                         Watchdog.Guard w = null;
                         RandomAccessFile raf = null;
                         try {
-                            c = Wire.Call.open(l, "GET", target, Wire.NO_BODY, null, 60000, "Range: bytes=" + (off + done) + "-" + (off + len - 1) + "\r\n");
-                            w = Watchdog.guard(stop, c);
                             int[] code = new int[1];
                             long[] clen = new long[1];
                             String[] cr = new String[1];
-                            InputStream in = w.watch(c.respond(code, clen, cr));
+                            // over a kept connection when there is one (a new one when that one went silent); read to its
+                            // end, the range leaves its connection for the next request
+                            c = Wire.Call.fetch(l, target, "Range: bytes=" + (off + done) + "-" + (off + len - 1) + "\r\n", 60000, code, clen, cr);
+                            w = Watchdog.guard(stop, c);
                             if (code[0] != 206 || cr[0] == null || !cr[0].endsWith("/" + total)) throw new Strike("http " + code[0], null);
+                            InputStream in = w.watch(c.body(clen[0]));
                             raf = new RandomAccessFile(part, "rw");
                             raf.seek(off + done);
                             byte[] buf = new byte[512 * 1024];

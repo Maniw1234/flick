@@ -359,12 +359,11 @@ final class Transfers {
                     Object[] direct = Wire.direct(url);
                     if (direct != null) {
                         // straight to the PC (no hop through the page's local proxy), over a connection kept from the
-                        // request before when there is one
-                        wc = Wire.Call.open((Wire.Link) direct[0], "GET", (String) direct[1], Wire.NO_BODY, null, 60000);
-                        g = Watchdog.guard(null, wc);            // no abort for downloads; it still ends one that stalls
+                        // request before when there is one (a new one when that one went silent)
                         int[] code = new int[1];
                         long[] len = new long[1];
-                        wc.respond(code, len);
+                        wc = Wire.Call.fetch((Wire.Link) direct[0], (String) direct[1], null, 60000, code, len, null);
+                        g = Watchdog.guard(null, wc);            // no abort for downloads; it still ends one that stalls
                         if (code[0] != 200) throw new IOException("http " + code[0]);
                         total = len[0];
                         in = g.watch(wc.body(total));

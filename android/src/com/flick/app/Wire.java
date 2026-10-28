@@ -33,6 +33,7 @@ final class Wire {
     static volatile boolean KEEP = true;                // keep connections for the next request (tests can turn it off)
     private static final long IDLE_MS = 8000;           // a kept connection is used again only this long (the PC: 30 s)
     private static final int IDLE_MAX = 8;              // kept per PC (a large file's parts use up to 6 at once)
+    private static final int FIRST_MS = 4000;           // a kept connection's answer must begin this soon (see call, fetch)
     static final long CHUNKED = -1, NO_BODY = -2;
     private static final Charset UTF8 = Charset.forName("UTF-8");
     private static final byte[] CRLF = {'\r', '\n'};
@@ -308,8 +309,13 @@ final class Wire {
         /** The same; range[0] gets the Content-Range header, if there is one. */
         InputStream respond(int[] code, long[] len, String[] range) throws IOException {
             raw.flush();
+            // a kept connection the PC (or the phone's network) dropped meanwhile stays silent: a few seconds only (fetch()
+            // then asks again over a new one); the PC answers a GET at once
+            boolean quick = reused && !heard;
+            if (quick) k.s.setSoTimeout(Math.min(readMs, FIRST_MS));
             String status = line(in);
             if (status == null) throw new IOException("no answer");
+            if (quick) k.s.setSoTimeout(readMs);
             heard = true;
             code[0] = statusCode(status);
             len[0] = -1;
@@ -360,6 +366,26 @@ final class Wire {
         Socket socket() { return k.s; }
 
         /**
+         * A GET whose status and headers have been read (respond()), over a kept connection when there is one. A kept
+         * one that stays silent (the PC went away meanwhile, or the phone's network changed under it) is given up after
+         * a few seconds and the request goes once more over a new connection, instead of failing after the full read
+         * time. The body follows with body(len[0]); close() at the end.
+         */
+        static Call fetch(Link l, String target, String headers, int readMs, int[] code, long[] len, String[] range) throws IOException {
+            for (int attempt = 0; ; attempt++) {
+                Call c = open(l, "GET", target, NO_BODY, null, readMs, headers, attempt > 0);
+                try {
+                    c.respond(code, len, range);
+                    return c;
+                } catch (IOException e) {
+                    c.close();
+                    if (c.reused && !c.heard && attempt == 0) continue;
+                    throw e;
+                }
+            }
+        }
+
+        /**
          * Ends it at once, from any thread: the TCP connection under it is closed, which also ends a write that is
          * stuck on a PC that vanished (closing the TLS layer itself would wait for that write to finish first).
          */
@@ -383,7 +409,7 @@ final class Wire {
             Call c = Call.open(l, method, target, body == null ? NO_BODY : body.length, type, readMs, null, attempt > 0);
             // a kept connection to a PC that vanished meanwhile would stay silent until the read timeout: given a few
             // seconds only, then the request goes once more over a new one (which fails at once if the PC is gone)
-            if (c.reused) c.firstMs = Math.min(readMs, 4000);
+            if (c.reused) c.firstMs = Math.min(readMs, FIRST_MS);
             try {
                 if (body != null && body.length > 0) c.body().write(body);
                 return c.answer(1024 * 1024);
