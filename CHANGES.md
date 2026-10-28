@@ -44,6 +44,18 @@
   (seconds for a big video on a hard drive). On Android 10 and newer, the phone keeps Wi-Fi in its low-latency mode
   while files move. Files from the PC start downloading the moment the PC offers them (not when their card lands),
   and the PC offers a batch without waiting for each file's picture.
+- **Transfers hold up better.** A PC drive that fills up stops a send with "Not enough space" (it was sent again and
+  again), and a PC that keeps refusing a send ends it after a few tries instead of for ever. Thousands of files picked
+  one by one go through without freezing the PC; files offered to the phone in a big batch no longer run out of time
+  before the phone fetches them; a file from the PC carries on after a cut, also over one connection (Bluetooth). A
+  file whose check on the PC fails for a reason other than damage is sent again (it said "Canceled on PC"), and a
+  file is never announced twice. With the PC's Wi-Fi not connected to the internet and mobile data on, the phone still
+  reaches the PC over that Wi-Fi; transfers never go through a network's HTTP proxy; over Bluetooth a send goes on one
+  connection, so it isn't cut. "Skip files already on the PC" waits for a slow lookup instead of sending everything.
+  Received names can't hide their type with invisible characters, fit the drive on Mac and Linux, and avoid every
+  spelling of Windows' device names. Many small files go over several connections at once (in tests, 2,000 files to a
+  PC slow to close each one, as with antivirus software, took a third of the time); Pause then Resume carries on at
+  once; carrying on after a cut no longer reads again what the PC already has.
 - **Smoother on the phone.** Coming back to Flick no longer freezes while the clipboard is checked; a big folder opens
   without stalling, and a tab, folder or search only waits for the listing on screen; thumbnails are made newest
   first (after a fast scroll, the cards you can see come first) and their cache stays under 192 MB; a lifted card
