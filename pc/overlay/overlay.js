@@ -784,7 +784,9 @@
     const dt = Math.min(50, Math.max(1, t - last));
     last = t;
     clock = t;
-    R.setTime(t / 1000);
+    // the shaders' clock goes round every 1000 s: Flick runs for days, and a float that large loses the precision the
+    // noise and flicker need (after a day they'd turn to bands)
+    R.setTime((t / 1000) % 1000);
 
     // approach state from tracked cards
     let prox = 0, py = S.anchor * S.H, crossing = false, tc = null;

@@ -204,7 +204,8 @@ void main() {
     col = mix(vColor, vec3(1.0), disc * 0.85);
   } else if (vKind == 4) {             // thin ring
     float w = 0.035 + 0.05 * vLife;
-    a = exp(-pow((r - 0.82) / w, 2.0));
+    float k = (r - 0.82) / w;                 // (squared by hand: pow is undefined for a negative base)
+    a = exp(-k * k);
   }
   a *= vAlpha;
   o = vec4(clamp(col, 0.0, 1.0) * a, a);

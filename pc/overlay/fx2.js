@@ -20,6 +20,8 @@
   const LIB = `
 float hash11(float p) { p = fract(p * .1031); p *= p + 33.33; p *= p + p; return fract(p); }
 float sstep(float a, float b, float x) { return smoothstep(a, b, x); }
+// (a square, not pow(x, 2.0): pow is undefined for a negative x, and some Macs' graphics return 0 or NaN for it)
+float sq(float x) { return x * x; }
 float fbmN(vec2 p) { return fbm(p) / 0.9375; }
 vec3 blackbody(float t) {           // 0 → deep red, 0.5 → orange, 0.8 → yellow, 1 → white
   t = clamp(t, 0., 1.2);
@@ -58,10 +60,10 @@ void main() {
   }
   else if (sh == 2) {
     float n = fbmN(vL * 1.6 + vExtra * 7.0);
-    f = sstep(1.0, 0.25, r + (n - 0.5) * 0.55);
+    f = 1.0 - sstep(0.25, 1.0, r + (n - 0.5) * 0.55);
     o = vec4(vCol.rgb * f * vCol.a, f * vCol.a); return;
   }
-  else if (sh == 3) { float w = max(vExtra.x, 0.01); f = exp(-pow((r - 0.86) / w, 2.0)) * (1.0 - sstep(0.97, 1.0, r)); }
+  else if (sh == 3) { float w = max(vExtra.x, 0.01), k = (r - 0.86) / w; f = exp(-k * k) * (1.0 - sstep(0.97, 1.0, r)); }
   else if (sh == 4) {
     float ax = vL.x * vSize.x, ay = vL.y * vSize.y, rr = vSize.y;
     float d = length(vec2(max(abs(ax) - (vSize.x - rr), 0.0), ay));
@@ -224,7 +226,7 @@ void main() {
   if (uScorch.w > 0.001) {
     float r = length(p - uScorch.xy) / uScorch.z + (fbmN(p * 0.035) - 0.5) * 0.35;
     col *= 1.0 - 0.78 * (1.0 - sstep(0.3, 1.0, r)) * uScorch.w;
-    col += vec3(1.0, 0.36, 0.06) * exp(-pow((r - 0.72) / 0.13, 2.0)) * (0.55 + 0.9 * fbmN(p * 0.08 + 3.0)) * uScorchG;
+    col += vec3(1.0, 0.36, 0.06) * exp(-sq((r - 0.72) / 0.13)) * (0.55 + 0.9 * fbmN(p * 0.08 + 3.0)) * uScorchG;
   }
   col *= vig;
   if (inv > 0.5) col = vec3(col.b, col.r, col.g) * 1.35 + 0.04;
