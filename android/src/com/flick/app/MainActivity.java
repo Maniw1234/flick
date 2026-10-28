@@ -356,6 +356,9 @@ public class MainActivity extends Activity {
                 ArrayList<String> q;
                 synchronized (queue) { q = new ArrayList<String>(queue); queue.clear(); }
                 for (String s : q) evalScript(s);
+                // ringing since before this page was there (opened from the ringing notification, say): its event went
+                // to no page, and the page shows Stop only when told
+                if (Ringer.ringing()) evalScript(script("{\"t\":\"ring\",\"on\":true}"));
             }
         });
     }
