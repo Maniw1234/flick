@@ -667,7 +667,7 @@ final class Outbox {
             if (j.att == null || (j.sig != null && !j.sig.equals(sig))) { newAttempt(j); j.restarts = Math.max(0, j.restarts - 1); }
             j.sig = sig;
             j.total = total;
-            if (j.ways == 0) j.ways = !j.parallel || total < PARALLEL_MIN ? 1 : total < (256L << 20) ? 4 : 6;
+            if (j.ways == 0) j.ways = !split(j) || total < PARALLEL_MIN ? 1 : total < (256L << 20) ? 4 : 6;
             check = j.skipDup && !j.checked;
         }
         save(j);
@@ -742,6 +742,13 @@ final class Outbox {
         commit(j, l, auth, sha.toString(), total, stop);
         return DONE;
     }
+
+    /**
+     * Several connections at once (the user's "parallel" setting), except over Bluetooth: one link carries them all
+     * there, so they only take turns, each one slower than the stall limit allows on a weak link (and the page sends
+     * over Bluetooth on one connection too). Called under j's lock.
+     */
+    private static boolean split(Job j) { return j.parallel && !"bluetooth".equals(j.via); }
 
     /** This attempt is about to send the PC data: from now on a retry asks how far it got first. */
     private void markBegun(Job j) {
@@ -907,7 +914,7 @@ final class Outbox {
             if (j.att == null || (j.sig != null && !j.sig.equals(sig))) { newAttempt(j); j.restarts = Math.max(0, j.restarts - 1); }
             j.sig = sig;
             j.total = b.bytes;
-            if (j.ways == 0) j.ways = !j.parallel || b.files < 2 || b.bytes < PARALLEL_MIN ? 1 : Math.min(4, b.files);
+            if (j.ways == 0) j.ways = !split(j) || b.files < 2 || b.bytes < PARALLEL_MIN ? 1 : Math.min(4, b.files);
         }
         save(j);
         final List<Bundle> streams = b.split(j.ways);
