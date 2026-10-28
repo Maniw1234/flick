@@ -22,7 +22,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
-import java.net.URL;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
@@ -184,7 +183,7 @@ final class Transfers {
                         code = 200;
                         ok = true;
                     } else {
-                    c = (HttpURLConnection) new URL(withoutParallel(url)).openConnection();
+                    c = Parallel.open(withoutParallel(url));          // (never through a network's proxy: see Parallel.open)
                     g = Watchdog.guard(abort, c);
                     c.setConnectTimeout(5000);
                     c.setReadTimeout(60000);
@@ -271,7 +270,7 @@ final class Transfers {
                         code = 200;
                         ok = true;
                     } else {
-                    c = (HttpURLConnection) new URL(withoutParallel(url) + "&files=" + b.files + "&bytes=" + b.bytes).openConnection();
+                    c = Parallel.open(withoutParallel(url) + "&files=" + b.files + "&bytes=" + b.bytes);
                     g = Watchdog.guard(abort, c);
                     c.setConnectTimeout(5000);
                     c.setReadTimeout(120000);
@@ -368,7 +367,7 @@ final class Transfers {
                         total = len[0];
                         in = g.watch(wc.body(total));
                     } else {
-                        c = (HttpURLConnection) new URL(url).openConnection();
+                        c = Parallel.open(url);
                         g = Watchdog.guard(null, c);             // no abort for downloads; it still ends one that stalls
                         c.setConnectTimeout(5000);
                         c.setReadTimeout(60000);

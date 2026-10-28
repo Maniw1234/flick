@@ -51,6 +51,15 @@ final class Parallel {
 
     private Parallel() {}
 
+    /**
+     * A connection to the PC (its address, or a port on this phone that leads to it), never through an HTTP proxy the
+     * network sets: Android applies one to 127.0.0.1 too unless it's excluded, and the proxy would see the pairing
+     * token in the clear (and couldn't reach the port anyway).
+     */
+    static HttpURLConnection open(String url) throws IOException {
+        return (HttpURLConnection) new URL(url).openConnection(java.net.Proxy.NO_PROXY);
+    }
+
     /** partUrl: ".../api/part?tid=..&device=..&token=..&name=..[&verify=1]" (index, offset, parts, total and att are added). */
     static void upload(final File f, String partUrl, final int n, final AtomicBoolean abort, final Progress p) throws Exception {
         final long total = f.length();
@@ -133,7 +142,7 @@ final class Parallel {
         HttpURLConnection c = null;
         Watchdog.Guard g = null;
         try {
-            c = (HttpURLConnection) new URL(url).openConnection();
+            c = open(url);
             g = Watchdog.guard(abort, c);
             c.setConnectTimeout(5000);
             c.setReadTimeout((int) Math.min(30 * 60000L, 60000L + total / (25L * 1024 * 1024) * 1000L));
@@ -159,7 +168,7 @@ final class Parallel {
         Watchdog.Guard g = null;
         RandomAccessFile raf = null;
         try {
-            c = (HttpURLConnection) new URL(url).openConnection();
+            c = open(url);
             g = Watchdog.guard(abort, c);
             c.setConnectTimeout(5000);
             c.setReadTimeout(60000);
@@ -222,7 +231,7 @@ final class Parallel {
                         Watchdog.Guard w = null;
                         RandomAccessFile raf = null;
                         try {
-                            c = (HttpURLConnection) new URL(url).openConnection();
+                            c = open(url);
                             w = Watchdog.guard(stop, c);
                             c.setConnectTimeout(5000);
                             c.setReadTimeout(60000);
@@ -396,7 +405,7 @@ final class Parallel {
         HttpURLConnection c = null;
         Watchdog.Guard g = null;
         try {
-            c = (HttpURLConnection) new URL(url).openConnection();
+            c = open(url);
             g = Watchdog.guard(abort, c);
             c.setConnectTimeout(5000);
             c.setReadTimeout(120000);
