@@ -1639,8 +1639,18 @@ class FlickServer extends EventEmitter {
       const items = list.map((x) => ({ k: String((x && x.k) || '').slice(0, 64), name: String((x && x.name) || '').slice(0, 300), size: Math.floor(Number(x && x.size)) || 0 }))
         .filter((x) => x.k && x.size > 0);
       if (!this.haveFiles) return this._json(res, 200, { ok: true, have: {} });
-      try { this._json(res, 200, { ok: true, have: (await this.haveFiles(items)) || {} }); }
-      catch (e) { this._json(res, 200, { ok: true, have: {} }); }
+      // The lookup can take a while (a large re-send on a slow disk: each likely copy here is read). The answer starts at
+      // once and a space goes out every 2 s until it's ready (JSON may start with spaces): the phone neither gives up on
+      // its connection after a few silent seconds and asks again (the lookup ran twice), nor after 30 s (and sent
+      // everything the PC has).
+      this._cors(res);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.on('error', () => {});
+      const alive = setInterval(() => { if (!res.destroyed && !res.writableEnded) res.write(' '); }, 2000);
+      let have = {};
+      try { have = (await this.haveFiles(items)) || {}; } catch (e) { have = {}; }
+      clearInterval(alive);
+      if (!res.destroyed && !res.writableEnded) res.end(JSON.stringify({ ok: true, have }));
     });
   }
 
