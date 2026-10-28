@@ -202,12 +202,20 @@ final class Thumbs {
             try {
                 if (out.exists()) return out;
                 if (none.exists()) return null;
-                Bitmap b = make(c, src, mid, mt);
+                // Some thumbnails are made inside Flick's own process (a PDF's page by Android's PDF renderer, a photo
+                // MediaStore doesn't know), and a damaged file can crash that: Flick closed before "can't be made" was
+                // written, and closed again every time the file's folder showed. A mark stands while one is made; a
+                // file that took Flick down twice isn't tried again.
+                File trying = new File(dir, key + ".try");
+                if (trying.length() >= 2) { new FileOutputStream(none).close(); trying.delete(); return null; }
+                FileOutputStream mark = new FileOutputStream(trying, true);
+                try { mark.write(1); } finally { mark.close(); }
+                Bitmap b;
+                try { b = make(c, src, mid, mt); } finally { trying.delete(); }
                 if (b == null) { try { new FileOutputStream(none).close(); } catch (Throwable e) { /* ignore */ } return null; }
                 File tmp = new File(dir, key + ".tmp" + Thread.currentThread().getId());
                 FileOutputStream fo = new FileOutputStream(tmp);
-                b.compress(Bitmap.CompressFormat.JPEG, 82, fo);
-                fo.close();
+                try { b.compress(Bitmap.CompressFormat.JPEG, 82, fo); } finally { fo.close(); }
                 b.recycle();
                 if (!tmp.renameTo(out)) { tmp.delete(); }
                 return out.exists() ? out : null;
