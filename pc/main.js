@@ -314,12 +314,19 @@ function fx(type, data) {
 
 // Nothing may stay on screen without a reason: a drag the phone never finished, a transfer that stopped sending, or
 // an overlay that is up with nothing going on is cleared within a minute.
+// A thrown file whose upload hasn't started waits its turn on the phone (it sends a couple at a time): that isn't a
+// stall. It's forgotten quietly after hours; if it starts after that, the phone says it was sent and it comes in anew.
+const QUEUED_KEEP_MS = 6 * 3600 * 1000;
 function watchdog() {
   const now = Date.now();
   for (const t of [...transfers.values()]) {
     if (t.done) continue;
+    // the end-of-transfer check reads the whole file back: nothing arrives meanwhile, but it's alive
+    if (t.state === 'dropped' && server && server.uploadChecking(t.tid)) { t.seen = now; continue; }
     const quiet = now - (t.seen || t.t0);
-    if (t.state === 'lifted' && quiet > 60000) {
+    if (t.state === 'dropped' && t.upload === 'none') {
+      if (quiet > QUEUED_KEEP_MS) { log('transfer', t.tid, 'never started: forgotten'); discard(t); }
+    } else if (t.state === 'lifted' && quiet > 60000) {
       log('transfer', t.tid, 'lifted with no news for', Math.round(quiet / 1000) + 's: cancel');
       fx('cancel', { tid: t.tid });
       if (server) server.abortUpload(t.tid);
@@ -1493,9 +1500,15 @@ function wireServer() {
     if (isGone(tid)) { if (!again) { server.abortUpload(tid); return; } gone.delete(tid); }
     const fresh = !transfers.has(tid);
     const t = tState(tid);
+    // thrown a while ago, it waited its turn on the phone and its card has gone: it comes back now that it's moving
+    const waited = !fresh && t.state === 'dropped' && t.upload === 'none' && Date.now() - (t.seen || t.t0) > 20000;
     t.upload = 'uploading'; t.seen = Date.now();
     clearTimeout(t.failT);
     if (name && t.name === 'file') t.name = name;
+    if (waited) {
+      const f = flyInMsgs(tid, t.info || { tid, name: t.name });
+      fx('resumed', { tid, lift: f.lift, drop: f.drop });
+    }
     // one the user sent before this PC restarted, starting over now: its card flies in as if just sent
     if (committed && fresh) {
       t.state = 'dropped';
