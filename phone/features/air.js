@@ -56,13 +56,16 @@
   // ---- the hand. Modes: idle | hover (a hand over the phone) | carry (a fist holding files) | away (carrying, out of
   // view for a moment) | sent (they went; the hand is still in view) | catch (a fist that came in from outside: files
   // from the PC when it opens). pos, size: the hand in the camera's view (0..1); x, y: on the screen
-  const M = { mode: 'idle', wasOpen: false, x: 0, y: 0, pos: [0.5, 0.5], size: 0, grabPos: null, grabSize: 0, tid: null, items: null, video: null,
-    catchT: 0, enterT: 0, sentAt: 0, pcHeldAt: 0, askedAt: 0, goT: 0, hideT: 0, inT: 0, touch: 0, paint: null, painted: null, hint: 0, openN: 0 };
+  // wasOpen: the hand has been clearly open since it came into view (openRun: its frames in a row that were open)
+  const M = { mode: 'idle', wasOpen: false, openRun: 0, back: false, x: 0, y: 0, pos: [0.5, 0.5], size: 0, grabPos: null, grabSize: 0, tid: null, items: null,
+    video: null, catchT: 0, enterT: 0, sentAt: 0, pcHeldAt: 0, askedAt: 0, goT: 0, hideT: 0, inT: 0, touch: 0, paint: null, painted: null, hint: 0 };
   const pcHolds = () => !!M.pcHeldAt && Date.now() - M.pcHeldAt < 20000;   // the PC said a fist holds files for here
   const AWAY_MS = 600;         // carrying, the hand lost in the middle of the view: the files go after this (the
                                // tracker looks for it in every frame meanwhile: a fist held still is found again)
   const CATCH_MS = 200;        // a fist that came in must be held over the phone this long before it opens to catch
   const STICK = 12;            // px: the file a hand aims at stays lit until the aim is this far over another
+  const OPEN_N = 3;            // frames in a row a hand must look open to count as open (the first frame of a hand
+                               // coming into view can look open when it isn't: a fist bringing files from the PC)
 
   // the file at the aim point (x, y on the screen), keeping the one lit until the aim is clearly over another, so the
   // light doesn't flicker between neighbours at a border
@@ -84,16 +87,19 @@
   }
 
   function enter(e) {
+    M.openRun = 0;                                        // (its frames are counted by move, this one too)
     if (M.mode === 'away') {                              // back before the files went
       clearTimeout(M.goT);
       held.classList.remove('gone');
       M.mode = 'carry';
-      // back open: it let go out of view, once its next frames say open too (a first frame can be wrong)
-      M.openN = e.pose === 'open' ? 1 : 0;
+      // back open: it let go out of view, once it's clearly open (a first frame can be wrong)
+      M.back = e.pose === 'open';
       return;
     }
     if (M.mode === 'carry') return;
-    M.wasOpen = e.pose === 'open';
+    // open once it's clearly so (move): a hand that only looks open in its first frame and then a fist is one coming in
+    // closed, bringing files from the PC, not one grabbing here
+    M.wasOpen = false;
     M.mode = e.pose === 'fist' ? 'catch' : 'hover';
     M.catchT = M.enterT = Date.now();
   }
@@ -123,6 +129,8 @@
   }
 
   function move(e) {
+    M.openRun = e.pose === 'open' && (e.raw || e.pose) === 'open' ? M.openRun + 1 : 0;
+    if (M.openRun >= OPEN_N) M.wasOpen = true;
     // files thrown with the hand still in view: a moment later it can hover and grab again (no need to leave first)
     if (M.mode === 'sent' && Date.now() - M.sentAt > 450 && e.pose !== 'fist') { M.mode = 'hover'; M.wasOpen = e.pose === 'open'; }
     const [x, y] = toScreen(e.pos);
@@ -135,7 +143,7 @@
     if (M.mode === 'carry') {
       place(held, x, y);
       // came back into view open: let go there once it's clearly open
-      if (M.openN) { if (e.pose !== 'open' || e.raw !== 'open') M.openN = 0; else if (++M.openN >= 3) { M.openN = 0; released(e.aim || e.pos); } }
+      if (M.back) { if (!M.openRun) M.back = false; else if (M.openRun >= OPEN_N) { M.back = false; released(e.aim || e.pos); } }
       return;
     }
     if (M.mode !== 'hover') return;
@@ -228,6 +236,8 @@
     spot.hidden = true;
     setHover(null);
     M.paint = null;
+    M.openRun = 0;
+    M.back = false;
     if (M.mode === 'carry') {
       // lost as it opened (the tracker loses an opening hand now and then): it opened there
       if (e.pose === 'fist' && e.raw === 'open') { released(e.aim || e.pos); M.mode = 'idle'; M.wasOpen = false; return; }
