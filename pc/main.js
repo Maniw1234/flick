@@ -829,6 +829,7 @@ async function onQsDone(m) {
 function onQsFailed(m) {
   log('quick share failed', m.why);
   if (m.why === 'no space') panelSend('panel:note', { text: 'Not enough free space on this PC to receive that.' });
+  else if (/^disk/.test(m.why)) panelSend('panel:note', { text: 'Couldn’t receive that: this PC couldn’t write the files.' });
   qsOffers.delete(m.id);
   if (qsAsking && qsAsking.id === m.id) { qsAsking = null; if (panel) { panel.setAlwaysOnTop(false); panelSend('panel:qs-done', { id: m.id }); } }
   const tid = qsTransfers.get(m.id);
