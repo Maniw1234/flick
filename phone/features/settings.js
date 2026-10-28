@@ -47,7 +47,11 @@
     rows.push({ label: 'Show notifications on your PC', sub: 'Your phone’s notifications pop up on your PC', on: notify,
       set: (v) => { A.pref.set('notifyOn', v ? '1' : '0'); set('notify', v ? '1' : '0'); } });
     if (notify && f.notifyAccess === false) {
-      rows.push({ hint: 'Flick needs notification access', sub: 'Turn on Flick in the list Android shows', action: 'Allow', run: () => set('notify', '1') });
+      // Android 13 and newer greys out notification access for an app installed from a downloaded APK ("Restricted
+      // setting") until it is allowed in the app's own settings: nothing said how
+      const restricted = (+f.sdk || +A.INFO.sdk || 0) >= 33
+        ? '. If Android says it’s restricted: Settings\u00a0› Apps\u00a0› Flick\u00a0› ⋮\u00a0› Allow restricted settings, then try again' : '';   // (no line starts with ›)
+      rows.push({ hint: 'Flick needs notification access', sub: 'Turn on Flick in the list Android shows' + restricted, action: 'Allow', run: () => set('notify', '1') });
     }
     rows.push({ label: 'Auto-send to your PC', sub: 'New screenshots, or new photos and videos from the camera, go to your PC by themselves',
       seg: [['off', 'Off'], ['screenshots', 'Screenshots'], ['photos', 'Photos']], value: auto, set: (v) => set('autoSend', v) });
