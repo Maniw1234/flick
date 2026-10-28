@@ -1455,27 +1455,35 @@ class FlickServer extends EventEmitter {
     if (!A.complete || !A.done.every(Boolean) || A.reqs.size) return this._json(res, 409, { ok: false, error: 'incomplete' });
     if (sums && (!A.resumable || sums.length !== A.parts)) return this._json(res, 400, { ok: false, error: 'bad commit' });
     if (A.check && A.want !== want) return this._json(res, 409, { ok: false, error: 'checking' });
-    if (!A.check) { A.want = want; A.check = sums ? this._checkParts(A, sums) : this._checkAssembly(A, want); }
-    A.check.then(async (why) => {
-      const answer = (code, o) => { if (!res.headersSent && !res.destroyed) { try { this._json(res, code, o); } catch (e) { /* ignore */ } } };
-      if (A.dropped) return answer(410, this._aborted(A.why));
-      if (why) {
-        this._remember(tid, att, 'aborted', A.resumable);
-        this._dropAssembly(A, true);           // dropped quietly: the phone sends the file again (or gives up and says so)
-        this.emit('log', 'upload ' + tid + ' refused: ' + why);
-        // 422 for any check that failed (a wrong checksum, a file that can't be read back whole): the phone starts over.
-        // (A 500 made it ask again, hear "aborted" and show the send as canceled on the PC.)
-        return answer(422, { ok: false, error: why });
-      }
-      A.finished = true;
-      this.assemblies.delete(tid);
-      // (done only once the file is safely closed; otherwise the phone sends it again)
-      try { await (await A.fdP).close(); } catch (e) { fs.unlink(A.path, () => {}); this.emit('upload-failed', { tid, why: 'disk' }); return answer(500, { ok: false, error: 'disk' }); }
-      this._remember(tid, att, 'done', A.resumable);
-      this.emit('upload-progress', { tid, received: A.total, total: A.total });
-      this.emit('upload-done', { tid, tmpPath: A.path, name: A.name, size: A.total, ms: Date.now() - A.t0, parts: A.parts });
-      answer(200, { ok: true, done: true });
-    });
+    // the outcome is worked out once, however many times the phone asks: a commit sent again while the check runs (the
+    // first one's connection broke during a long read-back) used to finish the transfer a second time
+    if (!A.check) {
+      A.want = want;
+      A.check = (sums ? this._checkParts(A, sums) : this._checkAssembly(A, want)).then((why) => this._checked(A, why)).catch(() => [500, { ok: false, error: 'check' }]);
+    }
+    A.check.then(([code, o]) => { if (!res.headersSent && !res.destroyed) { try { this._json(res, code, o); } catch (e) { /* ignore */ } } });
+  }
+
+  // what a commit answers once its check is over ([status, body]); a passed check makes the transfer done
+  async _checked(A, why) {
+    const { tid, att } = A;
+    if (A.dropped) return [410, this._aborted(A.why)];
+    if (why) {
+      this._remember(tid, att, 'aborted', A.resumable);
+      this._dropAssembly(A, true);           // dropped quietly: the phone sends the file again (or gives up and says so)
+      this.emit('log', 'upload ' + tid + ' refused: ' + why);
+      // 422 for any check that failed (a wrong checksum, a file that can't be read back whole): the phone starts over.
+      // (A 500 made it ask again, hear "aborted" and show the send as canceled on the PC.)
+      return [422, { ok: false, error: why }];
+    }
+    A.finished = true;
+    this.assemblies.delete(tid);
+    // (done only once the file is safely closed; otherwise the phone sends it again)
+    try { await (await A.fdP).close(); } catch (e) { fs.unlink(A.path, () => {}); this.emit('upload-failed', { tid, why: 'disk' }); return [500, { ok: false, error: 'disk' }]; }
+    this._remember(tid, att, 'done', A.resumable);
+    this.emit('upload-progress', { tid, received: A.total, total: A.total });
+    this.emit('upload-done', { tid, tmpPath: A.path, name: A.name, size: A.total, ms: Date.now() - A.t0, parts: A.parts });
+    return [200, { ok: true, done: true }];
   }
 
   // null when the assembled file's SHA-256 is want, otherwise why not
