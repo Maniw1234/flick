@@ -814,7 +814,9 @@ class FlickServer extends EventEmitter {
     }
     if (req.method === 'GET' && u.pathname.startsWith('/api/file/')) {
       if (!this._trustedReq(req, q.get('device'), q.get('token'))) return this._json(res, 403, { ok: false, error: 'not paired' });
-      return this._handleDownload(req, res, decodeURIComponent(u.pathname.slice('/api/file/'.length)));
+      let fid;
+      try { fid = decodeURIComponent(u.pathname.slice('/api/file/'.length)); } catch (e) { return this._json(res, 404, { ok: false }); }   // (not one)
+      return this._handleDownload(req, res, fid);
     }
     if (req.method === 'GET' && u.pathname === '/api/app.apk') {
       if (!this._trustedReq(req, q.get('device'), q.get('token'))) return this._json(res, 403, { ok: false, error: 'not paired' });
