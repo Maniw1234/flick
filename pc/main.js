@@ -1272,25 +1272,39 @@ function markOfWeb(dest) {
   fs.writeFile(dest + ':Zone.Identifier', '[ZoneTransfer]\r\nZoneId=3\r\n', () => {});
 }
 
+// The files of a received folder are marked two at a time: thousands of marks started at once would take all of
+// Node's few disk threads, and transfers still writing would wait behind them.
+const markQ = [];
+let marking = 0;
+function pumpMarks() {
+  while (marking < 2 && markQ.length) {
+    marking++;
+    const f = markQ.shift();
+    fs.writeFile(f + ':Zone.Identifier', '[ZoneTransfer]\r\nZoneId=3\r\n', () => { marking--; pumpMarks(); });
+  }
+}
+
 // mark a received file, or every file inside a received folder (bounded, best-effort)
 function markTree(dest) {
   if (IS_MAC) { plat.quarantine(dest, true); return; }
   if (!IS_WIN) return;
-  fs.stat(dest, (e, st) => {
-    if (e) return;
+  (async () => {
+    const st = await fs.promises.stat(dest);
     if (st.isFile()) return markOfWeb(dest);
     if (!st.isDirectory()) return;
     let budget = 5000;
-    const walk = (d) => fs.readdir(d, { withFileTypes: true }, (er, ents) => {
-      if (er) return;
+    const walk = async (d) => {
+      let ents;
+      try { ents = await fs.promises.readdir(d, { withFileTypes: true }); } catch (e) { return; }
       for (const ent of ents) {
         if (budget-- <= 0) return;
         const full = path.join(d, ent.name);
-        if (ent.isDirectory()) walk(full); else if (ent.isFile()) markOfWeb(full);
+        if (ent.isDirectory()) await walk(full);
+        else if (ent.isFile()) { markQ.push(full); pumpMarks(); }
       }
-    });
-    walk(dest);
-  });
+    };
+    await walk(dest);
+  })().catch(() => {});
 }
 
 // "open after it arrives": fine for a document or photo, but never launch a program/script/shortcut — reveal it instead
