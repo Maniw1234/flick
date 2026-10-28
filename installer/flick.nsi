@@ -115,6 +115,8 @@ Section "Uninstall"
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Flick"
   DeleteRegKey HKCU "Software\Classes\*\shell\Flick"
   DeleteRegKey HKCU "Software\Classes\Directory\shell\Flick"
+  ; the app id Flick registers for its notifications (pc/main.js registerAppId)
+  DeleteRegKey HKCU "Software\Classes\AppUserModelId\com.flick.pc"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\Flick"
   RMDir /r "$INSTDIR"
 SectionEnd

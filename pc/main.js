@@ -836,6 +836,20 @@ function onQsFailed(m) {
   if (tid && transfers.get(tid)) { fx('failed', { tid }); hist({ dir: 'in', name: transfers.get(tid).name, size: 0, ok: false, how: 'quickshare' }); transfers.delete(tid); }
 }
 
+// Windows shows a desktop app's notifications only under an app id it knows: one on a Start menu shortcut, or one
+// registered for the user. Flick's installer makes a plain shortcut, so its id (setAppUserModelId above) is registered
+// here, with the name and icon its notifications show.
+function registerAppId() {
+  if (!IS_WIN || !app.isPackaged) return;
+  const key = 'HKCU\\Software\\Classes\\AppUserModelId\\com.flick.pc';
+  const icon = path.join(path.dirname(process.execPath), 'Flick.ico');
+  const add = (name, value, then) => execFile('reg', ['add', key, '/v', name, '/t', 'REG_SZ', '/d', value, '/f'], { windowsHide: true, timeout: 15000 }, (e) => {
+    if (e) log('notifications: app id not registered', e.message);
+    else if (then) then();
+  });
+  add('DisplayName', 'Flick', () => fs.access(icon, (e) => { if (!e) add('IconUri', icon); }));
+}
+
 // Explorer's right-click "Send to" menu gets "Flick (phone)" (a shortcut that starts Flick with --send <files>)
 function sendToShortcut() { return path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'SendTo', 'Flick (phone).lnk'); }
 function applySendTo() {
@@ -2106,6 +2120,7 @@ app.whenReady().then(async () => {
   screen.on('display-removed', () => { placeOverlay(); ensureCatcher(); });
 
   applySendTo();
+  registerAppId();
   applyBluetooth();
   applyQuickShare();
   // macOS: the menu bar's Edit menu is what makes copy and paste work in the panel's fields (Electron's default menu
