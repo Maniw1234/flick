@@ -20,11 +20,23 @@ const MAX_MANIFEST = 8 * 1024 * 1024;
 const MAX_ENTRIES = 200000;
 const MAX_DEPTH = 64;
 
+// A name's length: at most 150 characters, and where names are limited in bytes (Linux, macOS: 255) 230 bytes, with room
+// for a " (2)" (140 Hebrew letters are 280 bytes: the whole folder failed there)
+const tooLong = (s) => s.length > 150 || (process.platform !== 'win32' && Buffer.byteLength(s) > 230);
+
 function safeSegment(n) {
-  let s = String(n || '').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/, '').trim();
+  // (and the invisible direction marks: "photo<right-to-left>gnp.exe" shows in Explorer as "photoexe.png")
+  let s = String(n || '').replace(/[<>:"/\\|?*\u0000-\u001f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '_').replace(/[. ]+$/, '').trim();
   if (!s || s === '.' || s === '..') s = '_';
-  if (/^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i.test(s)) s = '_' + s;
-  if (s.length > 150) { const e = path.extname(s).slice(0, 20); s = s.slice(0, 150 - e.length) + e; }
+  // Windows device names, with or without an extension (as pc/main.js and pc/sync.js have them)
+  if (/^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$)( *\..*)?$/i.test(s)) s = '_' + s;
+  if (tooLong(s)) {
+    // shortened by whole characters (never half of one written in two), keeping the extension
+    const e = Array.from(path.extname(s)).slice(0, 20).join('');
+    const base = Array.from(s.slice(0, s.length - path.extname(s).length));
+    while (base.length && tooLong(base.join('') + e)) base.pop();
+    s = (base.join('') + e).replace(/[. ]+$/, '') || '_';
+  }
   return s;
 }
 
