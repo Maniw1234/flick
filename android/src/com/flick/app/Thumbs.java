@@ -53,7 +53,7 @@ final class Thumbs {
     static final class Newest extends LinkedBlockingDeque<Runnable> {
         @Override public boolean offer(Runnable r) { return offerFirst(r); }
     }
-    private static final ThreadPoolExecutor MAKERS = new ThreadPoolExecutor(3, 3, 30, TimeUnit.SECONDS, new Newest(), new ThreadFactory() {
+    private static final ThreadPoolExecutor MAKERS = new ThreadPoolExecutor(4, 4, 30, TimeUnit.SECONDS, new Newest(), new ThreadFactory() {
         @Override public Thread newThread(Runnable r) { Thread t = new Thread(r, "flick-thumb"); t.setDaemon(true); return t; }
     });
     static { MAKERS.allowCoreThreadTimeOut(true); }
@@ -114,15 +114,15 @@ final class Thumbs {
                 private InputStream in;
                 private boolean opened;
 
-                // waits for the thumbnail (at most 30 s, then there is none)
+                // waits for the thumbnail (at most 10 s, then there is none: the reader's thread is the WebView's)
                 private InputStream in() throws IOException {
                     if (opened) return in;
                     opened = true;
                     File f;
                     synchronized (Job.this) {
-                        long end = SystemClock.uptimeMillis() + 30000;
+                        long end = SystemClock.uptimeMillis() + 10000;
                         try {
-                            for (long left = 30000; !done && !gone && left > 0; left = end - SystemClock.uptimeMillis()) Job.this.wait(left);
+                            for (long left = 10000; !done && !gone && left > 0; left = end - SystemClock.uptimeMillis()) Job.this.wait(left);
                         } catch (InterruptedException e) { throw new InterruptedIOException(); }
                         f = done ? out : null;
                     }
