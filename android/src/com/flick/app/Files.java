@@ -60,9 +60,24 @@ final class Files {
     static boolean allowed(File f) {
         try {
             String p = f.getCanonicalPath();
-            String r = root().getCanonicalPath();
+            String r = rootReal();
             return p.equals(r) || p.startsWith(r + "/") || p.startsWith("/storage/");
         } catch (Throwable e) { return false; }
+    }
+
+    private static volatile String[] rootReal;          // {root(), its real path}
+
+    /**
+     * root()'s real path (after links), worked out once: allowed() runs for every file of a send, thumbnail and
+     * listing, and each real path is a trip to the file system per folder in it.
+     */
+    static String rootReal() throws IOException {
+        File r = root();
+        String[] k = rootReal;
+        if (k != null && k[0].equals(r.getPath())) return k[1];
+        String real = r.getCanonicalPath();
+        rootReal = new String[]{r.getPath(), real};
+        return real;
     }
 
     // ------------------------------------------------------------ JSON helpers
@@ -168,7 +183,7 @@ final class Files {
                 stop(cancel);
                 for (File f : files) items.put(fileJson(f, media.get(f.getPath()), mt.get(f)));
             }
-            boolean isRoot = d.getCanonicalPath().equals(root().getCanonicalPath());
+            boolean isRoot = d.getCanonicalPath().equals(rootReal());
             out.put("path", d.getPath());
             out.put("name", isRoot ? "Phone storage" : d.getName());
             out.put("parent", isRoot || d.getParentFile() == null || !allowed(d.getParentFile()) ? JSONObject.NULL : d.getParent());
