@@ -3357,7 +3357,18 @@
   }
 
   // ------------------------------------------------------------------ boot
-  window.addEventListener('resize', () => { measureHeader(); layout(false); wsSend({ t: 'screen', w: innerWidth, h: innerHeight, dpr: devicePixelRatio }); });
+  // A new width lays the grid out anew (turned sideways, unfolded, split screen): the file at the top stays at the top
+  // (the same scroll position was other files, far from it). A new height only (the keyboard) moves nothing.
+  let gridW = innerWidth;
+  window.addEventListener('resize', () => {
+    measureHeader();
+    const top = scroller.scrollTop;
+    const keep = innerWidth !== gridW && top > 0 ? geo.find((it) => it._y + it._th > top) : null;
+    gridW = innerWidth;
+    layout(false);
+    if (keep && geo.includes(keep)) { scroller.scrollTop = keep._y; renderWindow(false); }
+    wsSend({ t: 'screen', w: innerWidth, h: innerHeight, dpr: devicePixelRatio });
+  });
   measureHeader();
   openCat(STG.granted ? (pref.get('lastView', 'recent') || 'recent') : 'recent');
   setPcName();
