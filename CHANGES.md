@@ -14,7 +14,6 @@
 - **Send with a keyboard shortcut.** Select files in File Explorer, on the desktop or in Finder and press Ctrl+Alt+F
   (Command-Option-F on a Mac) to send them to the phone. On Linux, copy them first (Ctrl+C). It can be turned off in
   Flick's window (Files).
-- **Air grab, offered once.** After your first few flicks, the phone offers to turn Air grab on.
 - **Air grab: move files with your hand.** Turn it on in the phone's Settings (Android asks for the camera once). Hold
   your open hand over Flick and the file under it lights up; pinch to select it, and keep pinching across more files;
   make a fist to grab the file open full screen, the selection or the lit-up file, then open your hand in front of the
@@ -49,6 +48,7 @@
   opens. With two phones, the other one hears when files were caught. On a Mac that doesn't let Flick ask Finder what's
   selected, the phone says where to allow it. On Windows, Flick no longer restarts its selection watching each time
   the phone shows another app.
+- **Air grab, offered once.** After your first few flicks, the phone offers to turn Air grab on.
 - **Faster transfers.** The phone keeps its encrypted connections to the PC open between requests, so a send no longer
   pays for a new handshake on every file and check (in tests, a single photo arrived in about 40% less time), and a
   fresh send skips a round trip it didn't need. The PC checks for files it already has, and for free space, much
@@ -84,7 +84,7 @@
 - Fixed: a send canceled while it was waiting for the PC could still go through, and a pause tapped while a try was
   failing could be lost.
 - Fixed: a send that was only waiting for the PC (or paused) kept the phone from switching PC, moving to a USB cable
-  or turning Bluetooth off; the PC's edge glow could stay on after a Teleport drop or a lost link; a send whose
+  or turning Bluetooth off; the PC's edge glow could stay on after a lost link; a send whose
   "saved" note was lost with the link stayed in the list; a drag in progress was lost when the link moved; a photo
   swiped to quickly in the preview stayed blurry; a file thrown from the phone that was waiting its turn could be
   failed on the PC; effects that came while the PC took its desktop picture could be missed.

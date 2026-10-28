@@ -1939,11 +1939,11 @@
     if (typeof m.y === 'number') EG.y = clamp(m.y, 0, innerHeight);
     egKick();
   }
-  // the glow goes out: a card that left without flying off (Teleport), or the PC's hover on a link that's gone (its
-  // "off" can't come now); a lit target kept the glow on and its frame loop running for good
+  // the glow goes out when the link is lost: the PC's hover can't send its "off" over a link that's gone, and a lit
+  // target would keep the glow and its frame loop on for good
   function edgeOff() { if (EG.target || EG.hover) { EG.hover = false; EG.target = 0; egKick(); } }
 
-  // ------------------------------------------------------------------ release effects (canvas): vapor, ripples, particles
+  // ------------------------------------------------------------------ release effects (canvas): sparks, lightning, light, colour tears
   const fxc = $('fx');
   const fctx = fxc.getContext('2d');
   const fxParts = [];
@@ -2058,7 +2058,7 @@
       d.jx = Math.floor(t / 34) % 2 ? (Math.random() - 0.5) * 14 : 0;
     }
   }
-  // the moment a card leaves the phone toward the PC (true: the card is gone already, nothing flies off)
+  // the moment a card leaves the phone toward the PC
   function releaseFx(rect, look) {
     const ex = st.side === 'right' ? 0 : innerWidth;
     const y = clamp(rect.y + rect.h / 2, 0, innerHeight);
@@ -2068,7 +2068,6 @@
     else if (look === 'warp') pullIn(ex, y);
     else if (look === 'glitch') tear(ex, y);
     egFlash(y);
-    return false;
   }
 
   // ------------------------------------------------------------------ drag engine (phone -> PC)
@@ -2375,7 +2374,7 @@
       const p = st.pending.get(D.tid);
       if (p) { p.phase = 'sent'; if (p.job) nc('sendCommit', D.tid); }
       haptic('confirm');
-      const gone = releaseFx({ x: D.x + D.w * (1 - D.s) / 2, y: D.y + D.h * (1 - D.s) / 2, w: D.w * D.s, h: D.h * D.s }, D.look, D);
+      releaseFx({ x: D.x + D.w * (1 - D.s) / 2, y: D.y + D.h * (1 - D.s) / 2, w: D.w * D.s, h: D.h * D.s }, D.look);
       // files that stay on the phone keep their place in the grid (an empty slot until the PC has them)
       let hid = false;
       for (const x of D.items) {
@@ -2384,7 +2383,6 @@
       }
       if (hid) setTimeout(() => layout(true), 120);
       if (SEL.on) setSelecting(false);
-      if (gone) { D.f.remove(); D = null; edgeOff(); }
     } else {
       if (st.pending.has(D.tid)) {
         wsSend({ t: 'cancel', tid: D.tid });
@@ -2458,7 +2456,7 @@
       }
       requestAnimationFrame(fly);
     })(t0);
-    setTimeout(() => releaseFx({ x: r.left, y: r.top, w: r.width, h: r.height }, look, null), wait * 1000);
+    setTimeout(() => releaseFx({ x: r.left, y: r.top, w: r.width, h: r.height }, look), wait * 1000);
   }
 
   // ------------------------------------------------------------------ Air grab (features/air.js)
