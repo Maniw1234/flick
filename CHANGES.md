@@ -27,6 +27,15 @@
   the PC show in your hand at once (their picture follows). Selecting files on the PC for other reasons keeps its
   camera on 20 seconds at most in any 2 minutes, so the camera is there when you grab on the phone. The hand tracker's
   memory is freed when Air grab is turned off.
+- **Air grab is safer and steadier.** The phone's camera stays off while Lock Flick is on, so a hand can't pick files
+  up behind it, and while the PC's Flick is too old for Air grab (the phone says to update it). A hand counts as open
+  only once it clearly is, so it no longer grabs or catches by mistake. If the phone's camera stops by itself while a
+  fist holds files, they go back; a hand the camera loses as it opens still puts back, catches or lands where it
+  opened. Turning the PC's camera off in Flick's window stops it at once, and a PC camera that fails no longer leaves a
+  card frozen in the air. A fist bringing files from the PC can rest over the phone as long as it likes before it
+  opens. With two phones, the other one hears when files were caught. On a Mac that doesn't let Flick ask Finder what's
+  selected, the phone says where to allow it. On Windows, Flick no longer restarts its selection watching each time
+  the phone shows another app.
 - **Faster transfers.** The phone keeps its encrypted connections to the PC open between requests, so a send no longer
   pays for a new handshake on every file and check (in tests, a single photo arrived in about 40% less time), and a
   fresh send skips a round trip it didn't need. The PC checks for files it already has, and for free space, much
@@ -57,6 +66,35 @@
 - Security: the phone takes a shared file:// address only from shared storage (never Flick's own files, Android/data
   or Android/obb), and Browse phone only takes a MediaStore id that matches its file; on the PC, the settings panel's
   messages are taken only from the panel, and a drop only from the drop window.
+- **Phone fixes.** On Android 11 and newer the keyboard no longer covers what you type. Long messages show whole (and
+  screen readers read them). Names with emoji or in Hebrew or Arabic show as they are, in file names, folder paths and
+  what you type. A tap made while Flick is busy for a moment still counts. A long PC name no longer pushes ••• off the
+  screen, menus and the pairing code fit short windows (split screen, foldables), and turning or unfolding the phone
+  keeps your place in a big folder. Settings shows the connection as it is now, and coming back to Flick notices a
+  dead link at once. Select all no longer takes a Flick-list file already on its way to the PC (it was sent twice),
+  and such a file no longer comes back after changing tabs. A PC named with an apostrophe ("Mani's PC") shows right.
+  Connect, folders and file menus work with TalkBack or a keyboard; Enter connects in "Enter PC address"; Back stops
+  Find my phone's ringing even with a menu open, and opening Flick while it rings shows Stop. On Android 13 and newer,
+  Settings says how to allow notification access when Android calls it a restricted setting.
+- **More phone fixes.** Updates from the PC and the Bluetooth link work on networks with a proxy (and the pairing key
+  no longer goes to the proxy). Auto-send keeps up on a busy day (it stalled after 200 new photos in 6 hours). Two
+  synced folders with the same name (DCIM's and Pictures' Screenshots) no longer share one folder on the PC. Opening
+  Phone storage no longer reads every photo on the phone. A damaged file whose thumbnail crashes Flick can't close it
+  again and again. Sharing a big file to Flick says it's on its way, and one Flick can't take says so. With Android
+  System WebView missing or updating, Flick says so instead of closing. Turning on bold text no longer restarts
+  Flick's screen (or a transfer over Bluetooth). Moving to a new phone (Android 12 and newer) no longer copies Flick's
+  pairing keys and identity: pair the new phone, as before Android 12.
+- **PC fixes.** On Windows, Flick's notifications show (its app id is registered). The overlay's sound stops running
+  once nothing plays (the PC was 20 times busier at rest after the first sound). Received files with long names in
+  other scripts fit Mac and Linux, a name is never cut through an emoji, and every spelling of Windows' device names
+  is renamed. Sending more than 100 files at once says only the first 100 went, and files picked for a phone that
+  never came say so. A second start of Flick no longer breaks an update being unpacked, and no update restarts Flick
+  while a Quick Share waits for an answer. The overlay keeps drawing after two graphics resets in a row, a landed
+  file's label shows the name it was saved under, and stopping the PC's own Wi-Fi while it starts leaves it off.
+- **Quick Share on the PC.** The question opens on Decline and Accept ignores a click for its first second, so a
+  keystroke meant for another app can't accept a stranger's files. Files that can't be saved are kept in "Not saved"
+  and you're told (they were lost), a share that can't be taken in is declined instead of left hanging, and "Open
+  files when they arrive" opens only pictures, videos, music, PDFs and text from it. Disk images are never opened.
 
 ## 1.1.0
 
