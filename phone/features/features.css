@@ -242,7 +242,8 @@ textarea.fbin { min-height: 148px; }
 .fpv.nochrome .pvtop, .fpv.nochrome .pvbot { opacity: 0; pointer-events: none; }
 .pvhint { position: absolute; left: 50%; top: calc(var(--top) + 70px); transform: translateX(-50%); display: flex; align-items: center; gap: 6px; padding: 9px 16px 9px 12px;
   border-radius: 20px; background: rgba(44,44,48,0.92); border: 0.5px solid rgba(255,255,255,0.1); font-size: 14px; font-weight: 650; white-space: nowrap;
-  opacity: 0; pointer-events: none; transition: background .15s, color .15s; }
+  max-width: calc(100vw - 32px); opacity: 0; pointer-events: none; transition: background .15s, color .15s; }
+.pvhint span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }   /* (a long PC name went off both sides) */
 .pvhint svg { width: 18px; height: 18px; flex: none; }
 .pvhint.go { background: #fff; color: #000; }
 
