@@ -1469,7 +1469,8 @@ async function finalizeBundle(t, dir) {
   try {
     // everything that's in the staging folder goes out (not just the names the manifest listed)
     let tops = t.bundle.tops.slice();
-    try { const have = await fs.promises.readdir(t.tmpPath); tops = tops.filter((x) => have.includes(x)).concat(have.filter((x) => !tops.includes(x))); } catch (e) { /* keep the list */ }
+    // (with sets: a list of thousands looked up item by item took seconds)
+    try { const have = await fs.promises.readdir(t.tmpPath); const hs = new Set(have), ts = new Set(tops); tops = tops.filter((x) => hs.has(x)).concat(have.filter((x) => !ts.has(x))); } catch (e) { /* keep the list */ }
     for (const top of tops) {
       const src = path.join(t.tmpPath, top);
       let st;
