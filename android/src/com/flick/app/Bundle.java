@@ -6,6 +6,8 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -30,13 +32,22 @@ final class Bundle {
         final boolean dir;
         final long size;
         final long mtime;
-        Entry(String rel, File file, boolean dir) {
+        Entry(String rel, File file, boolean dir, BasicFileAttributes at) {
             this.rel = rel;
             this.file = file;
             this.dir = dir;
-            this.size = dir ? 0 : file.length();
-            this.mtime = file.lastModified();
+            this.size = dir ? 0 : at.size();
+            this.mtime = at.lastModifiedTime().toMillis();
         }
+    }
+
+    /**
+     * A file's type, size and date in one look (File's isDirectory, isFile, length and lastModified are one each: five
+     * per file with the size counted twice), or null when it can't be looked at. A folder of thousands of files was
+     * mostly these looks.
+     */
+    private static BasicFileAttributes look(File f) {
+        try { return Files.readAttributes(f.toPath(), BasicFileAttributes.class); } catch (Throwable e) { return null; }
     }
 
     interface Progress { void onBytes(long sent, long total); }
@@ -83,20 +94,24 @@ final class Bundle {
     /** A top-level file or folder; folders go in whole, skipping hidden names the way the file browser does. */
     void add(File f, String name, AtomicBoolean abort) throws IOException {
         String top = clean(name != null && name.length() > 0 ? name : f.getName());
+        BasicFileAttributes at = look(f);
+        boolean dir = at != null && at.isDirectory();
         // two picks with the same name (e.g. two "Camera" folders) must not merge on the PC
         String unique = top;
         int i = 2;
-        while (!rootKeys.add(unique.toLowerCase(Locale.ROOT))) unique = numbered(top, i++, f.isDirectory());
+        while (!rootKeys.add(unique.toLowerCase(Locale.ROOT))) unique = numbered(top, i++, dir);
         roots.add(unique);
-        if (f.isDirectory()) walk(f, unique, new HashSet<String>(), 0, abort);
-        else if (f.isFile()) { entries.add(new Entry(unique, f, false)); bytes += f.length(); files++; }
+        if (dir) walk(f, at, unique, new HashSet<String>(), 0, abort);
+        else if (at != null && at.isRegularFile()) file(new Entry(unique, f, false, at));
         else throw new IOException("missing " + top);
     }
 
-    private void walk(File d, String rel, Set<String> seen, int depth, AtomicBoolean abort) throws IOException {
+    private void file(Entry e) { entries.add(e); bytes += e.size; files++; }
+
+    private void walk(File d, BasicFileAttributes at, String rel, Set<String> seen, int depth, AtomicBoolean abort) throws IOException {
         if (abort != null && abort.get()) throw new IOException("aborted");
         if (depth > 48 || !seen.add(d.getCanonicalPath())) return;      // symlink loops, absurd nesting
-        entries.add(new Entry(rel, d, true));
+        entries.add(new Entry(rel, d, true, at));
         File[] kids = d.listFiles();
         if (kids == null) return;
         Arrays.sort(kids, new Comparator<File>() {
@@ -105,8 +120,10 @@ final class Bundle {
         for (File k : kids) {
             String n = k.getName();
             if (n.startsWith(".")) continue;
-            if (k.isDirectory()) walk(k, rel + "/" + clean(n), seen, depth + 1, abort);
-            else if (k.isFile()) { entries.add(new Entry(rel + "/" + clean(n), k, false)); bytes += k.length(); files++; }
+            BasicFileAttributes ka = look(k);
+            if (ka == null) continue;
+            if (ka.isDirectory()) walk(k, ka, rel + "/" + clean(n), seen, depth + 1, abort);
+            else if (ka.isRegularFile()) file(new Entry(rel + "/" + clean(n), k, false, ka));
         }
     }
 
