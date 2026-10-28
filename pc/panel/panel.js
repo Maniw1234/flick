@@ -61,6 +61,7 @@
     hk.className = 'sub0' + (s.hotkey !== false && !s.hotkeyOk ? ' warn' : '');
     hk.textContent = s.hotkey !== false && !s.hotkeyOk ? 'Another app is using these keys, so Flick can’t.'
       : s.os === 'mac' ? 'Select files in Finder, then press Command-Option-F.'
+        : s.os === 'linux' && s.sendCmd ? 'Copy files in your file manager (Ctrl+C), then press Ctrl+Alt+F. Under Wayland the keys only reach Flick while its window is in front: to use them anywhere, add them as a custom shortcut in your system’s keyboard settings, with this command: ' + s.sendCmd
         : s.os === 'linux' ? 'Copy files in your file manager (Ctrl+C), then press Ctrl+Alt+F.'
           : 'Select files in File Explorer or on the desktop, then press Ctrl+Alt+F.';
     $('openAfter').checked = !!s.openAfter;

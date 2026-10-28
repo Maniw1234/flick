@@ -111,6 +111,7 @@ input[type=text]:focus { border-bottom: 2px solid var(--accent); background: rgb
   background: rgba(20,20,20,0.88); font-size: 15px; font-weight: 600; pointer-events: none; }
 .sub0 { color: var(--sub); font-size: 12px; line-height: 1.4; margin-top: 2px; }
 .sub0.ok { color: #6ccb5f; } .sub0.warn { color: #fce100; }
+#hotkeySub { user-select: text; }       /* (under Wayland it holds a command to copy) */
 
 /* Quick Share prompt */
 .pin { color: var(--text); font-variant-numeric: tabular-nums; letter-spacing: .08em; }

@@ -480,6 +480,15 @@ function applyHotkey() {
     if (selNow) selNow.stop();
   }
 }
+// Under Wayland (Linux), Flick runs through X11, and keys it registers only reach it while one of its own windows is in
+// front. A keyboard shortcut set in the system's settings can run Flick with this switch instead: it does what the keys
+// do. (A second start hands it to the running Flick.)
+const SEND_SWITCH = '--send-shortcut';
+const WAYLAND = IS_LINUX && !!(process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE === 'wayland');
+function sendCommand() {
+  const p = process.env.APPIMAGE || path.join(path.dirname(process.execPath), 'flick');      // the AppImage, or the tar.gz's flick
+  return (/\s/.test(p) ? '"' + p + '"' : p) + ' ' + SEND_SWITCH;
+}
 async function onHotkey() {
   if (hotkeyBusy) return;
   hotkeyBusy = true;
@@ -1045,7 +1054,7 @@ function panelState() {
     phoneHas: s && s.connected ? { code: s.app || 0, name: s.appName || '' } : null,
     update: { state: updateInfo.state, version: updateInfo.version || '' },
     side: store.side, anchor: store.anchor, size: store.size, saveDir: store.saveDir, saveDirLabel: saveDirLabel(), saveDirPath: saveDirPath(),
-    sound: store.sound, volume: volumeOf(), reduceFx: !!store.reduceFx, hotkey: store.hotkey !== false, hotkeyOk,
+    sound: store.sound, volume: volumeOf(), reduceFx: !!store.reduceFx, hotkey: store.hotkey !== false, hotkeyOk, sendCmd: WAYLAND ? sendCommand() : null,
     startup: store.startup, edgeSend: store.edgeSend, isWin: IS_WIN, os: IS_WIN ? 'win' : IS_MAC ? 'mac' : 'linux', theme: themeName(),
     openAfter: store.openAfter, showSpeed: store.showSpeed, sendTo: store.sendTo, autoUpdate: store.autoUpdate,
     bluetooth: store.bluetooth, btState: btState, quickShare: store.quickShare, qsState: qsState, airCam: store.airCam !== false, airCamState: air ? air.camState : 'off',
@@ -2140,6 +2149,7 @@ ipcMain.on('panel:feedback', async (e, m) => {
 app.on('second-instance', (_e, argv) => {
   // a second start counted against this version's start attempts; it's clearly running, so clear them again
   if (healthy && updater) updater.markHealthy(BOOT);
+  if ((argv || []).includes(SEND_SWITCH)) { onHotkey(); return; }
   const files = sendArgs(argv || []);
   if (files.length) queueForPhone(files);
   else showPanel();
@@ -2268,7 +2278,8 @@ app.whenReady().then(async () => {
   if (IS_MAC) Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: 'appMenu' }, { role: 'editMenu' }, { role: 'windowMenu' }]));
   startedAt = Date.now();
   const startFiles = sendArgs(process.argv);
-  if (startFiles.length) setTimeout(() => queueForPhone(startFiles), 1500);
+  if (process.argv.includes(SEND_SWITCH)) setTimeout(onHotkey, 1500);
+  else if (startFiles.length) setTimeout(() => queueForPhone(startFiles), 1500);
   else if (openFiles.length) setTimeout(sendOpenFiles, 1500);
   else if (!(HIDDEN_START || openedAtLogin()) || store.firstRun) showPanel();
   if (newsPending() && store.newsToast !== NEWS) setTimeout(newsToast, TEST_MODE ? 1500 : 10000);

@@ -42,7 +42,9 @@ The PC app is the same everywhere, with these differences:
   Accessibility); on Linux it needs `playerctl` (for example `sudo apt install playerctl`). Flick on the PC says so
   when the phone's remote is used without it.
 - **Linux:** under Wayland Flick runs through X11 (XWayland), since its animations cover the screen and stay on top,
-  which Wayland doesn't let a window do. Received files go to Downloads. To remove Flick, delete the AppImage or the
+  which Wayland doesn't let a window do. There, Ctrl+Alt+F only reaches Flick while its window is in front: to use the
+  keys anywhere, add them as a custom shortcut in the system's keyboard settings that runs Flick with `--send-shortcut`
+  (Flick's window shows the exact command). Received files go to Downloads. To remove Flick, delete the AppImage or the
   folder, and `~/.local/share/applications/flick.desktop` and `~/.config/autostart/flick.desktop`.
 
 ## Animations

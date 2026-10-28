@@ -22,8 +22,9 @@ Everything that changed:
 - **The phone thuds when the file lands.** A short knock in your hand as the card hits the PC's desktop (Settings >
   Vibration turns it off with the other vibrations).
 - **Send with a keyboard shortcut.** Select files in File Explorer, on the desktop or in Finder and press Ctrl+Alt+F
-  (Command-Option-F on a Mac) to send them to the phone. On Linux, copy them first (Ctrl+C). It can be turned off in
-  Flick's window (Files).
+  (Command-Option-F on a Mac) to send them to the phone. On Linux, copy them first (Ctrl+C); under Wayland, add the
+  keys as a custom shortcut in your system's keyboard settings (Flick's window shows the command). It can be turned off
+  in Flick's window (Files).
 - **Air grab: move files with your hand.** Turn it on in the phone's Settings (Android asks for the camera once). Hold
   your open hand over Flick and the file under it lights up; pinch to select it, and keep pinching across more files;
   make a fist to grab the file open full screen, the selection or the lit-up file, then open your hand in front of the
