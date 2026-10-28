@@ -785,8 +785,12 @@ async function onQsDone(m) {
   }
   for (const x of m.texts) {
     if (!x.value) continue;
-    // links and text are put on the clipboard (never opened by themselves)
-    require('electron').clipboard.writeText(x.value);
+    // links and text are put on the clipboard (never opened by themselves), through clipboard sync like text from a
+    // phone, so it isn't sent back to the phone in use
+    try {
+      if (feats) await feats.clip.put('text', x.value);
+      else await require('electron').clipboard.writeText(x.value);
+    } catch (e) { log('clipboard write failed', e.message); }
     if (panel) panelSend('panel:note', { text: (m.from || 'Your phone') + ' sent ' + (x.type === 2 ? 'a link' : 'some text') + ', now on your clipboard: ' + x.value.slice(0, 200) });
   }
   log('quick share saved', placed.length, 'file(s) from', m.from);
