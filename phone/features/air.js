@@ -238,9 +238,15 @@
     M.paint = null;
     M.openRun = 0;
     M.back = false;
+    // lost as it opened (the tracker loses an opening hand now and then; its last frame was open, its pose not yet: a
+    // fist, or half open on the way): it opened there
+    const opened = e.raw === 'open' && e.pose !== 'open';
+    if (M.mode === 'catch' && opened) {
+      const ms = Date.now() - M.catchT;
+      if (ms >= CATCH_MS && ms < 4000) catchFromPc();
+    }
     if (M.mode === 'carry') {
-      // lost as it opened (the tracker loses an opening hand now and then): it opened there
-      if (e.pose === 'fist' && e.raw === 'open') { released(e.aim || e.pos); M.mode = 'idle'; M.wasOpen = false; return; }
+      if (opened) { released(e.aim || e.pos); M.mode = 'idle'; M.wasOpen = false; return; }
       if (e.edge) { M.mode = 'idle'; go(); return; }
       // gone from the middle of the view: the tracker may have lost it for a moment; it goes unless it's back soon
       M.mode = 'away';
