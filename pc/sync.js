@@ -105,7 +105,11 @@ class SyncStore extends EventEmitter {
     this.persist = opts.persist || (() => {});
     this.markOfWeb = opts.markOfWeb || (() => {});
     this.locks = new Map();
+    this.active = 0;            // files being stored or sent right now
   }
+
+  /** A sync is going on: a file on its way, or a pair used in the last half minute (a sync goes file by file). */
+  busy() { return this.active > 0 || Object.values(this.pairs).some((p) => Date.now() - (p.last || 0) < 30000); }
 
   _pair(device, id) {
     const p = typeof id === 'string' && Object.prototype.hasOwnProperty.call(this.pairs, id) ? this.pairs[id] : null;
@@ -113,7 +117,18 @@ class SyncStore extends EventEmitter {
     return p;
   }
 
-  _touch(p) { p.last = Date.now(); this.persist(); this.emit('changed'); }
+  // A pair's last activity (it orders the panel's list) changes with every file: it's kept in memory and saved at most
+  // once a minute (and on quit, flush), rather than rewriting the settings for every file synced.
+  _touch(p) {
+    p.last = Date.now();
+    this.emit('changed');
+    if (this.touchT) return;
+    this.touchT = setTimeout(() => { this.touchT = null; this.persist(); }, 60000);
+    if (this.touchT.unref) this.touchT.unref();
+  }
+
+  /** Saves the activity not saved yet (Flick is quitting). */
+  flush() { if (this.touchT) { clearTimeout(this.touchT); this.touchT = null; this.persist(); } }
 
   /** Creates (or reuses) the folder for the phone's folder `name`: { id, folder }. */
   async pair(device, phone, name) {
@@ -223,6 +238,11 @@ class SyncStore extends EventEmitter {
    * "name (<phone>).ext". The same file again (same size, modified within 2 s: a retry) isn't stored twice.
    */
   async put(device, phone, id, rel, mtime, size, req) {
+    this.active++;
+    try { return await this._put(device, phone, id, rel, mtime, size, req); } finally { this.active--; }
+  }
+
+  async _put(device, phone, id, rel, mtime, size, req) {
     const p = this._pair(device, id);
     const abs = await this._resolve(p, rel);
     const dir = path.dirname(abs);

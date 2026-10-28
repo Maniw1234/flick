@@ -72,6 +72,17 @@ function writeCurrent(root, c) {
 
 function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
 
+/** sha256, a few MB at a time with other work let in between (all of a large bundle at once would hold Flick up) */
+async function sha256Async(buf) {
+  const h = crypto.createHash('sha256');
+  const step = 4 * 1024 * 1024;
+  for (let i = 0; i < buf.length; i += step) {
+    h.update(buf.subarray(i, i + step));
+    await new Promise((r) => setImmediate(r));
+  }
+  return h.digest('hex');
+}
+
 /** What a release signature covers: this header naming the version (like "1.0.0"), then SHA256SUMS byte for byte. */
 function releaseMessage(version, sums) {
   return Buffer.concat([Buffer.from('flick-release-v1\nversion ' + version + '\n', 'utf8'), Buffer.from(sums)]);
@@ -124,6 +135,33 @@ function writeProof(dir, p) {
  * zip was made on Unix with the file executable (a helper program on macOS needs that to run).
  */
 function unzipAll(buf) {
+  return zipEntries(buf).map((e) => {
+    const data = e.method === 0 ? Buffer.from(e.raw) : zlib.inflateRawSync(e.raw, { maxOutputLength: MAX_ENTRY });
+    return { name: e.name, data: checked(e, data), exec: e.exec };
+  });
+}
+
+/** unzipAll, with the inflating done off the main thread (an update unpacks while Flick keeps working) */
+async function unzipAllAsync(buf) {
+  const out = [];
+  for (const e of zipEntries(buf)) {
+    const data = e.method === 0 ? Buffer.from(e.raw) : await new Promise((resolve, reject) => {
+      zlib.inflateRaw(e.raw, { maxOutputLength: MAX_ENTRY }, (err, d) => (err ? reject(err) : resolve(d)));
+    });
+    out.push({ name: e.name, data: checked(e, data), exec: e.exec });
+  }
+  return out;
+}
+
+// an entry's unpacked data, if it's whole
+function checked(e, data) {
+  const crcOk = !zlib.crc32 || zlib.crc32(data) >>> 0 === e.crc >>> 0;
+  if (data.length !== e.usize || !crcOk) throw new Error('damaged entry ' + e.name);
+  return data;
+}
+
+// the zip's entries, checked, still packed: [{ name, method, raw, usize, crc, exec }]
+function zipEntries(buf) {
   if (buf.length > MAX_BUNDLE) throw new Error('bundle too big');
   let eocd = -1;
   for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
@@ -148,25 +186,48 @@ function unzipAll(buf) {
     if (usize > MAX_ENTRY) throw new Error('entry too big');
     if (local + 30 > buf.length || buf.readUInt32LE(local) !== 0x04034b50) throw new Error('bad zip entry');
     const start = local + 30 + buf.readUInt16LE(local + 26) + buf.readUInt16LE(local + 28);
-    const raw = buf.subarray(start, start + csize);
-    let data;
-    if (method === 0) data = Buffer.from(raw);
-    else if (method === 8) data = zlib.inflateRawSync(raw, { maxOutputLength: MAX_ENTRY });
-    else throw new Error('unsupported compression');
-    if (data.length !== usize || (zlib.crc32 && zlib.crc32(data) >>> 0 !== crc >>> 0)) throw new Error('damaged entry ' + name);
-    out.push({ name, data, exec });
+    if (method !== 0 && method !== 8) throw new Error('unsupported compression');
+    out.push({ name, method, raw: buf.subarray(start, start + csize), usize, crc, exec });
   }
   return out;
 }
 
-/** Unpacks a verified app bundle into root/<version> (via a temporary folder, so a half-written copy is never used). */
-function installBundle(root, version, zipBuf) {
-  const files = unzipAll(zipBuf);
+// the bundle's package.json, if the files are a Flick app of that version
+function bundleMeta(files, version) {
   const pkg = files.find((f) => f.name === 'package.json');
   const main = files.find((f) => f.name === 'main.js');
   if (!pkg || !main) throw new Error('not a Flick bundle');
   const meta = JSON.parse(pkg.data.toString('utf8'));
   if (meta.version !== version) throw new Error('bundle is ' + meta.version + ', expected ' + version);
+  return meta;
+}
+
+/** installBundle from files already unpacked (unzipAllAsync), written in the background */
+async function installFiles(root, version, files) {
+  const meta = bundleMeta(files, version);
+  await fs.promises.mkdir(root, { recursive: true });
+  const tmp = path.join(root, '.tmp-' + version + '-' + crypto.randomBytes(4).toString('hex'));
+  const dest = path.join(root, version);
+  try {
+    for (const f of files) {
+      const full = path.join(tmp, ...f.name.split('/'));
+      if (!full.startsWith(tmp + path.sep)) throw new Error('bad path');
+      await fs.promises.mkdir(path.dirname(full), { recursive: true });
+      await fs.promises.writeFile(full, f.data, f.exec ? { mode: 0o755 } : undefined);
+    }
+    await fs.promises.rm(dest, { recursive: true, force: true });
+    await fs.promises.rename(tmp, dest);
+  } catch (e) {
+    await fs.promises.rm(tmp, { recursive: true, force: true }).catch(() => {});
+    throw e;
+  }
+  return { dir: version, files: files.length, meta };
+}
+
+/** Unpacks a verified app bundle into root/<version> (via a temporary folder, so a half-written copy is never used). */
+function installBundle(root, version, zipBuf) {
+  const files = unzipAll(zipBuf);
+  const meta = bundleMeta(files, version);
   fs.mkdirSync(root, { recursive: true });
   const tmp = path.join(root, '.tmp-' + version + '-' + crypto.randomBytes(4).toString('hex'));
   const dest = path.join(root, version);
@@ -198,5 +259,5 @@ function pruneUpdates(root, keep) {
 
 module.exports = {
   updatesRoot, bundleName, parseVersion, newer, readCurrent, writeCurrent, sha256, unzipAll, installBundle, pruneUpdates,
-  RELEASE_KEYS, releaseMessage, verifyRelease, parseSums, readProof, writeProof,
+  RELEASE_KEYS, releaseMessage, verifyRelease, parseSums, readProof, writeProof, sha256Async, unzipAllAsync, installFiles,
 };

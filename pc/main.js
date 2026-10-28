@@ -95,26 +95,55 @@ const DEFAULTS = {
   openAfter: false, showSpeed: true, sendTo: true, autoUpdate: true, bluetooth: false, quickShare: false,
   airCam: true,                // Air grab: this PC's camera sees where the hand opens, and a fist picking files up (air.js)
 };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const readJson = (f) => { try { const o = JSON.parse(fs.readFileSync(f, 'utf8')); return o && typeof o === 'object' ? o : null; } catch (e) { return null; } };
 // settings.json, or its last good copy if it was damaged (a crash or power cut mid-save must not lose the pairings)
-let store = Object.assign({}, DEFAULTS, readJson(SETTINGS) || readJson(SETTINGS + '.bak') || {});
+const onDisk = readJson(SETTINGS);
+let store = Object.assign({}, DEFAULTS, onDisk || readJson(SETTINGS + '.bak') || {});
 if (!store.id) store.id = rid(8);
-let saveTimer = null;
-function writeStoreNow() {
+// settings.json on disk is whole (it read fine, or Flick wrote it whole since): it may become the last good copy
+let storeWhole = !!onDisk;
+// Settings are written in the background, one write at a time: a temp file, flushed to disk, then renamed over
+// settings.json (the copy that was there is kept first as settings.json.bak).
+let saveTimer = null, saving = null, saveAgain = false;
+function saveStore() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(writeStore, 150);
+}
+function writeStore() {
   saveTimer = null;
+  if (saving) { saveAgain = true; return; }
+  saving = (async () => {
+    do {
+      saveAgain = false;
+      const tmp = SETTINGS + '.tmp';
+      try {
+        await fs.promises.mkdir(userDir, { recursive: true });
+        const fh = await fs.promises.open(tmp, 'w');
+        try { await fh.writeFile(JSON.stringify(store, null, 2)); await fh.sync(); } finally { await fh.close(); }
+        if (app.isQuitting) return;                     // quitting: writeStoreNow writes it, and has the newest
+        if (storeWhole) await fs.promises.copyFile(SETTINGS, SETTINGS + '.bak').catch(() => {});
+        storeWhole = false;
+        // (briefly locked by an antivirus: copied instead)
+        try { await fs.promises.rename(tmp, SETTINGS); }
+        catch (e) { await fs.promises.copyFile(tmp, SETTINGS); await fs.promises.unlink(tmp).catch(() => {}); }
+        storeWhole = true;
+      } catch (e) { log('save failed', e.message); }
+    } while (saveAgain && !app.isQuitting);
+  })().finally(() => { saving = null; });
+}
+// on quit, at once (the process ends right after)
+function writeStoreNow() {
+  clearTimeout(saveTimer); saveTimer = null;
   try {
     fs.mkdirSync(userDir, { recursive: true });
-    const tmp = SETTINGS + '.tmp';
+    const tmp = SETTINGS + '.tmpq';
     const fd = fs.openSync(tmp, 'w');
     try { fs.writeSync(fd, JSON.stringify(store, null, 2)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-    if (readJson(SETTINGS)) { try { fs.copyFileSync(SETTINGS, SETTINGS + '.bak'); } catch (e) { /* ignore */ } }
+    if (storeWhole) { try { fs.copyFileSync(SETTINGS, SETTINGS + '.bak'); } catch (e) { /* ignore */ } }
     try { fs.renameSync(tmp, SETTINGS); }
     catch (e) { fs.copyFileSync(tmp, SETTINGS); fs.unlinkSync(tmp); }     // briefly locked (antivirus): copy instead
   } catch (e) { log('save failed', e.message); }
-}
-function saveStore() {
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(writeStoreNow, 150);
 }
 
 function defaultName() {
@@ -151,9 +180,13 @@ function checkCustomDir() {
   const d = store.saveDir;
   if (!d || d === 'desktop' || d === 'downloads') return;
   if (customDir.dir !== d) customDir = { dir: d, ok: null };
-  fs.stat(d, (e, st) => { if (customDir.dir === d) { const ok = !e && st.isDirectory(); if (ok !== customDir.ok) { customDir.ok = ok; pushPanelState(); } } });
+  fs.stat(d, (e, st) => {
+    if (customDir.dir !== d) return;
+    const ok = !e && st.isDirectory();
+    if (ok !== customDir.ok) { customDir.ok = ok; pushPanelState(); updateStage(); }
+  });
 }
-setInterval(checkCustomDir, 30000).unref();
+setInterval(() => { checkCustomDir(); updateStage(); }, 30000).unref();
 function saveDirPath() {
   if (store.saveDir === 'desktop') return app.getPath('desktop');
   if (store.saveDir === 'downloads') return app.getPath('downloads');
@@ -179,11 +212,52 @@ function saveDirLabel() {
   return path.basename(saveDirPath()) || 'folder';
 }
 
+// Where incoming files are staged until they're complete. Putting a file in place is a rename on the same drive, but
+// from the system's temp folder to a save folder on another drive (D:, a network drive) it would copy every file a
+// second time, with nothing on screen meanwhile. So for a save folder on another drive, files are staged on that drive,
+// in a hidden ".flick-incoming" inside it (made when needed, removed when Flick is done with it); the free-space check
+// before a transfer (server.js _roomFor) then looks at that drive too.
+const TEMP_STAGE = path.join(app.getPath('temp'), 'flick-incoming');
+const QS_STAGE = path.join(app.getPath('temp'), 'flick-quickshare');
+let stage = { save: null, dir: TEMP_STAGE }, stageQ = Promise.resolve();
+const qsStage = () => (stage.dir === TEMP_STAGE ? QS_STAGE : stage.dir);
+function updateStage() {
+  stageQ = stageQ.then(stageFor).catch((e) => log('staging', e.message));
+  return stageQ;
+}
+async function stageFor() {
+  const save = saveDirPath();
+  let dir = TEMP_STAGE;
+  try {
+    const [a, b] = await Promise.all([fs.promises.stat(save), fs.promises.stat(app.getPath('temp'))]);
+    if (a.dev !== b.dev) dir = path.join(save, '.flick-incoming');
+  } catch (e) { /* the save folder can't be reached now: the temp folder it is */ }
+  try {
+    const made = await fs.promises.mkdir(dir, { recursive: true });     // (again, if someone deleted it)
+    if (made && dir !== TEMP_STAGE && IS_WIN) execFile('attrib', ['+h', dir], { windowsHide: true }, () => {});
+  } catch (e) { dir = TEMP_STAGE; }
+  const old = stage.dir;
+  stage = { save, dir };
+  if (server) server.tmpDir = dir;
+  if (qs) qs.tmpDir = qsStage();
+  if (old === dir) return;
+  log('incoming files are staged in', dir);
+  if (old !== TEMP_STAGE) fs.rmdir(old, () => {});                       // only once nothing is left in it
+  // leftovers of transfers that never finished go as they do in temp (in Flick's first minute: what's from before)
+  if (dir !== TEMP_STAGE) sweepDir(dir, !!startedAt && Date.now() - startedAt > 60000);
+}
+
 // ------------------------------------------------------------ windows
 const PRELOAD = path.join(__dirname, 'preload.js');
 let overlay = null, overlayShown = false, overlayReady = false;
 let panel = null, catcher = null, tray = null;
 let server = null;
+
+// Every Flick window has the same preload, so any of them could send any message. What acts for the user (pairing,
+// sending files, sharing, settings) is taken only from the window it belongs to; the test control passes TEST_EV.
+const TEST_EV = { test: true };
+const fromWin = (e, w) => !!e && (e === TEST_EV || (!!w && !w.isDestroyed() && e.sender === w.webContents));
+const fromPanel = (e) => fromWin(e, panel);
 
 function displays() { return screen.getAllDisplays(); }
 function targetDisplay() {
@@ -263,27 +337,35 @@ const THEMES = ['roadster', 'liquid', 'teleport', 'halo'];
 function themeName() { return THEMES.includes(store.theme) ? store.theme : 'roadster'; }
 
 // Moments that start from a quiet screen take a fresh photo of the desktop first (used for blur, refraction and
-// night grading), while the overlay is still hidden so it can never photograph itself.
+// night grading), while the overlay is still hidden so it can never photograph itself. Teleport uses no photo.
 const SHOT_FIRST = { lift: true, hold: true, outgoing: true, demo: true, 'edge-hover': true, preview: true, connect: true };
+const SHOT_MS = 600;            // a slower photo is given up on: the effects run without it rather than wait
 // once the overlay hides, its desktop photo is out of date: drop it so no later effect paints an old screen
 function dropShot() { lastShot = 0; if (overlay) overlay.webContents.send('fx:noshot'); }
-let revealT = null;
+// Effects that come while the photo is being taken wait for it here: the overlay's clock starts when it gets them,
+// so sent at once they'd play (partly or wholly) while it's still hidden. They go the moment it shows.
+let revealT = null, held = null;
 function reveal() {
   clearTimeout(revealT); revealT = null;
-  if (!overlay || overlayShown) return;
-  overlay.setBounds(overlayBounds());
-  overlay.showInactive();
-  overlay.setAlwaysOnTop(true, 'screen-saver');
-  overlayShown = true;
+  if (overlay && !overlayShown) {
+    overlay.setBounds(overlayBounds());
+    overlay.showInactive();
+    overlay.setAlwaysOnTop(true, 'screen-saver');
+    overlayShown = true;
+  }
+  const q = held;
+  held = null;
+  if (q && overlay) for (const [type, data] of q) overlay.webContents.send('fx:' + type, data);
 }
 function ensureShown(withShot) {
   if (!overlay || overlayShown || revealT) return;
-  if (withShot && shotAllowed() && Date.now() - lastShot > 1500) {
+  if (withShot && themeName() !== 'teleport' && shotAllowed() && Date.now() - lastShot > 1500) {
     // photograph the desktop first and only then show the overlay, so the picture never contains the overlay itself;
-    // a very slow capture is abandoned (the effects then run without it) rather than holding the animation back
+    // a slow capture is abandoned (the effects then run without it) rather than holding the animation back for long
     let done = false;
     const go = () => { if (done) return; done = true; reveal(); };
-    revealT = setTimeout(() => { shotAbandoned = true; go(); }, 1100);
+    held = [];
+    revealT = setTimeout(() => { shotAbandoned = true; go(); }, SHOT_MS);
     shotAbandoned = false;
     captureShot().then(go, go);
   } else reveal();
@@ -292,18 +374,26 @@ let lastFx = 0;
 function fx(type, data) {
   if (!overlay) return;
   lastFx = Date.now();
-  overlay.webContents.send('fx:' + type, data);
   ensureShown(!!SHOT_FIRST[type]);
+  if (held) held.push([type, data]);
+  else overlay.webContents.send('fx:' + type, data);
 }
 
 // Nothing may stay on screen without a reason: a drag the phone never finished, a transfer that stopped sending, or
 // an overlay that is up with nothing going on is cleared within a minute.
+// A thrown file whose upload hasn't started waits its turn on the phone (it sends a couple at a time): that isn't a
+// stall. It's forgotten quietly after hours; if it starts after that, the phone says it was sent and it comes in anew.
+const QUEUED_KEEP_MS = 6 * 3600 * 1000;
 function watchdog() {
   const now = Date.now();
   for (const t of [...transfers.values()]) {
     if (t.done) continue;
+    // the end-of-transfer check reads the whole file back: nothing arrives meanwhile, but it's alive
+    if (t.state === 'dropped' && server && server.uploadChecking(t.tid)) { t.seen = now; continue; }
     const quiet = now - (t.seen || t.t0);
-    if (t.state === 'lifted' && quiet > 60000) {
+    if (t.state === 'dropped' && t.upload === 'none') {
+      if (quiet > QUEUED_KEEP_MS) { log('transfer', t.tid, 'never started: forgotten'); discard(t); }
+    } else if (t.state === 'lifted' && quiet > 60000) {
       log('transfer', t.tid, 'lifted with no news for', Math.round(quiet / 1000) + 's: cancel');
       fx('cancel', { tid: t.tid });
       if (server) server.abortUpload(t.tid);
@@ -446,22 +536,43 @@ function kindOf(name) {
   return 'doc';
 }
 
+// A small picture of a file for a card that flies, or null. Windows and macOS have the system's own thumbnails (often
+// made already). Linux has none to ask for: a photo is decoded by the overlay's page, in the background there, rather
+// than here, where decoding a large photo would hold up every transfer and message for its whole length.
 async function thumbFor(p) {
   const kind = kindOf(p);
   try {
-    if (kind === 'image' && !IS_WIN) {
-      const img = nativeImage.createFromPath(p);
-      if (!img.isEmpty()) { const s = img.getSize(); const r = Math.min(1, 360 / Math.max(s.width, s.height)); const t = img.resize({ width: Math.max(1, Math.round(s.width * r)), height: Math.max(1, Math.round(s.height * r)) }); return { url: 'data:image/jpeg;base64,' + t.toJPEG(82).toString('base64'), w: t.getSize().width, h: t.getSize().height }; }
-    }
     if ((IS_WIN || IS_MAC) && (kind === 'image' || kind === 'video' || extOf(p) === 'pdf')) {
       const t = await nativeImage.createThumbnailFromPath(p, { width: 360, height: 360 });
       if (t && !t.isEmpty()) return { url: 'data:image/jpeg;base64,' + t.toJPEG(82).toString('base64'), w: t.getSize().width, h: t.getSize().height };
-    }
+    } else if (kind === 'image') return await pageThumb(p);
   } catch (e) { /* no thumb */ }
   return null;
 }
+let thumbN = 0;
+const thumbWait = new Map();       // request id -> resolve
+ipcMain.on('fx:thumbed', (e, m) => {
+  const done = m && fromWin(e, overlay) && thumbWait.get(m.id);
+  const ok = done && typeof m.url === 'string' && m.url.startsWith('data:image/jpeg;base64,') && m.w > 0 && m.h > 0;
+  if (done) done(ok ? { url: m.url, w: m.w, h: m.h } : null);
+});
+async function pageThumb(p) {
+  if (!overlay || !overlayReady) return null;
+  const st = await fs.promises.stat(p);
+  if (!st.isFile() || st.size > 40 * 1024 * 1024) return null;
+  const data = await fs.promises.readFile(p);
+  if (!overlay) return null;
+  const id = ++thumbN;
+  return new Promise((resolve) => {
+    const done = (v) => { clearTimeout(t); thumbWait.delete(id); resolve(v); };
+    const t = setTimeout(() => done(null), 5000);
+    thumbWait.set(id, done);
+    overlay.webContents.send('fx:thumb', { id, data, max: 360 });
+  });
+}
 
-ipcMain.on('catcher:drop', async (_e, d) => {
+ipcMain.on('catcher:drop', async (e, d) => {
+  if (!fromWin(e, catcher)) return;
   hoverOn = false;
   if (!server || !server.connected) return;
   const sy = catcher ? catcher.getBounds().y + ((d && d.y) || 0) : overlayBounds().y + store.anchor * overlayBounds().height;
@@ -509,36 +620,56 @@ function flushSendQueue() {
 }
 
 // opts: { fx: false (their cards already fly: Air grab), device (to that phone, not the one in use) }
+// The first dozen files fly across the screen with a picture, which the phone needs in the offer (its own card shows
+// it). Pictures never hold the offers up for long: they're made ahead (several at once where the system makes them
+// in the background), each card goes as soon as its picture is there, and once THUMB_MS have gone by the rest go
+// without one. The files after the dozen go right after, with no card (the phone makes its own picture of a file).
+const THUMB_MS = 900;
+const THUMBS_AHEAD = IS_WIN ? 0 : 3;              // Windows makes its thumbnails on this thread: one at a time there
 async function sendPathsToPhone(list, screenY, opts) {
   if (!server || !server.connected) return 0;
   const device = (opts && opts.device) || undefined;
   const paths = expandPaths(list);
   if (!paths.length) return 0;
   const sy = typeof screenY === 'number' ? screenY : overlayBounds().y + store.anchor * overlayBounds().height;
-  let oy = overlayYFromScreenY(sy);
-  const shown = Math.min(paths.length, 12);        // the first dozen fly across the screen; the rest just go
-  for (let i = 0; i < paths.length; i++) {
-    const p = paths[i];
-    const name = path.basename(p);
-    const mime = MIME[extOf(name)] || 'application/octet-stream';
-    const offer = server.offerFile(p, mime, device);
-    // only the cards that fly across the screen need a picture (the phone makes its own once a file has arrived).
-    // Thumbnails decode on this thread, so let downloads and messages run between files.
-    const th = i < shown ? await thumbFor(p) : null;
-    await new Promise((r) => setImmediate(r));
-    const ext = extOf(name);
-    const kind = kindOf(name);
+  const oy = overlayYFromScreenY(sy);
+  const files = [];
+  for (const p of paths) {
+    const name = path.basename(p), ext = extOf(name), mime = MIME[ext] || 'application/octet-stream';
+    // a file that's gone (or can't be read) since it was picked is left out; the others still go
+    try { files.push({ p, name, ext, mime, kind: kindOf(name), offer: server.offerFile(p, mime, device) }); }
+    catch (e) { log('offer failed', name, e.code || e.message); }
+  }
+  if (!files.length) return 0;
+  const shown = Math.min(files.length, 12);        // the first dozen fly across the screen; the rest just go
+  const t0 = Date.now();
+  const thumbs = [];
+  const make = (k) => { if (k < shown && !thumbs[k]) thumbs[k] = thumbFor(files[k].p).catch(() => null); };
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    let th = null;
+    const left = THUMB_MS - (Date.now() - t0);
+    if (i < shown && left > 0) {
+      for (let k = i; k <= i + THUMBS_AHEAD; k++) make(k);
+      th = await Promise.race([thumbs[i], sleep(left).then(() => null)]);
+    }
     const aspect = th ? th.w / th.h : 0.72;
     const cw = 150, ch = Math.round(Math.max(110, Math.min(220, cw / Math.max(0.55, Math.min(1.8, aspect)))));
     const y = oy + Math.min(i, shown) * 22;
-    if (i < shown && !(opts && opts.fx === false)) fx('outgoing', { fid: offer.fid, name, thumb: th && th.url, kind, badge: kind === 'doc' ? (ext || 'file').toUpperCase().slice(0, 4) : '', y, card: { w: cw, h: ch } });
+    if (i < shown && !(opts && opts.fx === false)) {
+      fx('outgoing', { fid: f.offer.fid, name: f.name, thumb: th && th.url, kind: f.kind,
+        badge: f.kind === 'doc' ? (f.ext || 'file').toUpperCase().slice(0, 4) : '', y, card: { w: cw, h: ch } });
+    }
     server.pushToPhone({
-      t: 'incoming', fid: offer.fid, name, size: offer.size, mime, kind, ext,
-      thumb: th && th.url, aspect, y: phoneYFromOverlayY(y), url: '/api/file/' + encodeURIComponent(offer.fid), delay: Math.min(i, shown) * 90,
+      t: 'incoming', fid: f.offer.fid, name: f.name, size: f.offer.size, mime: f.mime, kind: f.kind, ext: f.ext,
+      thumb: th && th.url, aspect, y: phoneYFromOverlayY(y), url: '/api/file/' + encodeURIComponent(f.offer.fid),
+      // the phone's cards fly 90 ms apart: time already spent here on pictures counts toward that
+      delay: Math.max(0, Math.min(i, shown) * 90 - (Date.now() - t0)),
     }, device);
-    log('offer', name, offer.size);
+    log('offer', f.name, f.offer.size);
+    if (i < shown) await new Promise((r) => setImmediate(r));    // downloads and messages run between cards
   }
-  return paths.length;
+  return files.length;
 }
 
 // ------------------------------------------------------------ extra ways in: Bluetooth and Quick Share (see bt.js, quickshare.js)
@@ -567,7 +698,7 @@ function applyQuickShare() {
   if (store.quickShare) {
     if (!qs) {
       const { QuickShare } = require('./quickshare');
-      qs = new QuickShare({ name: (server && server.name) || store.name || 'Flick PC', tmpDir: path.join(app.getPath('temp'), 'flick-quickshare'), log });
+      qs = new QuickShare({ name: (server && server.name) || store.name || 'Flick PC', tmpDir: qsStage(), log });
       qs.on('state', (st) => { qsState = st; pushPanelState(); });
       qs.on('request', onQsRequest);
       qs.on('accepted', onQsAccepted);
@@ -609,7 +740,7 @@ function answerQs(id, accept, why) {
   if (!accept) qsOffers.delete(id);
   qs.answer(id, accept, why);
 }
-ipcMain.on('panel:qs-answer', (_e, { id, accept }) => answerQs(id, !!accept));
+ipcMain.on('panel:qs-answer', (e, m) => { if (fromPanel(e) && m) answerQs(m.id, !!m.accept); });
 function onQsAccepted(m) {
   const tid = 'qs-' + m.id;
   qsTransfers.set(m.id, tid);
@@ -654,8 +785,12 @@ async function onQsDone(m) {
   }
   for (const x of m.texts) {
     if (!x.value) continue;
-    // links and text are put on the clipboard (never opened by themselves)
-    require('electron').clipboard.writeText(x.value);
+    // links and text are put on the clipboard (never opened by themselves), through clipboard sync like text from a
+    // phone, so it isn't sent back to the phone in use
+    try {
+      if (feats) await feats.clip.put('text', x.value);
+      else await require('electron').clipboard.writeText(x.value);
+    } catch (e) { log('clipboard write failed', e.message); }
     if (panel) panelSend('panel:note', { text: (m.from || 'Your phone') + ' sent ' + (x.type === 2 ? 'a link' : 'some text') + ', now on your clipboard: ' + x.value.slice(0, 200) });
   }
   log('quick share saved', placed.length, 'file(s) from', m.from);
@@ -800,7 +935,9 @@ function sendPreview(on) {
   fx('preview', { on, ph: phoneScreen().h });
 }
 
-ipcMain.on('panel:set', (_e, { key, value }) => {
+ipcMain.on('panel:set', (e, m) => {
+  if (!fromPanel(e) || !m) return;
+  const { key, value } = m;
   switch (key) {
     case 'name': {
       const v = String(value || '').trim().slice(0, 40);
@@ -813,7 +950,7 @@ ipcMain.on('panel:set', (_e, { key, value }) => {
     case 'sound': store.sound = !!value; break;
     case 'edgeSend': store.edgeSend = !!value; break;
     case 'displayId': store.displayId = value || null; break;
-    case 'saveDir': if (value === 'desktop' || value === 'downloads') store.saveDir = value; break;
+    case 'saveDir': if (value === 'desktop' || value === 'downloads') { store.saveDir = value; updateStage(); } break;
     case 'theme': if (THEMES.includes(value)) { store.theme = value; setTimeout(() => fx('demo', {}), 120); } break;
     case 'startup': store.startup = !!value; applyStartup(); break;
     case 'openAfter': store.openAfter = !!value; break;
@@ -836,7 +973,9 @@ ipcMain.on('panel:set', (_e, { key, value }) => {
   }
 });
 
-ipcMain.on('panel:action', async (_e, { what, arg }) => {
+ipcMain.on('panel:action', async (e, m) => {
+  if (!fromPanel(e) || !m) return;
+  const { what, arg } = m;
   switch (what) {
     case 'hide': if (panel) panel.hide(); sendPreview(false); break;
     case 'show': showPanel(); break;
@@ -844,7 +983,11 @@ ipcMain.on('panel:action', async (_e, { what, arg }) => {
     case 'openFolder': shell.openPath(saveDirPath()); break;
     case 'chooseFolder': {
       const r = await dialog.showOpenDialog(panel, { properties: ['openDirectory', 'createDirectory'], defaultPath: saveDirPath() });
-      if (!r.canceled && r.filePaths[0]) { store.saveDir = r.filePaths[0]; saveStore(); pushPanelState(); }
+      if (!r.canceled && r.filePaths[0]) {
+        store.saveDir = r.filePaths[0];
+        checkCustomDir();                         // (staging follows once it's known to be there: updateStage)
+        saveStore(); pushPanelState();
+      }
       break;
     }
     case 'forget': if (server) server.forget(arg); break;
@@ -866,12 +1009,12 @@ ipcMain.on('panel:action', async (_e, { what, arg }) => {
   }
 });
 
-ipcMain.on('panel:pair-answer', (_e, { device, allow }) => {
-  if (!server) return;
-  if (allow) server.approve(device); else server.deny(device);
+ipcMain.on('panel:pair-answer', (e, m) => {
+  if (!server || !fromPanel(e) || !m) return;
+  if (m.allow) server.approve(m.device); else server.deny(m.device);
 });
 
-ipcMain.on('panel:preview', (_e, d) => sendPreview(!!(d && d.on)));
+ipcMain.on('panel:preview', (e, d) => { if (fromPanel(e)) sendPreview(!!(d && d.on)); });
 
 function fixFirewall() {
   if (!IS_WIN) {
@@ -1017,9 +1160,26 @@ const BOOT = global.FLICK_BOOT || null;     // set by boot.js: which copy of the
 let updater = null, updateBusy = false, restartT = null, healthy = false;
 let updateInfo = { state: 'idle' };
 
+// Files moving, or waiting on the user, in any of the ways they move: thrown or sent (and their questions), sent
+// quietly, folder sync, Browse phone copies, Quick Share, browsers, files the phone is fetching from here. A thrown
+// file still waiting its turn on the phone after a minute doesn't count: it comes in anew when it starts.
+function filesBusy() {
+  const now = Date.now();
+  const moving = [...transfers.values()].some((t) => !t.done && (t.state === 'lifted' ||
+    (t.state === 'dropped' && !(t.upload === 'none' && now - (t.seen || t.t0) > 60000))));
+  return moving || !!(server && (server.receiving() || server.outgoingBusy())) || !!(feats && feats.busy()) ||
+    !!(web && web.busy());
+}
+
 async function runUpdateCheck(manual) {
   if (!updater || updateBusy || process.env.FLICK_NO_UPDATES === '1') return;
   if (!manual && store.autoUpdate === false) return;
+  // not while files move: the download would compete with them for the network, the unpacking for the disk
+  if (!manual && filesBusy()) {
+    clearTimeout(runUpdateCheck.t);
+    runUpdateCheck.t = setTimeout(runUpdateCheck, 2 * 60000);
+    return;
+  }
   updateBusy = true;
   try {
     updateInfo = await updater.check();
@@ -1035,9 +1195,8 @@ function scheduleRestart(ver) {
   if (restartT) return;
   const tryNow = () => {
     restartT = null;
-    const moving = [...transfers.values()].some((t) => !t.done && (t.state === 'lifted' || t.state === 'dropped'));
     const queued = sendQueue.length > 0 && Date.now() - (sendQueue.at || 0) < 10 * 60000;   // a queue goes stale after 10 min
-    const busy = moving || queued || (server && server.outgoingBusy()) || overlayShown || (panel && panel.isVisible() && panel.isFocused()) || (web && web.busy());
+    const busy = filesBusy() || queued || overlayShown || (panel && panel.isVisible() && panel.isFocused());
     if (busy) { restartT = setTimeout(tryNow, 30000); return; }
     log('restarting into', ver);
     // only --hidden: the original command line may hold "--send <files>" from Explorer, which must not be sent again
@@ -1117,25 +1276,39 @@ function markOfWeb(dest) {
   fs.writeFile(dest + ':Zone.Identifier', '[ZoneTransfer]\r\nZoneId=3\r\n', () => {});
 }
 
+// The files of a received folder are marked two at a time: thousands of marks started at once would take all of
+// Node's few disk threads, and transfers still writing would wait behind them.
+const markQ = [];
+let marking = 0;
+function pumpMarks() {
+  while (marking < 2 && markQ.length) {
+    marking++;
+    const f = markQ.shift();
+    fs.writeFile(f + ':Zone.Identifier', '[ZoneTransfer]\r\nZoneId=3\r\n', () => { marking--; pumpMarks(); });
+  }
+}
+
 // mark a received file, or every file inside a received folder (bounded, best-effort)
 function markTree(dest) {
   if (IS_MAC) { plat.quarantine(dest, true); return; }
   if (!IS_WIN) return;
-  fs.stat(dest, (e, st) => {
-    if (e) return;
+  (async () => {
+    const st = await fs.promises.stat(dest);
     if (st.isFile()) return markOfWeb(dest);
     if (!st.isDirectory()) return;
     let budget = 5000;
-    const walk = (d) => fs.readdir(d, { withFileTypes: true }, (er, ents) => {
-      if (er) return;
+    const walk = async (d) => {
+      let ents;
+      try { ents = await fs.promises.readdir(d, { withFileTypes: true }); } catch (e) { return; }
       for (const ent of ents) {
         if (budget-- <= 0) return;
         const full = path.join(d, ent.name);
-        if (ent.isDirectory()) walk(full); else if (ent.isFile()) markOfWeb(full);
+        if (ent.isDirectory()) await walk(full);
+        else if (ent.isFile()) { markQ.push(full); pumpMarks(); }
       }
-    });
-    walk(dest);
-  });
+    };
+    await walk(dest);
+  })().catch(() => {});
 }
 
 // "open after it arrives": fine for a document or photo, but never launch a program/script/shortcut — reveal it instead
@@ -1162,12 +1335,49 @@ function uniqueDirPath(dir, name) {
   return p;
 }
 
-// move one staged file or folder into place; across drives (or when Windows briefly locks a fresh file) copy instead
+// Move one staged file or folder into place. Windows can hold a fresh file for a moment (an antivirus or a thumbnailer
+// reading it): the move is tried again for a few seconds. Across drives, or when it stays locked, it's copied instead.
+const LOCKED = ['EBUSY', 'EACCES', 'EPERM'];
 async function placeItem(src, dest) {
-  try { await fs.promises.rename(src, dest); return; }
-  catch (e) { if (!['EXDEV', 'EPERM', 'EBUSY', 'EACCES', 'ENOTEMPTY'].includes(e.code)) throw e; }
-  await fs.promises.cp(src, dest, { recursive: true, errorOnExist: true, force: false, preserveTimestamps: true });
+  for (let i = 0; ; i++) {
+    try { await fs.promises.rename(src, dest); return; }
+    catch (e) {
+      if (LOCKED.includes(e.code) && i < 5) { await sleep(150 * 2 ** i); continue; }     // 150 ms ... 2.4 s
+      if (!['EXDEV', 'ENOTEMPTY'].concat(LOCKED).includes(e.code)) throw e;
+      break;
+    }
+  }
+  try {
+    await fs.promises.cp(src, dest, { recursive: true, errorOnExist: true, force: false, preserveTimestamps: true });
+  } catch (e) {
+    // no half copy is left behind (the staged one is still whole)
+    if (e.code !== 'ERR_FS_CP_EEXIST' && e.code !== 'EEXIST') {
+      await fs.promises.rm(dest, { recursive: true, force: true }).catch(() => {});
+    }
+    throw e;
+  }
   await fs.promises.rm(src, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {});
+}
+
+// A received file (or what's left of a received folder) that couldn't be saved where it belongs. Its phone was told it
+// arrived and won't send it again, so it's never deleted: it goes under its own name into "Not saved" beside where it
+// was staged (the same drive: a rename) and the user is told where. If even that fails it stays where it is.
+const KEPT_DIR = 'Not saved';
+async function keepUnsaved(src, name) {
+  let dest = src;
+  try {
+    const dir = path.join(path.dirname(src), KEPT_DIR);
+    await fs.promises.mkdir(dir, { recursive: true });
+    const d = uniquePath(dir, sanitizeName(name));
+    try { await fs.promises.rename(src, d); dest = d; } finally { release(d); }
+  } catch (e) { /* it stays where it is */ }
+  log('could not save', name, '- kept in', dest);
+  const where = path.dirname(dest);
+  const text = 'Couldn’t save ' + name + ' in ' + saveDirLabel() + '. It’s kept in ' + where + '.';
+  panelSend('panel:note', { text });
+  const show = () => shell.showItemInFolder(dest);
+  if (feats) feats.toast({ title: 'Couldn’t save ' + name, body: 'It’s kept in ' + where, click: show });
+  return dest;
 }
 
 async function finalizeBundle(t, dir) {
@@ -1194,9 +1404,18 @@ async function finalizeBundle(t, dir) {
       finally { release(dest); }
     }
   } finally {
-    fs.rm(t.tmpPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }, () => {});
+    // what couldn't be put in place is kept (see keepUnsaved); otherwise the staging folder goes
+    if (lost) t.kept = await keepUnsaved(t.tmpPath, t.name && t.name !== 'file' ? t.name : 'Files');
+    else {
+      fs.rm(t.tmpPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }, () => {});
+      t.tmpPath = null;                                  // (nothing was left in it to keep)
+    }
   }
   if (!placed.length) throw new Error('nothing received');
+  if (lost) {
+    const name = lost + (lost === 1 ? ' item' : ' items');
+    hist({ dir: 'in', tid: t.tid, name, size: 0, ok: false, how: 'fling', why: 'save', path: t.kept });
+  }
   log('saved', placed.length, 'item(s) in', dir, t.bundle.files, 'files', lost ? '(' + lost + ' could not be saved)' : '');
   return placed.length === 1 ? placed[0] : placed.length + ' items';
 }
@@ -1284,11 +1503,7 @@ async function finalize(t) {
     }
     fs.mkdirSync(dir, { recursive: true });
     dest = uniquePath(dir, sanitizeName(t.name));
-    try { await fs.promises.rename(t.tmpPath, dest); }
-    catch (e) {
-      if (e.code === 'EXDEV' || e.code === 'EPERM') { await fs.promises.copyFile(t.tmpPath, dest); await fs.promises.unlink(t.tmpPath).catch(() => {}); }
-      else throw e;
-    }
+    await placeItem(t.tmpPath, dest);
     release(dest);
     const now = new Date(); fs.utimes(dest, now, now, () => {});
     markOfWeb(dest);
@@ -1302,9 +1517,10 @@ async function finalize(t) {
     if (server) server.pushToPhone({ t: 'saved', tid: t.tid, name: path.basename(dest), where: saveDirLabel() });
   } catch (e) {
     log('finalize failed', e.message);
-    hist({ dir: 'in', tid: t.tid, name: t.name, size: 0, ok: false, how: 'fling' });
     release(dest);
-    if (t.tmpPath) fs.rm(t.tmpPath, { recursive: true, force: true }, () => {});   // don't leave the received copy in temp
+    // the phone already heard its upload arrived and won't send it again: the received copy is kept, never deleted
+    if (t.tmpPath && !t.kept) t.kept = await keepUnsaved(t.tmpPath, t.name && t.name !== 'file' ? t.name : 'Files');
+    hist({ dir: 'in', tid: t.tid, name: t.name, size: 0, ok: false, how: 'fling', why: 'save', path: t.kept });
     fx('failed', { tid: t.tid });
     if (server) server.pushToPhone({ t: 'failed', tid: t.tid, why: 'save' });
   }
@@ -1432,9 +1648,15 @@ function wireServer() {
     if (isGone(tid)) { if (!again) { server.abortUpload(tid); return; } gone.delete(tid); }
     const fresh = !transfers.has(tid);
     const t = tState(tid);
+    // thrown a while ago, it waited its turn on the phone and its card has gone: it comes back now that it's moving
+    const waited = !fresh && t.state === 'dropped' && t.upload === 'none' && Date.now() - (t.seen || t.t0) > 20000;
     t.upload = 'uploading'; t.seen = Date.now();
     clearTimeout(t.failT);
     if (name && t.name === 'file') t.name = name;
+    if (waited) {
+      const f = flyInMsgs(tid, t.info || { tid, name: t.name });
+      fx('resumed', { tid, lift: f.lift, drop: f.drop });
+    }
     // one the user sent before this PC restarted, starting over now: its card flies in as if just sent
     if (committed && fresh) {
       t.state = 'dropped';
@@ -1502,6 +1724,7 @@ function wireServer() {
   server.on('upload-failed', ({ tid, why }) => {
     const t = transfers.get(tid);
     log('upload failed', tid, why);
+    if (/ENOENT/.test(String(why))) updateStage();      // the staging folder was deleted: made again for the retry
     if (!t) return;
     t.upload = 'failed';
     // the phone retries once by itself (same transfer); only give up if no new attempt starts soon
@@ -1664,8 +1887,8 @@ function onWebDone(g) {
   setTimeout(() => transfers.delete(t.tid), 5000);
 }
 
-ipcMain.on('panel:web', async (_e, m) => {
-  if (!web || !m || typeof m !== 'object') return;
+ipcMain.on('panel:web', async (e, m) => {
+  if (!web || !fromPanel(e) || !m || typeof m !== 'object') return;
   switch (m.what) {
     case 'start': web.start(); break;
     case 'stop': web.stop('user'); hotspot.stop(); hotAddr = null; break;
@@ -1721,8 +1944,8 @@ function startFeedback() {
     },
   });
 }
-ipcMain.on('panel:feedback', async (_e, m) => {
-  if (!fb || !m || typeof m !== 'object') return;
+ipcMain.on('panel:feedback', async (e, m) => {
+  if (!fb || !fromPanel(e) || !m || typeof m !== 'object') return;
   if (m.what === 'send') {
     const r = await fb.send({ type: m.type === 'idea' ? 'idea' : 'bug', message: String(m.message || ''), email: String(m.email || ''), device: m.device === true });
     panelSend('panel:feedback', Object.assign({ result: r }, fb.info()));
@@ -1743,14 +1966,15 @@ app.on('second-instance', (_e, argv) => {
 app.on('window-all-closed', (e) => { /* keep running in tray */ });
 app.on('before-quit', () => {
   app.isQuitting = true;
-  if (saveTimer) { clearTimeout(saveTimer); writeStoreNow(); }      // don't lose a setting changed just before quitting
   try { if (bt) bt.stop(); } catch (e) { /* ignore */ }
   try { if (qs) qs.stop(); } catch (e) { /* ignore */ }
-  try { if (feats) feats.stop(); } catch (e) { /* ignore */ }
+  try { if (feats) feats.stop(); } catch (e) { /* ignore */ }      // (folder sync's latest activity goes into the store)
+  if (saveTimer || saving) writeStoreNow();                         // don't lose a setting changed just before quitting
   try { if (air) air.stop(); } catch (e) { /* ignore */ }
   try { hotspot.stop(); } catch (e) { /* ignore */ }                // the PC's own Wi-Fi network, if Flick started it
   try { if (fb) fb.stop(); } catch (e) { /* ignore */ }
   try { server && server.stop(); } catch (e) { /* ignore */ }
+  try { if (stage.dir !== TEMP_STAGE) fs.rmdirSync(stage.dir); } catch (e) { /* not empty: kept for next time */ }
 });
 
 // Leftovers from a crash or power cut (half-received files, staging folders) in Flick's own temp folders.
@@ -1758,17 +1982,23 @@ app.on('before-quit', () => {
 // Leftovers of transfers that never finished: at start, anything older than 10 minutes; while Flick runs (every 30
 // minutes), files untouched for six hours (a file still arriving is written to all the time; folders are left to the
 // transfers that own them)
-function sweepTemp(running) {
+// (the files kept because they couldn't be saved, in "Not saved", stay: see keepUnsaved)
+function sweepDir(dir, running) {
   const now = Date.now(), age = running ? 6 * 3600000 : 10 * 60000;
-  for (const dir of [path.join(app.getPath('temp'), 'flick-incoming'), path.join(app.getPath('temp'), 'flick-quickshare')]) {
-    fs.readdir(dir, (e, names) => {
-      if (e) return;
-      for (const n of names) {
-        const full = path.join(dir, n);
-        fs.stat(full, (er, st) => { if (!er && now - st.mtimeMs > age && (!running || st.isFile())) fs.rm(full, { recursive: true, force: true }, () => {}); });
-      }
-    });
-  }
+  fs.readdir(dir, (e, names) => {
+    if (e) return;
+    for (const n of names) {
+      if (n === KEPT_DIR) continue;
+      const full = path.join(dir, n);
+      fs.stat(full, (er, st) => {
+        const old = !er && now - st.mtimeMs > age && (!running || st.isFile());
+        if (old) fs.rm(full, { recursive: true, force: true }, () => {});
+      });
+    }
+  });
+}
+function sweepTemp(running) {
+  for (const dir of new Set([TEMP_STAGE, QS_STAGE, stage.dir])) sweepDir(dir, running);
   if (running) return;
   fs.readdir(app.getPath('userData'), (e, names) => {
     if (!e) for (const n of names) if (/^flick-fw-.*\.cmd$/.test(n)) fs.unlink(path.join(app.getPath('userData'), n), () => {});
@@ -1787,13 +2017,14 @@ app.whenReady().then(async () => {
     // test runs can move the ports (several copies under test on one machine); real installs always use the defaults
     id: store.id, name: store.name, port: (TEST_MODE && +process.env.FLICK_PORT) || 47860,
     discoveryPort: (TEST_MODE && +process.env.FLICK_DISCOVERY_PORT) || 47870, version: VERSION,
-    tmpDir: path.join(app.getPath('temp'), 'flick-incoming'), devices: store.devices,
+    tmpDir: TEMP_STAGE, devices: store.devices,
     settings: { side: store.side, anchor: store.anchor, theme: themeName() },
     allowOrigin: TEST_MODE ? /^http:\/\/127\.0\.0\.1:\d+$/ : null,   // test harnesses serve the phone page over http
     tls: tlsId,
     haveFiles: (items) => received.lookup(items),
   });
   wireServer();
+  updateStage();                                // staged on the save folder's drive when it's another one
   try { const port = await server.start(); log('listening', port, lanAddresses().map((a) => a.address).join(',')); }
   catch (e) { log('server failed', e.message); dialog.showErrorBox('Flick', 'Flick could not start its connection service.\n\n' + e.message); }
   startWeb();
@@ -1882,16 +2113,16 @@ function startTestControl() {
         return res.end(JSON.stringify(r));
       }
       if (u.pathname === '/set') {
-        ipcMain.emit('panel:set', {}, { key: u.searchParams.get('key'), value: u.searchParams.get('value') });
+        ipcMain.emit('panel:set', TEST_EV, { key: u.searchParams.get('key'), value: u.searchParams.get('value') });
         return res.end('ok');
       }
       if (u.pathname === '/action') {
         const arg = u.searchParams.get('arg');
-        ipcMain.emit('panel:action', {}, { what: u.searchParams.get('what'), arg: arg ? JSON.parse(arg) : undefined });
+        ipcMain.emit('panel:action', TEST_EV, { what: u.searchParams.get('what'), arg: arg ? JSON.parse(arg) : undefined });
         return res.end('ok');
       }
       if (u.pathname === '/catcher-drop') {
-        ipcMain.emit('catcher:drop', {}, { paths: [u.searchParams.get('path')], y: +(u.searchParams.get('y') || 300) });
+        ipcMain.emit('catcher:drop', TEST_EV, { paths: [u.searchParams.get('path')], y: +(u.searchParams.get('y') || 300) });
         return res.end('ok');
       }
       if (u.pathname === '/pair') {

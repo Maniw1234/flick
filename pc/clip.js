@@ -1,6 +1,7 @@
 'use strict';
 // Clipboard sync, the PC side. While a phone that has it is reachable, the clipboard is looked at once a
-// second: what the user copies (text, or a picture as PNG of at most 6 MB) goes to the phone in use. What a phone sends
+// second (a picture that stays there is read again less often, see tick): what the user copies (text, or a picture as
+// PNG of at most 6 MB) goes to the phone in use. What a phone sends
 // is put on the clipboard and remembered, so it's never sent back. The same look also tells the tray whether the
 // clipboard holds a web link ("Send clipboard link to phone").
 // Electron 44's clipboard (main process) is asynchronous and works like the web's: readText / writeText / has, and
@@ -53,6 +54,9 @@ class ClipWatch {
     this.every = opts.every || 1000;
     this.timer = null;
     this.last = { text: '', img: '' };
+    this.imgHad = false;        // was there a picture at the last look
+    this.imgAt = 0;             // when the picture's bytes were last read, and what that took (ms)
+    this.imgCost = 0;
     this.link = false;
     this.wasWanted = false;
     this.sent = 0;
@@ -109,6 +113,28 @@ class ClipWatch {
     } catch (e) { return null; }
   }
 
+  // Is there a picture on the clipboard? Cheap: no bytes are read.
+  async _hasImage() {
+    try {
+      if (this.modern) return typeof this.cb.has === 'function' ? !!(await this.cb.has('image/png')) : true;
+      const f = typeof this.cb.availableFormats === 'function' ? this.cb.availableFormats() : [];
+      return f.some((x) => /^image\//i.test(x));
+    } catch (e) { return false; }
+  }
+
+  // The picture, read (timed: see _imgEvery)
+  async _readImage() {
+    const t0 = Date.now();
+    const im = await this._image();
+    this.imgAt = Date.now();
+    this.imgCost = this.imgAt - t0;
+    return im;
+  }
+
+  // How often a picture that stays on the clipboard is read again to see whether it was replaced by another (nothing
+  // cheaper tells): reading one can mean encoding a whole screenshot as PNG, so the more it cost, the rarer, up to 5 s
+  _imgEvery() { return Math.min(5000, Math.max(this.every, this.imgCost * 20)); }
+
   async _private() {
     if (typeof this.cb.has !== 'function') return false;
     for (const f of PRIVATE_FORMATS) {
@@ -127,7 +153,7 @@ class ClipWatch {
     this._setLink(text);
     this.last.text = text ? sha(text) : '';
     this.wasWanted = !!this.wanted();
-    if (this.wasWanted) { const im = await this._image(); this.last.img = im ? im.fp : ''; }
+    if (this.wasWanted) { const im = await this._readImage(); this.last.img = im ? im.fp : ''; this.imgHad = !!im; }
   }
 
   async tick() {
@@ -140,9 +166,16 @@ class ClipWatch {
     const textNew = tfp !== this.last.text;
     this.last.text = tfp;
     if (!want) return;
-    const im = await this._image();
-    if ((textNew || (im ? im.fp : '') !== this.last.img) && await this._private()) { this.last.img = im ? im.fp : ''; return; }   // a password
-    const ifp = im ? im.fp : '';
+    // a picture's bytes are read only when they may be new: none was there before, the text changed with it (a new
+    // copy), or it's been a while (see _imgEvery). Otherwise it's taken to be the same one.
+    let im = null, ifp = '';
+    const has = await this._hasImage();
+    if (has && (textNew || !this.imgHad || Date.now() - this.imgAt >= this._imgEvery())) {
+      im = await this._readImage();
+      ifp = im ? im.fp : '';
+    } else if (has) ifp = this.last.img;
+    this.imgHad = has;
+    if ((textNew || ifp !== this.last.img) && await this._private()) { this.last.img = ifp; return; }   // a password
     const imgNew = ifp !== this.last.img;
     this.last.img = ifp;
     // new text wins when both changed at once (Office copies a picture of the cells along with their text)
@@ -191,7 +224,8 @@ class ClipWatch {
     const t = await this._text();
     this.last.text = t ? sha(t) : '';
     this._setLink(t);
-    const im = kind === 'text' ? null : await this._image();
+    const im = kind === 'text' ? null : await this._readImage();
+    this.imgHad = !!im;
     this.last.img = im ? im.fp : '';
     return true;
   }

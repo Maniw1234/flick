@@ -84,8 +84,12 @@ class Features {
       const f = s.outgoing.get(fid);
       if (f && !f.inHistory) { f.inHistory = true; this.record({ dir: 'out', path: f.path, name: f.name, size: f.size, device: f.device || '', how: 'pc' }); }
     });
-    if (this.el.ipcMain) this.el.ipcMain.on('panel:feat', (_e, m) => { if (m && typeof m === 'object') this._action(m); });
+    // only from the panel's own window: the other windows share its preload, and these send files and answer questions
+    const ipc = this.el.ipcMain;
+    if (ipc) ipc.on('panel:feat', (e, m) => { if (m && typeof m === 'object' && this._fromPanel(e)) this._action(m); });
   }
+
+  _fromPanel(e) { const p = this.o.getPanel(); return !!(p && !p.isDestroyed() && e && e.sender === p.webContents); }
 
   _on(k) { return this.store[k] !== false; }
 
@@ -456,7 +460,11 @@ class Features {
     }
   }
 
+  /** Something here is moving files or waiting on the user: folder sync, a Browse phone copy, a question asked. */
+  busy() { return this.sync.busy() || this.browse._running() || this.ask.asks.length > 0; }
+
   stop() {
+    this.sync.flush();
     this.history.flush();
     this.clip.stop();
     this.keys.stop();
