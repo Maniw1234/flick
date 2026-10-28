@@ -150,6 +150,23 @@ function parseEndpointInfo(b) {
   } catch (e) { return { name: 'Android phone' }; }
 }
 
+// all of buf at the file's current position (a write can take less than all of it)
+function writeAll(fd, buf) {
+  return new Promise((resolve, reject) => {
+    const step = (off) => fs.write(fd, buf, off, buf.length - off, null, (e, n) => {
+      if (e) return reject(e);
+      if (off + n < buf.length) step(off + n); else resolve();
+    });
+    step(0);
+  });
+}
+function closeFile(f) {
+  if (f.fd == null) return Promise.resolve();
+  const fd = f.fd;
+  f.fd = null;
+  return new Promise((resolve) => fs.close(fd, () => resolve()));
+}
+
 // ---------------------------------------------------------------- one incoming phone
 class Inbound extends EventEmitter {
   constructor(sock, server) {
@@ -157,17 +174,18 @@ class Inbound extends EventEmitter {
     this.sock = sock;
     this.srv = server;
     this.id = crypto.randomBytes(4).toString('hex');
-    this.buf = Buffer.alloc(0);
+    this.chunks = []; this.have = 0;   // what arrived and isn't a whole frame yet: pieces, joined only once it is
     this.state = 'request';          // request → clientInit → clientFinish → response → encrypted
     this.keys = null;
     this.outSeq = 0; this.inSeq = 0;
     this.payloads = new Map();       // payload id (string) → { chunks: [], size } for BYTES; file sinks for FILE
-    this.files = new Map();          // payload id (string) → { meta, tmp, fd, got, size, done }
+    this.files = new Map();          // payload id (string) → { meta, tmp, fd, got, size, w, end, done } (see _fileWrite)
     this.texts = [];
     this.remote = { name: 'Android phone' };
     this.accepted = false;
     this.closed = false;
     this.bytes = 0; this.total = 0; this.buffered = 0;
+    this.pending = 0; this.held = false;   // bytes received and not written yet; the socket paused while there are many
     sock.setNoDelay(true);
     sock.on('data', (d) => this._data(d));
     sock.on('close', () => this._close('closed'));
@@ -182,26 +200,60 @@ class Inbound extends EventEmitter {
     clearTimeout(this.idle);
     this.kaTimer = setInterval(() => {
       const now = Date.now();
-      if (now - this.lastRx > this.kaTimeout) return this.fail('phone went quiet');
+      if (!this.held && now - this.lastRx > this.kaTimeout) return this.fail('phone went quiet');
       if (now - this.lastTx >= this.kaInterval) this._send({ version: 1, v1: { type: V1.KEEP_ALIVE, keep_alive: { ack: false, seq_num: ++this.kaSeq } } });
     }, 1000);
   }
 
   _touch() { this.lastRx = Date.now(); }
 
+  // A frame comes in many network reads: they're kept as they are and joined once, when the frame is whole (joining
+  // on every read copied a 512 KB chunk four or five times over).
   _data(d) {
     if (this.closed) return;
-    this.buf = this.buf.length ? Buffer.concat([this.buf, d]) : d;
-    while (this.buf.length >= 4) {
-      const len = this.buf.readUInt32BE(0);
+    this.chunks.push(d); this.have += d.length;
+    while (this.have >= 4) {
+      while (this.chunks[0].length < 4) this.chunks.splice(0, 2, Buffer.concat(this.chunks.slice(0, 2)));
+      const len = this.chunks[0].readUInt32BE(0);
       if (len > 5 * 1024 * 1024) return this.fail('frame too big');
-      if (this.buf.length < 4 + len) break;
-      const frame = this.buf.subarray(4, 4 + len);
-      this.buf = this.buf.subarray(4 + len);
+      if (this.have < 4 + len) break;
+      const frame = this._take(4 + len).subarray(4);
       try { this._frame(frame); } catch (e) { this.srv.log('quick share:', e.message); return this.fail(e.message); }
       if (this.closed) return;
     }
   }
+
+  // the first n bytes that arrived: a slice of the first piece when it holds them all, else the pieces joined
+  _take(n) {
+    let c = this.chunks[0];
+    if (c.length < n) {
+      let k = 0, got = 0;
+      while (got < n) got += this.chunks[k++].length;
+      c = Buffer.concat(this.chunks.splice(0, k), got);
+      this.chunks.unshift(c);
+    }
+    if (c.length === n) this.chunks.shift(); else this.chunks[0] = c.subarray(n);
+    this.have -= n;
+    return c.subarray(0, n);
+  }
+
+  // A file's chunks are written in the background, in order (a write waits for the one before); the phone is held
+  // back (its socket paused) while much is waiting to be written. A failed write ends the share.
+  _fileWrite(f, buf) {
+    this.pending += buf.length;
+    if (this.pending > 16 * 1024 * 1024 && !this.held) { this.held = true; this.sock.pause(); }
+    f.w = f.w.then(() => writeAll(f.fd, buf)).then(() => {
+      this.pending -= buf.length;
+      if (!this.held || this.pending >= 4 * 1024 * 1024) return;
+      this.held = false;
+      this._touch();
+      if (!this.closed) this.sock.resume();
+    });
+    f.w.catch((e) => { f.bad = true; this.fail('disk ' + (e.code || e.message)); });
+  }
+
+  // every file and text is all here (the last of a file may still be being written)
+  _allIn() { return [...this.files.values()].every((f) => f.end && !f.bad) && this.texts.every((t) => t.done); }
 
   _write(bytes) { if (this.closed) return; const h = Buffer.alloc(4); h.writeUInt32BE(bytes.length, 0); this.lastTx = Date.now(); this.sock.write(Buffer.concat([h, bytes])); }
 
@@ -356,19 +408,19 @@ class Inbound extends EventEmitter {
       const f = this.files.get(key);
       if (!this.accepted) return;
       if (!f) throw new Error('unknown file');
-      if (f.done) return;
+      if (f.end) return;
       if (c.body && c.body.length) {
         if (BigInt(c.offset || 0n) !== BigInt(f.got)) throw new Error('file chunk out of order');
         if (f.got + c.body.length > f.size) throw new Error('file larger than announced');
-        fs.writeSync(f.fd, c.body);
+        this._fileWrite(f, c.body);
         f.got += c.body.length;
         this.bytes += c.body.length;
         this.emit('progress', { id: this.id, got: this.bytes, total: this.total });
       }
       if (c.flags & LAST_CHUNK) {
         if (f.got !== f.size) throw new Error('file shorter than announced');
-        fs.closeSync(f.fd); f.fd = null; f.done = true;
-        this._finishIfDone();
+        f.end = true;                                  // all here: done once the last of it is written and closed
+        f.w.then(() => closeFile(f)).then(() => { f.done = true; this._finishIfDone(); }, () => {});
       }
     }
   }
@@ -425,7 +477,8 @@ class Inbound extends EventEmitter {
     } catch (e) { /* can't tell: go ahead */ }
     for (const f of this.offer.files) {
       const tmp = path.join(this.srv.tmpDir, 'qs-' + this.id + '-' + crypto.randomBytes(3).toString('hex') + '.part');
-      this.files.set(String(f.payload_id), { meta: f, tmp, fd: fs.openSync(tmp, 'w'), got: 0, size: f.size, done: false });
+      this.files.set(String(f.payload_id), { meta: f, tmp, fd: fs.openSync(tmp, 'w'), got: 0, size: f.size,
+        w: Promise.resolve(), end: false, done: false });
     }
     this.accepted = true;
     this._touch();
@@ -454,13 +507,16 @@ class Inbound extends EventEmitter {
   /** Stop from the PC side: tell the phone, then hang up. */
   cancel(why) {
     if (this.closed) return;
+    this.stopped = true;
     if (this.keys) { try { this._sendSharing({ type: SHARE.CANCEL }); } catch (e) { /* ignore */ } }
     this.fail(why || 'canceled');
   }
 
   fail(why) {
     if (this.closed) return;
-    if (!this.finished) this.emit('failed', { id: this.id, why, accepted: this.accepted });
+    // (a share that's all here but for the last writes still finishes: see _close)
+    const finishing = !this.stopped && this.accepted && this._allIn();
+    if (!this.finished && !finishing) this.emit('failed', { id: this.id, why, accepted: this.accepted });
     this._close(why);
   }
 
@@ -469,11 +525,25 @@ class Inbound extends EventEmitter {
     this.closed = true;
     clearTimeout(this.idle);
     clearInterval(this.kaTimer);
-    for (const f of this.files.values()) {
-      if (f.fd != null) { try { fs.closeSync(f.fd); } catch (e) { /* ignore */ } f.fd = null; }
-      if (!f.done || !this.finished) fs.unlink(f.tmp, () => {});
+    // The phone may hang up as soon as it has sent the last bytes: a share that's all here then finishes once the
+    // last of it is written. Otherwise what arrived goes. A file is closed only after its writes in flight.
+    const allIn = !this.finished && !this.stopped && this.accepted && this._allIn();
+    const files = [...this.files.values()];
+    const settled = files.map((f) => f.w.catch(() => {}).then(() => closeFile(f)));
+    if (allIn) {
+      Promise.all(settled).then(() => {
+        if (files.some((f) => f.bad)) {
+          for (const f of files) fs.unlink(f.tmp, () => {});
+          this.emit('failed', { id: this.id, why: 'disk', accepted: true });
+          return;
+        }
+        for (const f of files) f.done = true;
+        this._finishIfDone();
+      });
+    } else {
+      files.forEach((f, i) => { if (!f.done || !this.finished) settled[i].then(() => fs.unlink(f.tmp, () => {})); });
+      if (!this.finished && this.accepted && why !== 'done') this.emit('failed', { id: this.id, why, accepted: true });
     }
-    if (!this.finished && this.accepted && why !== 'done') this.emit('failed', { id: this.id, why, accepted: true });
     const sock = this.sock;
     try { sock.end(); } catch (e) { /* ignore */ }
     setTimeout(() => { try { sock.destroy(); } catch (e) { /* ignore */ } }, 1000).unref();
@@ -540,7 +610,7 @@ class QuickShare extends EventEmitter {
   stop() {
     if (this.mdns) { this.mdns.stop(); this.mdns = null; }
     if (this.server) { try { this.server.close(); } catch (e) { /* ignore */ } this.server = null; }
-    for (const c of this.conns.values()) c.fail('stopped');
+    for (const c of this.conns.values()) { c.stopped = true; c.fail('stopped'); }
     this.conns.clear();
     this._set('off');
   }
