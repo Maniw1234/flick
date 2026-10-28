@@ -816,7 +816,7 @@ async function onQsDone(m) {
   // (after the note about a link: this one matters more)
   if (kept.length) toldUnsaved(kept.length === 1 ? path.basename(kept[0]) : kept.length + ' files', kept[kept.length - 1], kept.length > 1);
   log('quick share saved', placed.length, 'file(s) from', m.from, kept.length ? '(' + kept.length + ' could not be saved)' : '');
-  if (store.openAfter && placed.length === 1 && !kept.length) setTimeout(() => openAfterArrival(placed[0]), 900);
+  if (store.openAfter && placed.length === 1 && !kept.length) setTimeout(() => openGuestFile(placed[0]), 900);
   if (t) {
     t.done = true;
     const texts = m.texts.filter((x) => x.value);
@@ -1312,10 +1312,16 @@ function uniquePath(dir, name) {
 // receives as downloaded so Windows SmartScreen / Office Protected View still warn if the user opens one by hand.
 const RISKY_EXT = new Set(['.exe', '.msi', '.msp', '.bat', '.cmd', '.com', '.scr', '.pif', '.cpl', '.ps1', '.psm1',
   '.vbs', '.vbe', '.js', '.jse', '.wsf', '.wsh', '.hta', '.lnk', '.url', '.reg', '.jar', '.msc', '.inf', '.scf',
-  '.application', '.gadget', '.ws', '.vb', '.jnlp', '.chm', '.sct', '.appref-ms']);
+  '.application', '.gadget', '.ws', '.vb', '.jnlp', '.chm', '.sct', '.appref-ms',
+  // and what opens into something that runs or reaches out: disk images (mounted, their files unmarked), app
+  // packages and installers, Excel add-ins, remote desktop and search/library/settings shortcuts, themes
+  '.iso', '.img', '.vhd', '.vhdx', '.appx', '.appxbundle', '.msix', '.msixbundle', '.appinstaller', '.msu', '.diagcab',
+  '.xll', '.rdp', '.wsb', '.settingcontent-ms', '.library-ms', '.search-ms', '.searchconnector-ms', '.theme', '.themepack',
+  '.deskthemepack', '.website', '.xbap', '.psd1', '.ps1xml', '.psc1']);
 // and their macOS and Linux kin: apps, installers, disk images, scripts, launchers
 if (!IS_WIN) for (const x of ['.app', '.pkg', '.mpkg', '.dmg', '.command', '.tool', '.terminal', '.workflow', '.scpt', '.applescript',
-  '.sh', '.bash', '.zsh', '.csh', '.ksh', '.fish', '.py', '.pl', '.rb', '.desktop', '.appimage', '.run', '.bin', '.deb', '.rpm', '.flatpakref']) RISKY_EXT.add(x);
+  '.sh', '.bash', '.zsh', '.csh', '.ksh', '.fish', '.py', '.pl', '.rb', '.desktop', '.appimage', '.run', '.bin', '.deb', '.rpm', '.flatpakref',
+  '.fileloc', '.inetloc', '.webloc']) RISKY_EXT.add(x);
 const riskyExt = (p) => RISKY_EXT.has(path.extname(p).toLowerCase());
 
 function markOfWeb(dest) {
@@ -1363,6 +1369,13 @@ function markTree(dest) {
 function openAfterArrival(dest) {
   if (riskyExt(dest)) { try { shell.showItemInFolder(dest); } catch (e) { /* ignore */ } return; }
   shell.openPath(dest);
+}
+// ...and from a guest (a browser, Quick Share from any phone nearby, not a paired one): only pictures, videos, music,
+// PDFs and plain text open; anything else is shown in its folder
+const GUEST_OPENABLE = /\.(jpe?g|png|gif|webp|heic|heif|bmp|tiff?|mp4|mov|m4v|webm|mkv|avi|mp3|m4a|aac|wav|flac|ogg|opus|pdf|txt)$/i;
+function openGuestFile(p) {
+  if (GUEST_OPENABLE.test(p)) openAfterArrival(p);
+  else { try { shell.showItemInFolder(p); } catch (e) { /* ignore */ } }
 }
 
 // what the overlay needs to draw the card: a photo, a document, a folder, or a stack of several items
@@ -1918,17 +1931,15 @@ function onWebProgress(g) {
   t.seen = now;
   fx('progress', { tid: t.tid, p: Math.min(1, g.received / g.total), rate: store.showSpeed ? t.rate || 0 : 0 });
 }
-const WEB_OPENABLE = /\.(jpe?g|png|gif|webp|heic|heif|bmp|tiff?|mp4|mov|m4v|webm|mkv|avi|mp3|m4a|aac|wav|flac|ogg|opus|pdf|txt)$/i;
 function onWebDone(g) {
   const t = webCards.get(g.gid);
   webCards.delete(g.gid);
   const n = g.saved.length;
   log('from a browser:', n + ' saved', g.failed ? g.failed + ' not' : '');
-  // "open after it arrives", for a browser (a guest's device): only pictures, videos, music, PDFs and plain text open;
-  // anything else is shown in its folder
+  // "open after it arrives", for a browser (a guest's device): see openGuestFile
   if (store.openAfter && n === 1 && !g.failed) {
     const p = g.saved[0].path;
-    setTimeout(() => { if (WEB_OPENABLE.test(p)) openAfterArrival(p); else { try { shell.showItemInFolder(p); } catch (e) { /* ignore */ } } }, 900);
+    setTimeout(() => openGuestFile(p), 900);
   }
   if (!t || transfers.get(t.tid) !== t) return;
   t.done = true;
