@@ -172,7 +172,8 @@ uniform vec4 uBand[12]; uniform int uNB;
 uniform vec4 uScorch; uniform float uScorchG;
 uniform vec4 uCA; uniform vec4 uGl;
 vec3 desk(vec2 p) { return texture(uDesk, clamp(p * uDeskUV, vec2(0.0004), vec2(0.9996))).rgb; }
-vec3 deskSoft(vec2 p) { return texture(uBlur1, clamp(p * uDeskUV, vec2(0.0004), vec2(0.9996))).rgb; }
+// (read inside a loop that may stop early: an explicit level, so Windows' graphics (Direct3D) has no gradient to work out there)
+vec3 deskSoft(vec2 p) { return textureLod(uBlur1, clamp(p * uDeskUV, vec2(0.0004), vec2(0.9996)), 0.0).rgb; }
 vec3 layer(vec2 p) { return texture(uU, vec2(p.x / uRes.x, 1.0 - p.y / uRes.y)).rgb / uHs; }
 void main() {
   vec2 p = fragDip();
