@@ -331,7 +331,12 @@ final class Transfers {
                     long hint = 0;
                     try { hint = Long.parseLong(sizeHint); } catch (Throwable e) { /* unknown */ }
                     int ways = parallelOf(rawUrl);
-                    if (ways > 1 && hint >= PARALLEL_MIN && Files.granted(ctx)) {
+                    // straight to the PC when the page's URL is an encrypted link's (or Bluetooth's) local port
+                    Object[] direct = Wire.direct(url);
+                    // a large file in byte ranges, which carry on from where a cut left them: several at once when the page
+                    // asks for that, else one (over Bluetooth, or with "parallel" off), where reading the file straight
+                    // through failed on any cut
+                    if (hint >= PARALLEL_MIN && Files.granted(ctx) && (ways > 1 || direct != null)) {
                         Files.Incoming dest = Files.reserve(Files.inbox(), name);
                         final long[] last = {0};
                         final long tot = hint;
@@ -343,9 +348,7 @@ final class Transfers {
                                     synchronized (last) { if (now - last[0] > 120 || done == tot) { last[0] = now; event("down", "fid", fid, done, tot, null); } }
                                 }
                             };
-                            // straight to the PC when the page's URL is an encrypted link's local port (no proxy hop)
-                            Object[] direct = Wire.direct(url);
-                            if (direct != null) Parallel.downloadDirect((Wire.Link) direct[0], (String) direct[1], dest.part, hint, Math.max(ways, 4), prog);
+                            if (direct != null) Parallel.downloadDirect((Wire.Link) direct[0], (String) direct[1], dest.part, hint, ways > 1 ? Math.max(ways, 4) : 1, prog);
                             else Parallel.download(url, dest.part, hint, ways, prog);
                         }
                         catch (Throwable e) { dest.cancel(); throw e; }
@@ -356,7 +359,6 @@ final class Transfers {
                     } else {
                     final long total;
                     InputStream in;
-                    Object[] direct = Wire.direct(url);
                     if (direct != null) {
                         // straight to the PC (no hop through the page's local proxy), over a connection kept from the
                         // request before when there is one (a new one when that one went silent)
