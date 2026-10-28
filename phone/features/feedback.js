@@ -59,6 +59,7 @@
     const msgLbl = h('label', 'fblbl');
     msgLbl.htmlFor = 'fbMsg';
     const msg = h('textarea', 'fbin');
+    msg.dir = 'auto';                       // a message in Hebrew or Arabic reads right to left
     msg.id = 'fbMsg'; msg.rows = 6; msg.maxLength = 5000; msg.spellcheck = true;
     const mailLbl = h('label', 'fblbl');
     mailLbl.htmlFor = 'fbMail';

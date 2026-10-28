@@ -3183,6 +3183,7 @@
   sField.className = 'sfield';
   const sIn = document.createElement('input');
   sIn.type = 'search'; sIn.id = 'searchIn'; sIn.autocomplete = 'off'; sIn.spellcheck = false;
+  sIn.dir = 'auto';                          // Hebrew or Arabic typed in reads right to left
   sIn.setAttribute('enterkeyhint', 'search'); sIn.setAttribute('aria-label', 'Search');
   const sClear = iconBtn(HIC.clear, 'Clear search', () => { sIn.value = ''; sClear.hidden = true; runSearch(); sIn.focus(); }, 'sclear');
   sClear.hidden = true;
