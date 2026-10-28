@@ -41,6 +41,8 @@ function markSparse(file) {
 const PROTO = 8;
 // how long a resumable transfer that stopped (the phone left, its app was closed) waits for the phone to come back
 const RESUME_KEEP_MS = 6 * 3600 * 1000;
+// a file offered to the phone stays fetchable this long after the phone last asked for it (see offerFile)
+const OFFER_IDLE_MS = 30 * 60 * 1000;
 // open connections allowed at once from one address, and in all (see _onSocket)
 const SOCKS_PER_ADDR = 64, SOCKS_TOTAL = 512;
 // phone app version code from which 'connect' says whether the user asked for it (user: true)
@@ -259,6 +261,7 @@ class FlickServer extends EventEmitter {
 
   stop() {
     clearInterval(this.sweepT); this.sweepT = null;
+    clearInterval(this.offerT); this.offerT = null;
     for (const b of [...this.bundleAsm.values()]) this._dropBundleAsm(b, true);
     for (const a of [...this.assemblies.values()]) this._dropAssembly(a, true);
     if (this.mdns) { try { this.mdns.stop(); } catch (e) { /* ignore */ } this.mdns = null; }
@@ -1648,12 +1651,25 @@ class FlickServer extends EventEmitter {
     return false;
   }
 
+  // An offer lasts as long as the phone may still fetch it: until 30 minutes after it last asked for it (never while it's
+  // being sent), and hours for one it hasn't asked for yet. The phone fetches a large batch a few files at a time, so
+  // the last files of it can start long after they were all offered (they used to be gone after 30 minutes: 404).
   offerFile(filePath, mime, device) {
     const st = fs.statSync(filePath);
     const fid = rid(8);
     // device: the phone it's offered to (the one named, else the one in use), for the history once it has fetched it
-    this.outgoing.set(fid, { path: filePath, name: path.basename(filePath), size: st.size, mime: mime || 'application/octet-stream', at: Date.now(), device: device || (this.session ? this.session.device : null) });
-    setTimeout(() => this.outgoing.delete(fid), 30 * 60 * 1000);
+    this.outgoing.set(fid, { path: filePath, name: path.basename(filePath), size: st.size, mime: mime || 'application/octet-stream', at: Date.now(),
+      used: 0, sending: 0, device: device || (this.session ? this.session.device : null) });
+    if (!this.offerT) {
+      this.offerT = setInterval(() => {
+        const now = Date.now();
+        for (const [k, f] of this.outgoing) {
+          if (!f.sending && (f.used ? now - f.used > OFFER_IDLE_MS : now - f.at > RESUME_KEEP_MS)) this.outgoing.delete(k);
+        }
+        if (!this.outgoing.size) { clearInterval(this.offerT); this.offerT = null; }
+      }, 60000);
+      if (this.offerT.unref) this.offerT.unref();
+    }
     return { fid, name: path.basename(filePath), size: st.size };
   }
 
@@ -1661,6 +1677,7 @@ class FlickServer extends EventEmitter {
   _handleDownload(req, res, fid) {
     const f = this.outgoing.get(fid);
     if (!f) return this._json(res, 404, { ok: false });
+    f.used = Date.now();
     let st;
     try { st = fs.statSync(f.path); } catch (e) { return this._json(res, 404, { ok: false }); }
     let start = 0, end = st.size - 1, partial = false;
@@ -1682,7 +1699,8 @@ class FlickServer extends EventEmitter {
     if (!st.size) { res.end(); this.emit('download-done', { fid, total: 0 }); return; }
     const rs = fs.createReadStream(f.path, { highWaterMark: 1024 * 1024, start, end });
     this.streaming = (this.streaming || 0) + 1;
-    res.on('close', () => { rs.destroy(); this.streaming = Math.max(0, (this.streaming || 0) - 1); });
+    f.sending = (f.sending || 0) + 1;
+    res.on('close', () => { rs.destroy(); this.streaming = Math.max(0, (this.streaming || 0) - 1); f.sending--; f.used = Date.now(); });
     f.sent = f.sent || 0;
     let last = 0;
     rs.on('data', (c) => {
