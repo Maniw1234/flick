@@ -460,6 +460,15 @@
   });
   on('fx:reset', () => resetAll());
   on('fx:demo', (m) => demo(m || {}));
+  // Linux: thumbnails of files sent to the phone, made by a worker (thumbs.js) for main.js
+  let thumbs = null;
+  on('fx:thumb', (m) => {
+    if (!m || !m.id) return;
+    try {
+      if (!thumbs) { thumbs = new Worker('thumbs.js'); thumbs.onmessage = (ev) => api.send('fx:thumbed', ev.data); }
+      thumbs.postMessage({ id: m.id, data: m.data, max: m.max });
+    } catch (e) { api.send('fx:thumbed', { id: m.id }); }
+  });
 
   // where a thrown card comes to rest
   function landingSpot(c, vx, vy) {

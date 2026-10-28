@@ -95,6 +95,7 @@ const DEFAULTS = {
   openAfter: false, showSpeed: true, sendTo: true, autoUpdate: true, bluetooth: false, quickShare: false,
   airCam: true,                // Air grab: this PC's camera sees where the hand opens, and a fist picking files up (air.js)
 };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const readJson = (f) => { try { const o = JSON.parse(fs.readFileSync(f, 'utf8')); return o && typeof o === 'object' ? o : null; } catch (e) { return null; } };
 // settings.json, or its last good copy if it was damaged (a crash or power cut mid-save must not lose the pairings)
 let store = Object.assign({}, DEFAULTS, readJson(SETTINGS) || readJson(SETTINGS + '.bak') || {});
@@ -461,19 +462,39 @@ function kindOf(name) {
   return 'doc';
 }
 
+// A small picture of a file for a card that flies, or null. Windows and macOS have the system's own thumbnails (often
+// made already). Linux has none to ask for: a photo is decoded by the overlay's page, in the background there, rather
+// than here, where decoding a large photo would hold up every transfer and message for its whole length.
 async function thumbFor(p) {
   const kind = kindOf(p);
   try {
-    if (kind === 'image' && !IS_WIN) {
-      const img = nativeImage.createFromPath(p);
-      if (!img.isEmpty()) { const s = img.getSize(); const r = Math.min(1, 360 / Math.max(s.width, s.height)); const t = img.resize({ width: Math.max(1, Math.round(s.width * r)), height: Math.max(1, Math.round(s.height * r)) }); return { url: 'data:image/jpeg;base64,' + t.toJPEG(82).toString('base64'), w: t.getSize().width, h: t.getSize().height }; }
-    }
     if ((IS_WIN || IS_MAC) && (kind === 'image' || kind === 'video' || extOf(p) === 'pdf')) {
       const t = await nativeImage.createThumbnailFromPath(p, { width: 360, height: 360 });
       if (t && !t.isEmpty()) return { url: 'data:image/jpeg;base64,' + t.toJPEG(82).toString('base64'), w: t.getSize().width, h: t.getSize().height };
-    }
+    } else if (kind === 'image') return await pageThumb(p);
   } catch (e) { /* no thumb */ }
   return null;
+}
+let thumbN = 0;
+const thumbWait = new Map();       // request id -> resolve
+ipcMain.on('fx:thumbed', (e, m) => {
+  const done = m && fromWin(e, overlay) && thumbWait.get(m.id);
+  const ok = done && typeof m.url === 'string' && m.url.startsWith('data:image/jpeg;base64,') && m.w > 0 && m.h > 0;
+  if (done) done(ok ? { url: m.url, w: m.w, h: m.h } : null);
+});
+async function pageThumb(p) {
+  if (!overlay || !overlayReady) return null;
+  const st = await fs.promises.stat(p);
+  if (!st.isFile() || st.size > 40 * 1024 * 1024) return null;
+  const data = await fs.promises.readFile(p);
+  if (!overlay) return null;
+  const id = ++thumbN;
+  return new Promise((resolve) => {
+    const done = (v) => { clearTimeout(t); thumbWait.delete(id); resolve(v); };
+    const t = setTimeout(() => done(null), 5000);
+    thumbWait.set(id, done);
+    overlay.webContents.send('fx:thumb', { id, data, max: 360 });
+  });
 }
 
 ipcMain.on('catcher:drop', async (e, d) => {
@@ -525,36 +546,56 @@ function flushSendQueue() {
 }
 
 // opts: { fx: false (their cards already fly: Air grab), device (to that phone, not the one in use) }
+// The first dozen files fly across the screen with a picture, which the phone needs in the offer (its own card shows
+// it). Pictures never hold the offers up for long: they're made ahead (several at once where the system makes them
+// in the background), each card goes as soon as its picture is there, and once THUMB_MS have gone by the rest go
+// without one. The files after the dozen go right after, with no card (the phone makes its own picture of a file).
+const THUMB_MS = 900;
+const THUMBS_AHEAD = IS_WIN ? 0 : 3;              // Windows makes its thumbnails on this thread: one at a time there
 async function sendPathsToPhone(list, screenY, opts) {
   if (!server || !server.connected) return 0;
   const device = (opts && opts.device) || undefined;
   const paths = expandPaths(list);
   if (!paths.length) return 0;
   const sy = typeof screenY === 'number' ? screenY : overlayBounds().y + store.anchor * overlayBounds().height;
-  let oy = overlayYFromScreenY(sy);
-  const shown = Math.min(paths.length, 12);        // the first dozen fly across the screen; the rest just go
-  for (let i = 0; i < paths.length; i++) {
-    const p = paths[i];
-    const name = path.basename(p);
-    const mime = MIME[extOf(name)] || 'application/octet-stream';
-    const offer = server.offerFile(p, mime, device);
-    // only the cards that fly across the screen need a picture (the phone makes its own once a file has arrived).
-    // Thumbnails decode on this thread, so let downloads and messages run between files.
-    const th = i < shown ? await thumbFor(p) : null;
-    await new Promise((r) => setImmediate(r));
-    const ext = extOf(name);
-    const kind = kindOf(name);
+  const oy = overlayYFromScreenY(sy);
+  const files = [];
+  for (const p of paths) {
+    const name = path.basename(p), ext = extOf(name), mime = MIME[ext] || 'application/octet-stream';
+    // a file that's gone (or can't be read) since it was picked is left out; the others still go
+    try { files.push({ p, name, ext, mime, kind: kindOf(name), offer: server.offerFile(p, mime, device) }); }
+    catch (e) { log('offer failed', name, e.code || e.message); }
+  }
+  if (!files.length) return 0;
+  const shown = Math.min(files.length, 12);        // the first dozen fly across the screen; the rest just go
+  const t0 = Date.now();
+  const thumbs = [];
+  const make = (k) => { if (k < shown && !thumbs[k]) thumbs[k] = thumbFor(files[k].p).catch(() => null); };
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    let th = null;
+    const left = THUMB_MS - (Date.now() - t0);
+    if (i < shown && left > 0) {
+      for (let k = i; k <= i + THUMBS_AHEAD; k++) make(k);
+      th = await Promise.race([thumbs[i], sleep(left).then(() => null)]);
+    }
     const aspect = th ? th.w / th.h : 0.72;
     const cw = 150, ch = Math.round(Math.max(110, Math.min(220, cw / Math.max(0.55, Math.min(1.8, aspect)))));
     const y = oy + Math.min(i, shown) * 22;
-    if (i < shown && !(opts && opts.fx === false)) fx('outgoing', { fid: offer.fid, name, thumb: th && th.url, kind, badge: kind === 'doc' ? (ext || 'file').toUpperCase().slice(0, 4) : '', y, card: { w: cw, h: ch } });
+    if (i < shown && !(opts && opts.fx === false)) {
+      fx('outgoing', { fid: f.offer.fid, name: f.name, thumb: th && th.url, kind: f.kind,
+        badge: f.kind === 'doc' ? (f.ext || 'file').toUpperCase().slice(0, 4) : '', y, card: { w: cw, h: ch } });
+    }
     server.pushToPhone({
-      t: 'incoming', fid: offer.fid, name, size: offer.size, mime, kind, ext,
-      thumb: th && th.url, aspect, y: phoneYFromOverlayY(y), url: '/api/file/' + encodeURIComponent(offer.fid), delay: Math.min(i, shown) * 90,
+      t: 'incoming', fid: f.offer.fid, name: f.name, size: f.offer.size, mime: f.mime, kind: f.kind, ext: f.ext,
+      thumb: th && th.url, aspect, y: phoneYFromOverlayY(y), url: '/api/file/' + encodeURIComponent(f.offer.fid),
+      // the phone's cards fly 90 ms apart: time already spent here on pictures counts toward that
+      delay: Math.max(0, Math.min(i, shown) * 90 - (Date.now() - t0)),
     }, device);
-    log('offer', name, offer.size);
+    log('offer', f.name, f.offer.size);
+    if (i < shown) await new Promise((r) => setImmediate(r));    // downloads and messages run between cards
   }
-  return paths.length;
+  return files.length;
 }
 
 // ------------------------------------------------------------ extra ways in: Bluetooth and Quick Share (see bt.js, quickshare.js)
