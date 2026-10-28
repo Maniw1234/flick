@@ -145,9 +145,9 @@ function attach(o) {
   ipcMain.on('air:event', (e, ev) => { if (win && e.sender === win.webContents && ev) onHand(ev); });
 
   // the camera is wanted while a hand carries a phone's file here, for a few seconds after files are selected, and
-  // while a fist in view holds files it picked up
+  // while a fist in view holds files it picked up; never once it's turned off in Flick's window (it stops at once)
   function needCam() {
-    return [...lifted.values()].some((x) => !x.landed) || Date.now() < G.armedUntil || !!(G.held && (G.held.state === 'hand' || G.held.state === 'back'));
+    return camOn() && ([...lifted.values()].some((x) => !x.landed) || Date.now() < G.armedUntil || !!(G.held && (G.held.state === 'hand' || G.held.state === 'back')));
   }
 
   async function startCam() {
