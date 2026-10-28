@@ -33,7 +33,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class AutoSend extends JobService {
     static final int JOB_TRIGGER = 2001, JOB_RETRY = 2002;
     static final long RETRY_MS = 15 * 60 * 1000L;
-    private static final int MAX_ROWS = 200;
+    private static final int MAX_ROWS = 500;                    // per type and look (AutoSendQueue remembers 2,000)
 
     private static final AtomicBoolean busy = new AtomicBoolean(false);
     private static final AtomicBoolean again = new AtomicBoolean(false);
@@ -244,7 +244,9 @@ public class AutoSend extends JobService {
         args[args.length - 1] = String.valueOf(since);
         Cursor cur = null;
         try {
-            cur = c.getContentResolver().query(coll, proj, where, args, "date_added ASC");
+            // newest first: oldest first, a window holding more than MAX_ROWS (a busy day out, a burst) showed the same
+            // ones again and again, all taken already, and new photos waited hours; query() puts them back in order
+            cur = c.getContentResolver().query(coll, proj, where, args, "date_added DESC, _id DESC");
             if (cur == null) return;
             int iId = cur.getColumnIndex("_id"), iName = cur.getColumnIndex("_display_name"), iSize = cur.getColumnIndex("_size");
             int iAdded = cur.getColumnIndex("date_added"), iTaken = cur.getColumnIndex("datetaken"), iMime = cur.getColumnIndex("mime_type"), iData = cur.getColumnIndex("_data");
