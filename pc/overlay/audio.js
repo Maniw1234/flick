@@ -34,14 +34,16 @@
   function ready() {
     if (!A.enabled) return null;
     const c = init();
-    if (c && c.state === 'suspended') c.resume();
+    // (a sound that comes while the context is being suspended plays once that's done)
+    if (c && suspending) suspending.then(() => c.resume());
+    else if (c && c.state === 'suspended') c.resume();
     return c;
   }
   A.now = () => (ctx ? ctx.currentTime : 0);
 
   // Once nothing has played for a moment (and no hum is held) the context is suspended: left running it renders
   // silence all the time, an audio thread busy for nothing and the sound device kept awake. The next sound resumes it.
-  let playsUntil = 0, drones = 0, idleT = null;
+  let playsUntil = 0, drones = 0, idleT = null, suspending = null;
   function playing(end) {
     playsUntil = Math.max(playsUntil, end);
     clearTimeout(idleT);
@@ -51,7 +53,7 @@
     idleT = null;
     if (!ctx || drones > 0 || ctx.state !== 'running') return;
     if (ctx.currentTime < playsUntil + 1.5) { playing(playsUntil); return; }
-    ctx.suspend().catch(() => {});
+    suspending = ctx.suspend().catch(() => {}).then(() => { suspending = null; });
   }
 
   function route(node, pan, verb) {
