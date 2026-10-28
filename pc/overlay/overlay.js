@@ -24,7 +24,10 @@
   const S = { W: innerWidth, H: innerHeight, dispW: innerWidth, dispH: innerHeight + 1, dpr: devicePixelRatio || 1,
     side: 'right', anchor: 0.5, k: 0.66, sound: true, taskbar: 48, saveLabel: 'Desktop', theme: 'roadster', iconSize: 56 };
 
-  function applySize() { R.resize(S.W, S.H, S.dpr, S.dispW, S.dispH); }
+  // dirty: something drawn changed outside the cards' own state (a picture loaded, a new card, the canvas resized, which
+  // blanks it): the next frame draws, whatever else (see frame)
+  let dirty = true;
+  function applySize() { R.resize(S.W, S.H, S.dpr, S.dispW, S.dispH); dirty = true; }
   applySize();
 
   // ------------------------------------------------------------------ shared particle systems (themes spawn into these)
@@ -500,10 +503,14 @@
   }
 
   // ------------------------------------------------------------------ frame loop
-  let raf = 0, last = 0, clock = 0, idleSince = 0, idleSent = true, themeBusySince = 0;
+  // slowT: nothing on screen changes (a card resting while its file arrives: only its progress line moves, and that's
+  // not drawn here), so the next frame comes after a short wait instead of at once; any event brings it back at once.
+  let raf = 0, last = 0, clock = 0, idleSince = 0, idleSent = true, themeBusySince = 0, drawnLook = null, slowT = 0;
   function kick() {
     idleSince = 0;
     idleSent = false;
+    dirty = true;
+    if (slowT) { clearTimeout(slowT); slowT = 0; raf = 0; }
     if (!raf) { last = now(); raf = requestAnimationFrame(frame); }
   }
   E.kick = kick;
@@ -514,6 +521,7 @@
     AP.p = 0; AP.hold = 0; AP.hover = 0;
     if (theme && theme.reset) theme.reset(E);
     if (GL_OK) R.clear();
+    drawnLook = null;
   }
 
   function updateParticles(dt) {
@@ -549,7 +557,9 @@
     }
   }
 
-  function puffSprites(layer, out) {
+  // particles go straight into packed sprite buffers (R.pack), not an object each per frame
+  const vapPack = R.spritePack(), sprPack = R.spritePack();
+  function puffSprites(layer, pk) {
     for (const p of puffs) {
       if (p.layer !== layer) continue;
       const u = p.age / p.life;
@@ -562,17 +572,17 @@
       const sp = Math.hypot(p.vx, p.vy);
       const st = 1 + Math.min(sp / 900, 1.3);
       const rot = sp > 40 ? Math.atan2(p.vy, p.vx) : p.rot;
-      out.push({ x: p.x, y: p.y, z: p.z, size, rot, stx: st, sty: 1 / Math.sqrt(st), alpha: a, color: p.color, seed: p.seed, kind: p.kind, life: u });
+      R.pack(pk, p.x, p.y, p.z, size, rot, st, 1 / Math.sqrt(st), p.color, a, p.seed, p.kind, u);
     }
   }
-  function glowSprites(layer, out) {
+  function glowSprites(layer, pk) {
     for (const g of glows) {
       if (g.layer !== layer) continue;
       const u = g.age / g.life;
       let a = g.alpha * sstep(0, g.fadeIn, g.age) * (1 - sstep(g.fadeOut == null ? 0.55 : g.fadeOut, 1, u));
       if (g.twinkle) a *= 0.55 + 0.45 * Math.sin(g.age * g.twinkle + g.seed * 20);
       if (a < 0.003) continue;
-      out.push({ x: g.x, y: g.y, z: g.z, size: g.size * (1 + g.grow * g.age), rot: g.rot || 0, stx: g.stx || 1, sty: g.sty || 1, alpha: a, color: g.color, seed: g.seed, kind: g.kind, life: u });
+      R.pack(pk, g.x, g.y, g.z, g.size * (1 + g.grow * g.age), g.rot, g.stx, g.sty, g.color, a, g.seed, g.kind, u);
     }
   }
   function segList() {
@@ -764,15 +774,20 @@
     if (theme.update) theme.update(E, AP, dt / 1000);
     updateParticles(dt);
 
-    // ---- draw
-    if (GL_OK) {
+    // ---- draw, when what's drawn changes. While effects run (particles, the theme's own, an approach, a hologram)
+    // that's every frame; otherwise only when a card's look changes, and then the theme has nothing to draw.
+    const live = !!(puffs.length || glows.length || segs.length || AP.p > 0.003 || AP.hold > 0 || AP.hover > 0 ||
+      (theme.busy && theme.busy(E)) || [...cards.values()].some((c) => c.revealMode === 2 && c.visible && !c.hiddenOnPC));
+    const look = live ? null : lookOf(prevPoses);
+    const draw = GL_OK && (live || dirty || look !== drawnLook);
+    if (draw) {
       R.clear();
-      if (theme.drawBackground) theme.drawBackground(E, AP);
+      if (live && theme.drawBackground) theme.drawBackground(E, AP);
       for (const c of cards.values()) if (c.visible && !c.hiddenOnPC) shadowFor(c);
-      const vap = []; puffSprites('under', vap); R.drawVapor(vap);
-      const under = []; glowSprites('under', under); R.drawSprites(under);
+      vapPack.n = 0; puffSprites('under', vapPack); R.drawVapor(vapPack);
+      sprPack.n = 0; glowSprites('under', sprPack); R.drawSprites(sprPack);
       R.drawStreaks(segList());
-      if (theme.drawUnder) theme.drawUnder(E, AP);
+      if (live && theme.drawUnder) theme.drawUnder(E, AP);
       for (const c of cards.values()) {
         if (!c.visible || c.hiddenOnPC) continue;
         if (c.state === 'track' && c.msg) {
@@ -784,9 +799,11 @@
         if (c.sheets) drawSheets(c);
         R.drawCard(c);
       }
-      const over = []; puffSprites('over', over); glowSprites('over', over); R.drawSprites(over);
-      if (theme.drawOver) theme.drawOver(E, AP);
+      sprPack.n = 0; puffSprites('over', sprPack); glowSprites('over', sprPack); R.drawSprites(sprPack);
+      if (live && theme.drawOver) theme.drawOver(E, AP);
+      drawnLook = look;
     }
+    dirty = false;
 
     // a hold or hover the PC/phone stopped reporting fades out instead of staying on screen
     if (AP.hold > 0 && t - (AP.holdAt || 0) > 4000) AP.hold = 0;
@@ -798,15 +815,43 @@
       else if (t - themeBusySince > 8000) { if (theme.reset) theme.reset(E); themeBusy = false; themeBusySince = 0; }
     } else themeBusySince = 0;
     const busy = cards.size || puffs.length || glows.length || segs.length || AP.p > 0.003 || AP.hold > 0 || AP.hover > 0 || themeBusy;
-    if (busy) { idleSince = 0; raf = requestAnimationFrame(frame); return; }
+    if (busy) {
+      idleSince = 0;
+      // nothing on screen changed (a card resting while its file arrives): look again in a moment, not every frame
+      if (!draw && !live) {
+        raf = -1;
+        slowT = setTimeout(() => { slowT = 0; raf = requestAnimationFrame(frame); }, 100);
+        return;
+      }
+      raf = requestAnimationFrame(frame);
+      return;
+    }
     if (!idleSince) idleSince = t;
     if (t - idleSince > 300) {
       raf = 0;
       if (GL_OK) R.clear();
+      drawnLook = null;
       if (!idleSent) { idleSent = true; requestAnimationFrame(() => api.send('fx:idle')); }
       return;
     }
     raf = requestAnimationFrame(frame);
+  }
+
+  // what the cards on screen look like, rounded below what can be seen (a damped value creeping toward its end isn't a
+  // change); "m": the card moved this frame, so it was drawn blurred and is drawn again once it stops
+  const q = (v, k) => Math.round((v == null ? 0 : v) * k);
+  const poseKey = (p) => q(p.x, 50) + ',' + q(p.y, 50) + ',' + q(p.z, 50) + ',' + q(p.rx, 1e4) + ',' + q(p.ry, 1e4) +
+    ',' + q(p.rz, 1e4) + ',' + q(p.sx == null ? 1 : p.sx, 1e4) + ',' + q(p.sy == null ? 1 : p.sy, 1e4);
+  function lookOf(prevPoses) {
+    let s = '';
+    for (const c of cards.values()) {
+      if (!c.visible || c.hiddenOnPC) continue;
+      const k = poseKey(c.pose), b = prevPoses.get(c);
+      s += c.id + ':' + k + (b && poseKey(b) !== k ? 'm' : '') + ',' + q(c.opacity, 1e3) + ',' + q(c.sat, 1e3) + ',' +
+        q(c.bright, 1e3) + ',' + q(c.reveal, 1e3) + ',' + (c.revealMode || 0) + ',' + q(c.gloss, 1e3) + ',' +
+        (c.back || 0) + ',' + q(c.w, 50) + ',' + q(c.h, 50) + ',' + q(c.shadowK, 1e3) + ';';
+    }
+    return s;
   }
 
   window.addEventListener('resize', () => { S.W = innerWidth; S.H = innerHeight; applySize(); });

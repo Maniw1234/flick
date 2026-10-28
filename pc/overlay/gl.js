@@ -541,23 +541,18 @@ void main() {
   R.freeTex = (t) => { if (t) gl.deleteTexture(t); };
 
   // ------------------------------------------------------------------ matrices
-  function mat4() { return new Float32Array(16); }
-  function mul(a, b) {
-    const o = mat4();
-    for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
-      o[c * 4 + r] = a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] + a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
-    }
-    return o;
-  }
-  function ident() { const m = mat4(); m[0] = m[5] = m[10] = m[15] = 1; return m; }
-  function trans(x, y, z) { const m = ident(); m[12] = x; m[13] = y; m[14] = z; return m; }
-  function rotX(a) { const m = ident(), c = Math.cos(a), s = Math.sin(a); m[5] = c; m[6] = s; m[9] = -s; m[10] = c; return m; }
-  function rotY(a) { const m = ident(), c = Math.cos(a), s = Math.sin(a); m[0] = c; m[2] = -s; m[8] = s; m[10] = c; return m; }
-  function rotZ(a) { const m = ident(), c = Math.cos(a), s = Math.sin(a); m[0] = c; m[1] = s; m[4] = -s; m[5] = c; return m; }
-  function scale(x, y) { const m = ident(); m[0] = x; m[5] = y; return m; }
   // pose: {x,y,z, rx (roll about world x), ry (pitch about world y), rz (in-plane), sx, sy}
-  function model(p) {
-    return mul(trans(p.x, p.y, p.z || 0), mul(rotY(p.ry || 0), mul(rotX(p.rx || 0), mul(rotZ(p.rz || 0), scale(p.sx || 1, p.sy || 1)))));
+  // model = translate · rotY(ry) · rotX(rx) · rotZ(rz) · scale(sx, sy) (column-major), worked out in one go and
+  // written into `out` (a new matrix when none is given): several are needed per card and frame, none made between
+  function model(p, out) {
+    const m = out || new Float32Array(16);
+    const cx = Math.cos(p.rx || 0), sx = Math.sin(p.rx || 0), cy = Math.cos(p.ry || 0), sy = Math.sin(p.ry || 0);
+    const cz = Math.cos(p.rz || 0), sz = Math.sin(p.rz || 0), kx = p.sx || 1, ky = p.sy || 1;
+    m[0] = (cy * cz + sy * sx * sz) * kx; m[1] = cx * sz * kx; m[2] = (cy * sx * sz - sy * cz) * kx; m[3] = 0;
+    m[4] = (sy * sx * cz - cy * sz) * ky; m[5] = cx * cz * ky; m[6] = (sy * sz + cy * sx * cz) * ky; m[7] = 0;
+    m[8] = sy * cx; m[9] = -sx; m[10] = cy * cx; m[11] = 0;
+    m[12] = p.x; m[13] = p.y; m[14] = p.z || 0; m[15] = 1;
+    return m;
   }
   R.model = model;
   R.apply = function (m, x, y, z) {
@@ -570,9 +565,9 @@ void main() {
 
   // ------------------------------------------------------------------ cards
   // card: { tex, texW, texH, w, h, radius, pose, prev, opacity, gloss, back, sat, bright, reveal, revealMode, revealAxis, revealColor }
-  function drawCardOnce(c, pose, weight) {
+  // m: the card's model matrix
+  function drawCardOnce(c, m, weight) {
     const u = R.use(P.card);
-    const m = model(pose);
     gl.uniformMatrix4fv(u.uModel, false, m);
     gl.uniform2f(u.uSize, c.w, c.h);
     gl.uniform1f(u.uRadius, c.radius);
@@ -603,14 +598,22 @@ void main() {
     gl.bindVertexArray(quadVAO);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
-  function lerpPose(a, b, s) {
-    const o = {};
-    for (const k of ['x', 'y', 'z', 'rx', 'ry', 'rz', 'sx', 'sy']) {
+  const POSE_KEYS = ['x', 'y', 'z', 'rx', 'ry', 'rz', 'sx', 'sy'];
+  function lerpPose(a, b, s, o) {
+    for (const k of POSE_KEYS) {
       const va = a[k] == null ? (k === 'sx' || k === 'sy' ? 1 : 0) : a[k];
       const vb = b[k] == null ? (k === 'sx' || k === 'sy' ? 1 : 0) : b[k];
       o[k] = va + (vb - va) * s;
     }
     return o;
+  }
+  const subPose = {}, mats = Array.from({ length: 12 }, () => new Float32Array(16));
+  // [x, y, w, h] in canvas pixels (y from the bottom, as gl.scissor takes it) around a DIP box, a few pixels wider;
+  // null when none of it is on the canvas
+  function scissorBox(x0, y0, x1, y1, pad) {
+    const a = Math.max(0, Math.floor(x0 * DPR) - pad), b = Math.min(CW, Math.ceil(x1 * DPR) + pad);
+    const lo = Math.max(0, Math.floor(CH - y1 * DPR) - pad), hi = Math.min(CH, Math.ceil(CH - y0 * DPR) + pad);
+    return a < b && lo < hi ? [a, lo, b - a, hi - lo] : null;
   }
   R.drawCard = function (c) {
     const pose = c.pose, prev = c.prev || pose;
@@ -622,20 +625,39 @@ void main() {
     if (K === 1) {
       R.blendOver();
       bindTarget(null);
-      drawCardOnce(c, pose, 1);
+      drawCardOnce(c, model(pose, mats[0]), 1);
       return;
     }
+    // The sub-frames add up in a buffer that is then laid over the screen. Only the part of the screen they cover is
+    // cleared and laid over (scissor), not all of it: the box around every sub-frame's projected corners.
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    const hw = c.w / 2, hh = c.h / 2;
+    for (let i = 0; i < K; i++) {
+      const m = model(lerpPose(prev, pose, (i + 0.5) / K, subPose), mats[i]);
+      for (let k = 0; k < 4; k++) {
+        const lx = k & 1 ? hw : -hw, ly = k & 2 ? hh : -hh;
+        const f = FOCAL / Math.max(FOCAL - (m[2] * lx + m[6] * ly + m[14]), 1);
+        const sx = W / 2 + (m[0] * lx + m[4] * ly + m[12] - W / 2) * f;
+        const sy = H / 2 + (m[1] * lx + m[5] * ly + m[13] - H / 2) * f;
+        if (sx < x0) x0 = sx; if (sx > x1) x1 = sx; if (sy < y0) y0 = sy; if (sy > y1) y1 = sy;
+      }
+    }
+    const box = scissorBox(x0, y0, x1, y1, 2);
+    if (!box) return;                                // all of it off screen
     if (!acc) acc = target(CW, CH, true);
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(box[0], box[1], box[2], box[3]);
     bindTarget(acc);
     gl.clearColor(0, 0, 0, 0);
     gl.clear(gl.COLOR_BUFFER_BIT);
     R.blendAdd();
-    for (let i = 0; i < K; i++) drawCardOnce(c, lerpPose(prev, pose, (i + 0.5) / K), 1 / K);
+    for (let i = 0; i < K; i++) drawCardOnce(c, mats[i], 1 / K);
     bindTarget(null);
     R.blendOver();
     const u = R.use(P.composite);
     R.bindTex(0, acc.tex, u.uSrc);
     R.tri();
+    gl.disable(gl.SCISSOR_TEST);
   };
 
   // soft contact / cast shadow on the desktop plane
@@ -655,8 +677,23 @@ void main() {
   };
 
   // ------------------------------------------------------------------ sprites & streaks
+  // Sprites come as a list of objects (a theme's few lamps) or packed: { data, n }, 14 floats each (x y z, size rot
+  // stretchX stretchY, r g b, alpha seed kind life). The overlay packs its particles straight into one (R.pack), so
+  // no object is made per particle and frame.
+  R.spritePack = () => ({ data: new Float32Array(14 * 1024), n: 0 });
+  const WHITE = [1, 1, 1];
+  R.pack = function (pk, x, y, z, size, rot, stx, sty, color, alpha, seed, kind, life) {
+    if (pk.data.length < (pk.n + 1) * 14) { const d = new Float32Array(pk.data.length * 2); d.set(pk.data); pk.data = d; }
+    const d = pk.data, c = color || WHITE;
+    let o = pk.n * 14;
+    d[o++] = x; d[o++] = y; d[o++] = z || 0; d[o++] = size; d[o++] = rot || 0; d[o++] = stx || 1; d[o++] = sty || 1;
+    d[o++] = c[0]; d[o++] = c[1]; d[o++] = c[2]; d[o++] = alpha; d[o++] = seed || 0; d[o++] = kind || 0; d[o++] = life || 0;
+    pk.n++;
+  };
   let spriteData = new Float32Array(14 * 2048);
-  function fillSprites(list) {
+  const listPack = { data: null, n: 0 };
+  function packed(list) {
+    if (list.data) return list;
     const n = list.length;
     if (spriteData.length < n * 14) spriteData = new Float32Array(n * 14 * 2);
     let o = 0;
@@ -668,23 +705,38 @@ void main() {
       spriteData[o++] = c[0]; spriteData[o++] = c[1]; spriteData[o++] = c[2];
       spriteData[o++] = s.alpha; spriteData[o++] = s.seed || 0; spriteData[o++] = s.kind || 0; spriteData[o++] = s.life || 0;
     }
+    listPack.data = spriteData; listPack.n = n;
+    return listPack;
+  }
+  function fillSprites(pk) {
     gl.bindBuffer(gl.ARRAY_BUFFER, spriteVBO);
-    gl.bufferData(gl.ARRAY_BUFFER, spriteData.subarray(0, n * 14), gl.DYNAMIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, pk.data.subarray(0, pk.n * 14), gl.DYNAMIC_DRAW);
   }
   R.drawSprites = function (list) {
-    const n = list.length;
+    const pk = packed(list), n = pk.n;
     if (!n) return;
     R.blendOver();
     bindTarget(null);
     R.use(P.sprite);
     gl.bindVertexArray(spriteVAO);
-    fillSprites(list);
+    fillSprites(pk);
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, n);
   };
   // vapor puffs (same instance layout as sprites) → density buffer → one shaded cloud
   R.drawVapor = function (list, color, k) {
-    const n = list.length;
+    const pk = packed(list), n = pk.n;
     if (!n) return;
+    // the shading pass looks only where the puffs are (everywhere else it would find no gas and stop)
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (let i = 0, d = pk.data; i < n; i++) {
+      const o = i * 14, f = FOCAL / Math.max(FOCAL - d[o + 2], 1);
+      const r = d[o + 3] * 0.5 * Math.hypot(d[o + 5], d[o + 6]) * f;
+      const cx = W / 2 + (d[o] - W / 2) * f, cy = H / 2 + (d[o + 1] - H / 2) * f;
+      if (cx - r < x0) x0 = cx - r; if (cx + r > x1) x1 = cx + r;
+      if (cy - r < y0) y0 = cy - r; if (cy + r > y1) y1 = cy + r;
+    }
+    const box = scissorBox(x0, y0, x1, y1, 8);
+    if (!box) return;
     const tw = Math.max(1, Math.round(CW / 2)), th = Math.max(1, Math.round(CH / 2));
     if (!vden || vden.w !== tw || vden.h !== th) { freeTarget(vden); vden = target(tw, th, true); }
     const ds = floatTargets ? 1 : 0.5;          // 8-bit fallback: keep sums below 1.0
@@ -695,7 +747,7 @@ void main() {
     let u = R.use(P.vden);
     gl.uniform1f(u.uDenScale, ds);
     gl.bindVertexArray(vdenVAO);
-    fillSprites(list);
+    fillSprites(pk);
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, n);
     bindTarget(null);
     R.blendOver();
@@ -706,7 +758,10 @@ void main() {
     gl.uniform3f(u.uColor, c[0], c[1], c[2]);
     gl.uniform1f(u.uK, k || 1.45);
     gl.uniform1f(u.uDenScale, ds);
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(box[0], box[1], box[2], box[3]);
     R.tri();
+    gl.disable(gl.SCISSOR_TEST);
   };
   let streakData = new Float32Array(11 * 1024);
   R.drawStreaks = function (list) {
