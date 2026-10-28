@@ -495,7 +495,11 @@
       if (b) b.onclick = (e) => { e.preventDefault(); repair(); };
     } else if (st.problemShown !== kind) {
       st.problemShown = kind;
-      toast(msg.replace(/<[^>]+>/g, '').replace(/ If you reinstalled.*$/, ''), 4200);
+      // as text: the tags left out and the name as it is (stripping the tags left "Mani&#39;s PC", the PC's default
+      // name escaped)
+      const t = document.createElement('template');
+      t.innerHTML = msg;
+      toast(t.content.textContent.replace(/ If you reinstalled.*$/, ''), 4200);
       if (kind !== 'old') { closeLink(); showScreen('pair'); linkProblem(kind); }
     }
   }
