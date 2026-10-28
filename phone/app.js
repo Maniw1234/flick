@@ -1548,7 +1548,10 @@
   }
 
   // ------------------------------------------------------------------ multi-select
-  function selItems() { return V.items.filter((it) => SEL.ids.has(it.id) && !it.incoming); }
+  // what can be selected: the files the grid shows (not one still coming from the PC, nor a Flick-list file already
+  // on its way to it: hidden, Select all took it too, and Send sent it again)
+  function selectable(it) { return !it.incoming && !st.hidden.has(it.id); }
+  function selItems() { return V.items.filter((it) => SEL.ids.has(it.id) && selectable(it)); }
   function setSelecting(on) {
     SEL.on = !!on;
     if (!SEL.on) SEL.ids.clear();
@@ -1573,7 +1576,7 @@
     const n = SEL.ids.size;
     $('htitle').textContent = n === 1 ? '1 selected' : n.toLocaleString() + ' selected';
     $('hsub').textContent = st.connected ? 'Drag to your PC, or tap Send' : 'Connect to your PC to send';
-    const all = V.items.filter((it) => !it.incoming && shown(it));
+    const all = V.items.filter((it) => selectable(it) && shown(it));
     $('selAll').textContent = all.length && all.every((it) => SEL.ids.has(it.id)) ? 'Select none' : 'Select all';
     const send = $('selSend');
     send.classList.toggle('off', !st.connected);
@@ -1581,7 +1584,7 @@
   }
   $('selClose').onclick = () => { haptic('soft'); setSelecting(false); };
   $('selAll').onclick = () => {
-    const all = V.items.filter((it) => !it.incoming && shown(it));   // (while searching: what the search shows)
+    const all = V.items.filter((it) => selectable(it) && shown(it));   // (while searching: what the search shows)
     const every = all.every((it) => SEL.ids.has(it.id));
     if (every) SEL.ids.clear(); else for (const it of all) SEL.ids.add(it.id);
     haptic('tick');
