@@ -2671,8 +2671,13 @@
   // A click no finger made does what a tap does: a screen reader's double tap (TalkBack), a switch, a keyboard or a
   // mouse (cards answered only to touches: a folder couldn't be opened, nor a file's menu, without a finger). A
   // finger's own click is left alone: its tap was handled as it ended, and a press that only selected must stay so.
+  // (a mouse held down a while before it lets go is a press, not a click)
+  let downAt = 0, upAt = 0;
+  grid.addEventListener('pointerdown', () => { downAt = now(); }, { passive: true });
+  grid.addEventListener('pointerup', () => { upAt = now(); }, { passive: true });
   grid.addEventListener('click', (e) => {
-    if (now() - touchedAt < 800 || !e.target.closest || e.target.closest('.more')) return;
+    if (now() - touchedAt < 800 || (now() - upAt < 300 && upAt - downAt > 500)) return;
+    if (!e.target.closest || e.target.closest('.more')) return;
     const card = e.target.closest('.card');
     const it = card && V.items.find((x) => x.id === card.dataset.id);
     if (it && !it.incoming && !st.hidden.has(it.id)) tapCard(it);
