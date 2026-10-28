@@ -33,13 +33,23 @@
     return why ? 'Couldn’t sync (' + why.slice(0, 60) + ')' : 'Couldn’t sync';
   }
 
+  // While a folder syncs the page is drawn every few hundred ms. Its rows stay the same elements and only their figures
+  // change: rebuilt each time, a screen reader lost its place on the page, and a row being pressed its highlight. The
+  // page is built anew only when the list itself changes (a folder added or stopped).
+  const rows = new Map();                          // pair id -> its row
+  let shape = null;
   function render() {
     const pairs = (A.njson('syncPairs') || []).filter((p) => p && p.id && p.path);
     if (adding && (pairs.some((p) => trim(p.path) === trim(adding.path)) || Date.now() - adding.at > 90000)) adding = null;
     const body = page.body;
-    body.innerHTML = '';
     page.act.disabled = !pairs.length || !A.has('syncNow');
-    if (A.st.connected && !X.newPc()) body.appendChild(h('div', 'fnote', X.OLD_PC));
+    const old = !!(A.st.connected && !X.newPc());
+    const key = pairs.map((p) => p.id).join('|') + '|' + (adding ? adding.path : '') + '|' + old;
+    if (key === shape) { for (const p of pairs) { const r = rows.get(p.id); if (r) figures(r, p); } return; }
+    shape = key;
+    rows.clear();
+    body.innerHTML = '';
+    if (old) body.appendChild(h('div', 'fnote', X.OLD_PC));
     if (!pairs.length && !adding) {
       body.appendChild(X.empty(A.icons.sync, 'No synced folders', 'Keep a folder the same on this phone and your PC. Changes on either side reach the other.', addButton()));
       return;
@@ -65,25 +75,39 @@
     const ic = h('span', 'fic folder');
     ic.appendChild(A.svgEl(X.SVG.folder));
     const tx = h('span', 'ftx');
-    tx.appendChild(X.nm('b', '', p.name || trim(p.path).split('/').pop()));
-    tx.appendChild(h('small', '', 'With ' + (p.pcName || 'your PC') + (p.state !== 'adding' && p.files >= 0 ? ' · ' + files(p.files) : '')));
+    r._name = X.nm('b');
+    r._sub = h('small');
+    r._state = h('small');
+    tx.append(r._name, r._sub, r._state);
+    main.append(ic, tx);
+    r.appendChild(main);
+    if (p.state === 'adding') { main.disabled = true; figures(r, p); return r; }
+    rows.set(p.id, r);
+    main.onclick = () => menu(r._p);                // (the folder as it is now)
+    r._more = h('button', 'fmore');
+    r._more.appendChild(A.svgEl(X.SVG.dots));
+    r._more.onclick = () => menu(r._p);
+    r.appendChild(r._more);
+    figures(r, p);
+    return r;
+  }
+  // a row's figures: its name, how many files, how its sync is going
+  function figures(r, p) {
+    r._p = p;
+    const name = p.name || trim(p.path).split('/').pop();
+    if (r._name.textContent !== name) r._name.textContent = name;
+    const sub = 'With ' + (p.pcName || 'your PC') + (p.state !== 'adding' && p.files >= 0 ? ' · ' + files(p.files) : '');
+    if (r._sub.textContent !== sub) r._sub.textContent = sub;
     const lv = live.get(p.id);
     let state, bad = false;
     if (p.state === 'adding') state = 'Setting up…';
     else if (lv || p.state === 'running') state = lv && lv.total ? 'Syncing… ' + Math.min(lv.done, lv.total).toLocaleString() + ' of ' + lv.total.toLocaleString() : 'Syncing…';
     else if (p.state === 'error') { state = whyText(p.why); bad = true; }
     else state = p.last ? 'Synced ' + ago(p.last) : 'Not synced yet';
-    tx.appendChild(h('small', 'fstate' + (bad ? ' fbad' : lv || p.state === 'running' || p.state === 'adding' ? ' fbusy' : ''), state));
-    main.append(ic, tx);
-    r.appendChild(main);
-    if (p.state === 'adding') { main.disabled = true; return r; }
-    main.onclick = () => menu(p);
-    const more = h('button', 'fmore');
-    more.setAttribute('aria-label', 'More for ' + (p.name || 'this folder'));
-    more.appendChild(A.svgEl(X.SVG.dots));
-    more.onclick = () => menu(p);
-    r.appendChild(more);
-    return r;
+    const cls = 'fstate' + (bad ? ' fbad' : lv || p.state === 'running' || p.state === 'adding' ? ' fbusy' : '');
+    if (r._state.textContent !== state) r._state.textContent = state;
+    if (r._state.className !== cls) r._state.className = cls;
+    if (r._more) r._more.setAttribute('aria-label', 'More for ' + (p.name || 'this folder'));
   }
 
   function menu(p) {
