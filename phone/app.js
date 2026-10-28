@@ -144,7 +144,12 @@
   const FOLDER_SVG = '<svg viewBox="0 0 64 52"><defs><linearGradient id="fg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8fb4ff"/><stop offset="1" stop-color="#4c7dff"/></linearGradient></defs><path d="M4 9a5 5 0 0 1 5-5h14l6 6h26a5 5 0 0 1 5 5v28a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5z" fill="#3a5fcc"/><path d="M4 18a5 5 0 0 1 5-5h46a5 5 0 0 1 5 5v25a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5z" fill="url(#fg)"/></svg>';
 
   let sheetOpen = false, sheetAt = 0;
-  let sheetHideT = 0, sheetFrom = null;
+  let sheetHideT = 0, sheetFrom = null, sheetFocused = false;
+  // when a keyboard or a screen reader (a click no finger or mouse made: TalkBack's double tap) was used last
+  let pressedAt = 0, assistAt = 0;
+  document.addEventListener('pointerdown', () => { pressedAt = now(); }, { capture: true, passive: true });
+  document.addEventListener('keydown', () => { assistAt = now(); }, { capture: true, passive: true });
+  document.addEventListener('click', () => { if (now() - pressedAt > 1000) assistAt = now(); }, { capture: true, passive: true });
   function openSheet(title, actions) {
     clearTimeout(sheetHideT);          // a sheet opened from another sheet must not be hidden by its close timer
     sheetAt = now();
@@ -165,17 +170,18 @@
       box.appendChild(b);
     }
     const from = document.activeElement;
-    if ((sh.hidden || sh.classList.contains('closing')) && !sh.contains(from)) sheetFrom = from;
+    if ((sh.hidden || sh.classList.contains('closing')) && !sh.contains(from)) { sheetFrom = from; sheetFocused = false; }
     sh.hidden = false; sh.classList.remove('closing');
     sheetOpen = true;
     haptic('soft');
     // A screen reader (or a keyboard) is taken to the menu: it comes last on the page, after every card, so TalkBack
-    // reached it only past all of them. (Not away from a text field being typed in: its keyboard would go.)
+    // reached it only past all of them. (Not for a finger: its menu would show a focus ring. Nor away from a text
+    // field being typed in: its keyboard would go.)
     setTimeout(() => {
       const a = document.activeElement;
-      if (!sheetOpen || (a && /^(INPUT|TEXTAREA)$/.test(a.tagName) && !sh.contains(a))) return;
+      if (!sheetOpen || assistAt < pressedAt || now() - assistAt > 1000 || (a && /^(INPUT|TEXTAREA)$/.test(a.tagName) && !sh.contains(a))) return;
       const f = box.querySelector('button:not([disabled]), input, [tabindex]');
-      if (f) f.focus({ preventScroll: true });
+      if (f) { f.focus({ preventScroll: true }); sheetFocused = true; }
     }, 0);
   }
   function closeSheet() {
@@ -186,10 +192,10 @@
     for (const v of sh.querySelectorAll('video')) v.pause();
     clearTimeout(sheetHideT);
     sheetHideT = setTimeout(() => { sh.hidden = true; sh.classList.remove('closing'); }, 200);
-    // and back where it was opened from
+    // and back where it was opened from (when it took the focus)
     const from = sheetFrom;
     sheetFrom = null;
-    if (from && from.isConnected && sh.contains(document.activeElement) && typeof from.focus === 'function') {
+    if (sheetFocused && from && from.isConnected && sh.contains(document.activeElement) && typeof from.focus === 'function') {
       try { from.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
     }
   }
