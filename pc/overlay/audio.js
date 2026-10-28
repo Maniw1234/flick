@@ -7,7 +7,7 @@
   window.SFX = A;
   A.enabled = true;
   let vol = 0.7;
-  let ctx = null, out = null;
+  let ctx = null, out = null, told = false;
   const bufs = {}, loads = {};
   const live = new Set();                 // sounds playing: { src, g, end }
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -21,7 +21,10 @@
       out = ctx.createGain();
       out.gain.value = gainOf(vol);
       out.connect(ctx.destination);
-    } catch (e) { ctx = null; }
+    } catch (e) {
+      ctx = null;
+      if (!told) { told = true; console.log('sound: no sound device (' + e.message + ')'); }    // (to Flick's log)
+    }
     return ctx;
   }
   A.now = () => (ctx ? ctx.currentTime : 0);
@@ -100,7 +103,8 @@
     Promise.all([load(name), running()]).then(([buf, c]) => {
       if (!buf || !c || h.stopped || !A.enabled) return;
       const late = (performance.now() - asked) / 1000;
-      if (late > 0.5 || offset + late >= buf.duration) return;
+      if (late > 0.5) { console.log('sound ' + name + ': the sound device took too long to start, skipped'); return; }
+      if (offset + late >= buf.duration) return;
       if (live.size >= 2) { const first = live.values().next().value; first.h.fade(0.06); live.delete(first); }
       const src = c.createBufferSource();
       src.buffer = buf;

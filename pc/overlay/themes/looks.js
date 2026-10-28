@@ -296,6 +296,8 @@
       E0 = E;
       edge.y = E.S.anchor * E.S.H;
       try { if (X.init()) X.warm(); } catch (e) { console.log('fx2 init failed: ' + e.message); }
+      // (these go to Flick's log: which graphics chip draws the animations, or that they're drawn plainly)
+      console.log(X.ready() ? 'looks: drawn by ' + (X.renderer || 'an unknown graphics chip') : 'looks: the effects can\'t start here, so cards fly plainly');
       if (X.software) { perf.lite = true; console.log('looks: no graphics chip, the light version'); }
       A.preload(NAMES);
     },

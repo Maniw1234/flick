@@ -12,6 +12,7 @@
   const canvas = document.getElementById('gl');
   const hud = document.getElementById('hud');
   const GL_OK = R.init(canvas);
+  if (!GL_OK) console.log('graphics: no WebGL 2 here, so the animations can\'t be drawn');
 
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const lerp = (a, b, t) => a + (b - a) * t;

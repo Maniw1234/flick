@@ -293,6 +293,26 @@ function overlayConfig() {
     taskbar: taskbar || 0, saveLabel: saveDirLabel(), theme: themeName() };
 }
 
+// What the overlay page reports (graphics or a sound that failed, the light version taken, an error in an animation) goes
+// to Flick's log, so a user's log shows it: each message once, and at most 40 a run, so a page failing every frame
+// can't fill the disk or slow Flick down.
+const OVL_MAX = 40;
+const ovlSeen = new Set();
+let ovlCount = 0;
+function overlayConsole(e, lvl, msg, line, src) {
+  // (Electron 35 and newer give the details on the event; older versions, as arguments)
+  const message = e && typeof e.message === 'string' ? e.message : msg;
+  const level = e && typeof e.level === 'string' ? e.level : ['debug', 'info', 'warning', 'error'][lvl] || 'info';
+  if (typeof message !== 'string' || !message.trim() || level === 'debug' || ovlCount > OVL_MAX) return;
+  const at = (e && e.sourceId) || src, ln = (e && e.lineNumber) || line;
+  const where = level === 'error' && at ? ' (' + String(at).split(/[\\/]/).pop() + (ln ? ':' + ln : '') + ')' : '';
+  const text = (level === 'error' ? 'overlay error: ' : 'overlay: ') + message.replace(/\s+/g, ' ').trim().slice(0, 300) + where;
+  if (ovlSeen.has(text)) return;
+  ovlSeen.add(text);
+  if (++ovlCount > OVL_MAX) return log('overlay: more messages, not logged');
+  log(text);
+}
+
 function createOverlay() {
   const ob = overlayBounds();
   overlay = new BrowserWindow({
@@ -309,6 +329,7 @@ function createOverlay() {
   if (!IS_WIN) overlay.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
   overlay.setIgnoreMouseEvents(true);
   overlay.setMenu(null);
+  overlay.webContents.on('console-message', overlayConsole);
   overlay.loadFile(path.join(__dirname, 'overlay', 'overlay.html'));
   overlay.on('closed', () => { overlay = null; overlayShown = false; overlayReady = false; });
   // the overlay's renderer died (GPU process crash, out of memory): start a fresh one

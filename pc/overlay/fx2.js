@@ -282,6 +282,7 @@ void main() {
     try {
       const dbg = gl.getExtension('WEBGL_debug_renderer_info');
       const ren = String(gl.getParameter(dbg ? dbg.UNMASKED_RENDERER_WEBGL : gl.RENDERER) || '');
+      X.renderer = ren;              // (for Flick's log)
       X.software = /swiftshader|llvmpipe|softpipe|software|basic render/i.test(ren) && !window.__fx2Full;
     } catch (e) { X.software = false; }
     P.spr = prog(VS_SPR, FS_SPR, 'fx2.spr');
