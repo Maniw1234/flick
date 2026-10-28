@@ -487,11 +487,52 @@ final class Bridge {
     // ======================================================================== protocol 5: features
     // Each returns at once; long work runs on a background thread and answers with an event.
 
-    /** The clipboard (Android lets Flick read it only while it is in front with focus): see Clip.read. */
+    /**
+     * The clipboard (Android lets Flick read it only while it is in front with focus): see Clip.read. It holds up the
+     * page while it waits for the focus (up to 0.6 s) and reads: the page uses clipPeek.
+     */
     @JavascriptInterface
     public String clipRead() {
-        waitForFocus();
+        a.awaitFocus(600);
         return Clip.read(a, false).toString();
+    }
+
+    // clipboard reads, one at a time, off the page's bridge thread: Flick's window may get its focus a moment after it
+    // comes back, and a picture takes a while to read and convert
+    private static final ExecutorService CLIP = Transfers.pool("flick-clip", 1);
+
+    /**
+     * clipRead without holding up the page, answered with a "clip-read" event {req, kind, id, ...} (see Clip.peek).
+     * seen: the id of the clipboard the page dealt with last: when it is that one again, the answer is that (same:true)
+     * and nothing more. adopt: the page takes it as synced whatever it holds, so the content isn't needed (nor for one
+     * from the PC). Otherwise the content comes too, as Clip.read gives it ({text} or {png}), with its SHA-256 (hash).
+     */
+    @JavascriptInterface
+    public void clipPeek(final String req, final String seen, final boolean adopt) {
+        CLIP.execute(new Runnable() {
+            @Override
+            public void run() {
+                JSONObject o = new JSONObject();
+                try {
+                    a.awaitFocus(1500);
+                    ClipData cd = Clip.grab(a);
+                    o = Clip.peek(a, cd, false);
+                    String kind = o.optString("kind"), id = o.optString("id", "");
+                    if (!"none".equals(kind)) {
+                        if (id.length() > 0 && id.equals(seen)) o.put("same", true);
+                        else if (!adopt && !o.optBoolean("fromPc", false)) {
+                            JSONObject full = Clip.describe(a, cd, false);
+                            String body = full.has("png") ? full.optString("png") : full.optString("text", "");
+                            if (body.length() > 0) full.put("hash", Clip.sha256(body));
+                            full.put("id", id);
+                            o = full;
+                        }
+                    }
+                } catch (Throwable e) { Bg.warn("clipboard", e); }
+                try { o.put("t", "clip-read"); o.put("req", req); } catch (Throwable e) { return; }
+                a.emit(o.toString());
+            }
+        });
     }
 
     /** The PC's clipboard ({kind:text,text} / {kind:image,png}) onto the phone's, if "Clipboard from your PC" is on. */
@@ -656,17 +697,15 @@ final class Bridge {
         Actions.sendLatestPhoto(a, "share", true, new Actions.Report() { @Override public void say(String msg) { a.toast(msg); } });
     }
 
-    /** What the "Send clipboard" tile does (the user asked, so a clipboard marked private goes too). */
+    /** What the "Send clipboard" tile does (the user asked, so a clipboard marked private goes too). Returns at once. */
     @JavascriptInterface
     public void sendClipboard() {
-        waitForFocus();
-        Actions.sendClipboard(a, Clip.read(a, true), new Actions.Report() { @Override public void say(String msg) { a.toast(msg); } });
-    }
-
-    // just back in front, the window may not have focus yet (the clipboard reads empty without it): up to 0.6 s
-    private void waitForFocus() {
-        for (int i = 0; i < 12 && !a.hasWindowFocus(); i++) {
-            try { Thread.sleep(50); } catch (InterruptedException e) { return; }
-        }
+        CLIP.execute(new Runnable() {
+            @Override
+            public void run() {
+                a.awaitFocus(1500);
+                Actions.sendClipboard(a, Clip.read(a, true), new Actions.Report() { @Override public void say(String msg) { a.toast(msg); } });
+            }
+        });
     }
 }

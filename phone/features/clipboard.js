@@ -9,22 +9,38 @@
   // screenshot, say) goes through the app instead, over HTTP (sendClipboard: POST /api/clip, the tile's way)
   const WS_MAX = 4 * 1024 * 1024 - 32 * 1024;
   // prefs: 'clipHash' = hash of the clipboard last sent to or taken from the PC; 'clipAdopt' = '1' when a clipboard
-  // from the PC was put on this phone since (the next check takes it as already synced instead of sending it back)
-  let wantAt = 0, tryT = 0;
+  // from the PC was put on this phone since (the next check takes it as already synced instead of sending it back);
+  // 'clipSeen' = the app's id of the clipboard the last check dealt with (the same one again isn't read again)
+  let wantAt = 0, tryT = 0, checking = false;
   let own = [];                              // { at, kind }: PC clipboards this page handed the app (an echo isn't news)
 
-  // what's on this phone's clipboard; fromPc: Flick put it there from the PC. A clipboard an app marked private (a
-  // password) reads as nothing (kind "none", sensitive: true): it never leaves the phone on its own.
-  let lastRead = null;
-  function read() {
-    const c = lastRead = A.njson('clipRead');
-    if (!c) return null;
-    const fromPc = c.fromPc === true;
-    if (c.kind === 'text' && typeof c.text === 'string' && c.text.length) return { kind: 'text', text: c.text, fromPc };
-    if (c.kind === 'image' && typeof c.png === 'string' && c.png.length) return { kind: 'image', png: c.png, fromPc };
+  // What's on this phone's clipboard, read by the app without holding up the page (it waits for Flick's window to
+  // have focus, and a picture takes a while to convert): { c: { kind, text | png, fromPc, hash } or null, r: what the
+  // app said ({ kind, id, fromPc, sensitive, same, hash, ... }) }. seen: the id of the clipboard dealt with last (the
+  // app then only says it's the same one: r.same); adopt: it will be taken as synced, so its content isn't needed
+  // (nor for one from the PC). A clipboard an app marked private (a password) reads as nothing (kind "none",
+  // sensitive: true): it never leaves the phone on its own.
+  const waiting = new Map();                 // req -> its answer's handler (a 'clip-read' event)
+  let reqN = 0;
+  function read(seen, adopt) {
+    return new Promise((resolve) => {
+      const done = (r) => resolve({ c: clipOf(r), r: r || {} });
+      if (!A.has('clipPeek')) { done(A.njson('clipRead')); return; }
+      const req = 'cr' + (++reqN);
+      const t = setTimeout(() => { waiting.delete(req); done(null); }, 15000);
+      waiting.set(req, (r) => { clearTimeout(t); done(r); });
+      if (A.nc('clipPeek', req, seen || '', !!adopt) === null) { clearTimeout(t); waiting.delete(req); done(null); }
+    });
+  }
+  function clipOf(r) {
+    if (!r) return null;
+    const fromPc = r.fromPc === true, hash = typeof r.hash === 'string' ? r.hash : '';
+    if (r.kind === 'text' && typeof r.text === 'string' && r.text.length) return { kind: 'text', text: r.text, fromPc, hash };
+    if (r.kind === 'image' && typeof r.png === 'string' && r.png.length) return { kind: 'image', png: r.png, fromPc, hash };
     return null;
   }
-  const hashOf = (c) => X.hash(c.kind === 'image' ? c.png : c.text);
+  // (the app's hash when it gave one: the same SHA-256, without sending megabytes back over the bridge)
+  const hashOf = (c) => c.hash || X.hash(c.kind === 'image' ? c.png : c.text);
   const utf8 = (s) => { try { return new TextEncoder().encode(s).length; } catch (e) { return s.length * 3; } };
 
   function send(c, auto) {
@@ -51,44 +67,57 @@
   }
 
   // ••• › Send clipboard
-  function sendNow() {
+  async function sendNow() {
     if (!X.needPc('Connect to your PC to send the clipboard')) return;
-    const c = read();
-    if (!c && lastRead && lastRead.sensitive === true) {
+    const { c, r } = await read('', false);
+    if (!c && r.sensitive === true) {
       // marked private: it goes only because the user asked, the way the Quick Settings tile sends it (the app reads
       // it, sends it and says how it went)
       if (A.nc('sendClipboard') === null) A.toast('Your clipboard is private, so it stays on this phone', 2600);
       return;
     }
     if (!c) { A.toast('Your clipboard is empty', 2000); return; }
-    send(c, false);
+    if (send(c, false) && r.id) A.pref.set('clipSeen', r.id);
   }
   X.menu(10, () => (A.has('clipRead') ? { label: 'Send clipboard', icon: 'clipboard', run: sendNow } : null));
 
   // Flick came to the front: send the clipboard if it changed since the last one that went either way
   function want(ms) { wantAt = Date.now(); clearTimeout(tryT); tryT = setTimeout(check, ms); }
-  function check() {
+  async function check() {
     clearTimeout(tryT);
     if (!wantAt || document.hidden) return;
+    if (checking) { tryT = setTimeout(check, 300); return; }   // one read at a time (this one is looked at again)
     if (!A.settings.clipSync || !A.has('clipRead')) { wantAt = 0; return; }
     if (!A.st.connected) return;                        // tried again once connected ('conn')
     if (!X.newPc()) { wantAt = 0; return; }
-    const c = read();
-    if (!c) {
-      // Android hands the clipboard over only once the window has focus, which can come a moment after 'resume'
+    const at = wantAt;
+    const adopt = A.pref.get('clipAdopt', '') === '1';
+    checking = true;
+    let got;
+    try { got = await read(A.pref.get('clipSeen', ''), adopt); } finally { checking = false; }
+    if (wantAt !== at || document.hidden) return;        // Flick went to the back meanwhile, or came back again
+    const { c, r } = got;
+    if (r.kind !== 'text' && r.kind !== 'image') {
+      // Android hands the clipboard over only once the window has focus (the app waits a moment for it): an empty
+      // answer right after coming back is asked again once
       if (Date.now() - wantAt < 2000) tryT = setTimeout(check, 900); else wantAt = 0;
       return;
     }
     wantAt = 0;
-    const h = hashOf(c);
     // it came from the PC (the app marks what it put there; 'clipAdopt' covers an app that doesn't): not sent back
-    if (c.fromPc || A.pref.get('clipAdopt', '') === '1') { A.pref.set('clipAdopt', ''); A.pref.set('clipHash', h); return; }
-    if (h === A.pref.get('clipHash', '')) return;
-    send(c, true);
+    if (r.fromPc || adopt) {
+      A.pref.set('clipAdopt', '');
+      if (r.hash) A.pref.set('clipHash', r.hash);
+      A.pref.set('clipSeen', r.id || '');
+      return;
+    }
+    if (r.same || !c) return;                            // the one dealt with last time (or unreadable)
+    if (hashOf(c) === A.pref.get('clipHash', '') || send(c, true)) A.pref.set('clipSeen', r.id || '');
   }
 
   A.on('native', (e) => {
-    if (e.t === 'resume') want(500);
+    if (e.t === 'clip-read') { const f = waiting.get(e.req); if (f) { waiting.delete(e.req); f(e); } }
+    else if (e.t === 'resume') want(500);
     else if (e.t === 'pause') { wantAt = 0; clearTimeout(tryT); }
     else if (e.t === 'clip-in') {
       // the app put a clipboard from the PC on this phone (in the background, say)
@@ -114,8 +143,9 @@
     if (!c) return;
     if (A.nc('clipWrite', JSON.stringify(c)) === null) return;
     own.push({ at: Date.now(), kind: c.kind });
-    A.pref.set('clipHash', hashOf(c));
-    if (c.kind === 'image') A.pref.set('clipAdopt', '1');   // a picture may come back from Android encoded differently
+    // a picture may come back from Android encoded differently: the next check takes whatever is there as synced
+    // (so hashing its megabytes here would be for nothing)
+    if (c.kind === 'image') A.pref.set('clipAdopt', '1'); else A.pref.set('clipHash', hashOf(c));
     A.toast('Copied from ' + X.pcName(), 1800);
   });
 });

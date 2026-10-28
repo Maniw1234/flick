@@ -14,6 +14,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.provider.Settings;
 import android.util.Log;
@@ -190,6 +191,30 @@ public class MainActivity extends Activity {
         if (u != null) u.onResume(this);
         Page.onResume(this);                         // features
         if (lock != null) lock.onResume();
+    }
+
+    // Android hands the clipboard over only while Flick's window has focus, which can come a moment after onResume
+    private final Object focus = new Object();
+    private volatile boolean focused;
+
+    @Override
+    public void onWindowFocusChanged(boolean has) {
+        super.onWindowFocusChanged(has);
+        focused = has;
+        if (has) synchronized (focus) { focus.notifyAll(); }
+    }
+
+    /** Waits (never on the main thread) until Flick's window has focus, at most ms. True when it has. */
+    boolean awaitFocus(long ms) {
+        long end = SystemClock.uptimeMillis() + ms;
+        synchronized (focus) {
+            while (!focused && !hasWindowFocus()) {
+                long left = end - SystemClock.uptimeMillis();
+                if (left <= 0) return false;
+                try { focus.wait(left); } catch (InterruptedException e) { return false; }
+            }
+        }
+        return true;
     }
 
     @Override
