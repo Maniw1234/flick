@@ -269,27 +269,35 @@ const THEMES = ['roadster', 'liquid', 'teleport', 'halo'];
 function themeName() { return THEMES.includes(store.theme) ? store.theme : 'roadster'; }
 
 // Moments that start from a quiet screen take a fresh photo of the desktop first (used for blur, refraction and
-// night grading), while the overlay is still hidden so it can never photograph itself.
+// night grading), while the overlay is still hidden so it can never photograph itself. Teleport uses no photo.
 const SHOT_FIRST = { lift: true, hold: true, outgoing: true, demo: true, 'edge-hover': true, preview: true, connect: true };
+const SHOT_MS = 600;            // a slower photo is given up on: the effects run without it rather than wait
 // once the overlay hides, its desktop photo is out of date: drop it so no later effect paints an old screen
 function dropShot() { lastShot = 0; if (overlay) overlay.webContents.send('fx:noshot'); }
-let revealT = null;
+// Effects that come while the photo is being taken wait for it here: the overlay's clock starts when it gets them,
+// so sent at once they'd play (partly or wholly) while it's still hidden. They go the moment it shows.
+let revealT = null, held = null;
 function reveal() {
   clearTimeout(revealT); revealT = null;
-  if (!overlay || overlayShown) return;
-  overlay.setBounds(overlayBounds());
-  overlay.showInactive();
-  overlay.setAlwaysOnTop(true, 'screen-saver');
-  overlayShown = true;
+  if (overlay && !overlayShown) {
+    overlay.setBounds(overlayBounds());
+    overlay.showInactive();
+    overlay.setAlwaysOnTop(true, 'screen-saver');
+    overlayShown = true;
+  }
+  const q = held;
+  held = null;
+  if (q && overlay) for (const [type, data] of q) overlay.webContents.send('fx:' + type, data);
 }
 function ensureShown(withShot) {
   if (!overlay || overlayShown || revealT) return;
-  if (withShot && shotAllowed() && Date.now() - lastShot > 1500) {
+  if (withShot && themeName() !== 'teleport' && shotAllowed() && Date.now() - lastShot > 1500) {
     // photograph the desktop first and only then show the overlay, so the picture never contains the overlay itself;
-    // a very slow capture is abandoned (the effects then run without it) rather than holding the animation back
+    // a slow capture is abandoned (the effects then run without it) rather than holding the animation back for long
     let done = false;
     const go = () => { if (done) return; done = true; reveal(); };
-    revealT = setTimeout(() => { shotAbandoned = true; go(); }, 1100);
+    held = [];
+    revealT = setTimeout(() => { shotAbandoned = true; go(); }, SHOT_MS);
     shotAbandoned = false;
     captureShot().then(go, go);
   } else reveal();
@@ -298,8 +306,9 @@ let lastFx = 0;
 function fx(type, data) {
   if (!overlay) return;
   lastFx = Date.now();
-  overlay.webContents.send('fx:' + type, data);
   ensureShown(!!SHOT_FIRST[type]);
+  if (held) held.push([type, data]);
+  else overlay.webContents.send('fx:' + type, data);
 }
 
 // Nothing may stay on screen without a reason: a drag the phone never finished, a transfer that stopped sending, or
