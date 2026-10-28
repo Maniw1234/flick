@@ -117,6 +117,7 @@ final class Outbox {
         final Set<Integer> had = new HashSet<Integer>();
         AtomicBoolean stop = new AtomicBoolean(false);
         final Object disk = new Object();             // its record is written by one thread at a time (see save)
+        String[] psums;                               // each part's checksum once the PC has it whole (this attempt)
         // progress (any thread)
         final AtomicLong sent = new AtomicLong();
         private double rate;
@@ -220,6 +221,11 @@ final class Outbox {
             JSONArray h = new JSONArray();
             for (Integer i : had) h.put(i.intValue());
             o.put("had", h);
+            if (psums != null) {
+                JSONArray ps = new JSONArray();
+                for (String x : psums) ps.put(x == null ? "" : x);
+                o.put("psums", ps);
+            }
             return o;
         }
 
@@ -255,6 +261,11 @@ final class Outbox {
             j.waitingSince = o.optLong("waitingSince", 0);
             JSONArray h = o.optJSONArray("had");
             for (int i = 0; h != null && i < h.length(); i++) j.had.add(h.optInt(i));
+            JSONArray ps = o.optJSONArray("psums");
+            if (ps != null) {
+                j.psums = new String[ps.length()];
+                for (int i = 0; i < ps.length(); i++) { String x = ps.optString(i, ""); j.psums[i] = x.length() == 64 ? x : null; }
+            }
             return j;
         }
     }
@@ -607,6 +618,7 @@ final class Outbox {
         j.sent.set(0);
         j.ways = 0;
         j.begun = false;
+        j.psums = null;
     }
 
     // what the PC answered to a part, a stream or a commit
@@ -723,16 +735,20 @@ final class Outbox {
         final AtomicBoolean stop;
         synchronized (j) { stop = j.stop; }
         markBegun(j);
-        // each part's checksum (the PC checks what it got against them): worked out from the bytes as they go; a part the
-        // PC has whole already is read for it
+        // each part's checksum (the PC checks what it got against them): worked out from the bytes as they go, and kept
+        // (written down) once the PC has the part whole; a part the PC has whole whose checksum isn't known here is read
+        // for it (reading the parts again after a cut at the end, the whole file, was most of carrying on)
         final String[] sums = new String[n];
+        final String[] known;
+        synchronized (j) { if (j.psums == null || j.psums.length != n) j.psums = new String[n]; known = j.psums.clone(); }
         List<Future<?>> parts = new ArrayList<Future<?>>();
         for (int i = 0; i < n; i++) {
             final int index = i;
             final long off = i * size, len = Math.max(0, Math.min(size, total - off));
+            if (done[i] && known[i] != null) { sums[i] = known[i]; continue; }
             if (done[i]) {
                 parts.add(pool.submit(new Callable<Void>() {
-                    @Override public Void call() throws Exception { sums[index] = rangeSum(f, off, len, stop); return null; }
+                    @Override public Void call() throws Exception { sums[index] = rangeSum(f, off, len, stop); keepSum(j, n, index, sums[index]); return null; }
                 }));
                 continue;
             }
@@ -740,7 +756,7 @@ final class Outbox {
                 @Override public Void call() throws Exception {
                     // one part failing stops the others at once (even one waiting for its answer): all of them
                     // carry on together from where the PC stands
-                    try { sums[index] = sendPart(j, l, auth, f, it.name, index, n, size, total, from[index], stop); return null; }
+                    try { sums[index] = sendPart(j, l, auth, f, it.name, index, n, size, total, from[index], stop); keepSum(j, n, index, sums[index]); return null; }
                     catch (Exception e) { Watchdog.abort(stop); throw e; }
                 }
             }));
@@ -758,6 +774,12 @@ final class Outbox {
      * over Bluetooth on one connection too). Called under j's lock.
      */
     private static boolean split(Job j) { return j.parallel && !"bluetooth".equals(j.via); }
+
+    /** Part index's checksum, now that the PC has the part whole: a later try (in a new process too) needn't read it. */
+    private void keepSum(Job j, int n, int index, String sum) {
+        synchronized (j) { if (j.psums == null || j.psums.length != n) return; j.psums[index] = sum; }
+        save(j);
+    }
 
     /** This attempt is about to send the PC data: from now on a retry asks how far it got first. */
     private void markBegun(Job j) {
