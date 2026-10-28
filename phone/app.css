@@ -151,18 +151,19 @@ img { -webkit-user-drag: none; user-select: none; pointer-events: none; }
 #empty b { color: #e5e5ea; }
 
 /* ---------------- toolbar ---------------- */
-#toolbar { position: absolute; left: 14px; right: 14px; bottom: calc(var(--bottom) + 14px); display: flex; justify-content: space-between; align-items: center; pointer-events: none; z-index: 5; }
+/* (a long count, "Waiting for <a long PC name>…", is shortened: it pushed the ••• button off the screen) */
+#toolbar { position: absolute; left: 14px; right: 14px; bottom: calc(var(--bottom) + 14px); display: flex; justify-content: space-between; align-items: center; gap: 10px; pointer-events: none; z-index: 5; }
 #toolbar > * { pointer-events: auto; }
 .pill, .round { background: rgba(44,44,48,0.78); backdrop-filter: blur(24px) saturate(1.6); -webkit-backdrop-filter: blur(24px) saturate(1.6);
   border: 0.5px solid rgba(255,255,255,0.09); box-shadow: 0 8px 30px rgba(0,0,0,0.45); }
-.pill { height: 48px; border-radius: 24px; display: flex; align-items: center; padding: 0 14px 0 6px; gap: 2px; }
-.tb { position: relative; width: 40px; height: 40px; border-radius: 20px; display: grid; place-items: center; color: #f2f2f7; }
+.pill { height: 48px; border-radius: 24px; display: flex; align-items: center; padding: 0 14px 0 6px; gap: 2px; min-width: 0; }
+.tb { position: relative; flex: none; width: 40px; height: 40px; border-radius: 20px; display: grid; place-items: center; color: #f2f2f7; }
 .tb:active, .round:active { background: rgba(255,255,255,0.12); }
 .tb svg { width: 25px; height: 25px; }
 .cdot { position: absolute; right: 6px; top: 8px; width: 7px; height: 7px; border-radius: 50%; background: #8e8e93; box-shadow: 0 0 0 2px rgba(44,44,48,1); }
 .cdot.on { background: #34c759; }
-.count { font-size: 13.5px; font-weight: 600; color: #e5e5ea; margin-left: 6px; white-space: nowrap; }
-.round { width: 48px; height: 48px; border-radius: 24px; display: grid; place-items: center; color: #f2f2f7; }
+.count { font-size: 13.5px; font-weight: 600; color: #e5e5ea; margin-left: 6px; white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.round { flex: none; width: 48px; height: 48px; border-radius: 24px; display: grid; place-items: center; color: #f2f2f7; }
 .round svg { width: 26px; height: 26px; }
 
 /* ---------------- drag / effects ---------------- */
