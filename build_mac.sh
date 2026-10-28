@@ -98,8 +98,8 @@ p.update({
     'NSBonjourServices': ['_FC9F5ED42C8A._tcp'],
     # Air grab: after a file is grabbed on the phone, the camera looks for the hand for a few seconds (pc/air.js)
     'NSCameraUsageDescription': 'Air grab: for a few seconds after you grab a file on your phone, or select files here, Flick looks for your hand. Nothing is recorded.',
-    # Air grab: which files are selected in Finder (pc/selwatch.js); macOS asks once
-    'NSAppleEventsUsageDescription': 'Air grab: Flick asks Finder which files you selected, so a fist in front of the screen can pick them up.',
+    # the send shortcut and Air grab: which files are selected in Finder (pc/selnow.js, pc/selwatch.js); macOS asks once
+    'NSAppleEventsUsageDescription': 'Flick asks Finder which files you selected, to send them to your phone with the send shortcut or Air grab.',
     # any file or folder can be dropped on Flick in the Dock or opened with it (it goes to the phone); Flick is never
     # the default app for anything
     'CFBundleDocumentTypes': [{'CFBundleTypeName': 'Any file', 'CFBundleTypeRole': 'Viewer',
