@@ -664,21 +664,46 @@ public class MainActivity extends Activity {
     private void importNow(ArrayList<Uri> uris, String[] text) {
         JSONArray added = new JSONArray();
         Library lib = Library.get(this);
-        if (uris != null) for (Uri u : uris) {
-            try { added.put(lib.importUri(u)); } catch (Throwable e) { Log.w(TAG, "import failed " + e); }
+        final int n = (uris == null ? 0 : uris.size()) + (text != null ? 1 : 0);
+        // a big video takes a while to copy in: said when it does, so the share doesn't look lost
+        Runnable slow = new Runnable() {
+            @Override public void run() { toast(n == 1 ? "Adding to Flick…" : "Adding " + n + " files to Flick…"); }
+        };
+        ui.postDelayed(slow, 1500);
+        int failed = 0;
+        boolean full = false;
+        try {
+            if (uris != null) for (Uri u : uris) {
+                try { added.put(lib.importUri(u)); }
+                catch (Throwable e) { failed++; full |= noSpace(e); Log.w(TAG, "import failed " + e); }
+            }
+            if (text != null) {
+                try {
+                    String title = text[1] != null && text[1].trim().length() > 0 ? text[1].trim() : "Shared text";
+                    added.put(lib.importText(text[0], title.length() > 60 ? title.substring(0, 60) : title));
+                } catch (Throwable e) { failed++; full |= noSpace(e); Log.w(TAG, "import failed " + e); }
+            }
+        } finally {
+            ui.removeCallbacks(slow);
         }
-        if (text != null) {
+        if (added.length() > 0) {
             try {
-                String title = text[1] != null && text[1].trim().length() > 0 ? text[1].trim() : "Shared text";
-                added.put(lib.importText(text[0], title.length() > 60 ? title.substring(0, 60) : title));
+                JSONObject o = new JSONObject();
+                o.put("t", "added");
+                o.put("items", added);
+                emit(o.toString());
             } catch (Throwable e) { /* ignore */ }
         }
-        if (added.length() == 0) return;
-        try {
-            JSONObject o = new JSONObject();
-            o.put("t", "added");
-            o.put("items", added);
-            emit(o.toString());
-        } catch (Throwable e) { /* ignore */ }
+        // what couldn't be taken in (the sharing app didn't let Flick read it, no room): said, not just logged
+        if (failed > 0) {
+            toast(full ? "Not enough space on this phone to add " + (failed == 1 ? "it" : failed + " files") + " to Flick"
+                    : failed < n ? "Couldn't add " + failed + " of the files to Flick"
+                    : n == 1 ? "Couldn't add that to Flick" : "Couldn't add those files to Flick");
+        }
+    }
+
+    private static boolean noSpace(Throwable e) {
+        String m = String.valueOf(e.getMessage());
+        return m.contains("ENOSPC") || m.contains("No space left");
     }
 }
