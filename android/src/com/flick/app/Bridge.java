@@ -258,7 +258,9 @@ final class Bridge {
 
     @JavascriptInterface
     public void listDirAsync(final String req, final String path) {
-        listing(req, new Listing() { @Override public String run(CancellationSignal c) { return Files.listDir(a, path, c); } });
+        listing(req, new Listing() {
+            @Override public String run(CancellationSignal c) { return Files.listDir(a, path, c); }
+        });
     }
 
     @JavascriptInterface
@@ -315,8 +317,8 @@ final class Bridge {
                     for (int i = 0; i < arr.length() && i < 3; i++) {
                         JSONObject x = arr.optJSONObject(i);
                         if (x == null) out.put("");
-                        else if (x.has("path")) out.put(Thumbs.base64(a, x.optString("path"), x.optLong("mtime", 0), x.optLong("mid", 0), x.optInt("mt", 0)));
-                        else out.put(Library.get(a).thumbBase64(x.optString("id", "")));
+                        else if (!x.has("path")) out.put(Library.get(a).thumbBase64(x.optString("id", "")));
+                        else out.put(Thumbs.base64(a, x.optString("path"), x.optLong("mtime", 0), x.optLong("mid", 0), x.optInt("mt", 0)));
                     }
                 } catch (Throwable e) { Bg.warn("thumbnails", e); }
                 a.result(req, "{\"thumbs\":" + out + "}");
@@ -731,7 +733,9 @@ final class Bridge {
             @Override
             public void run() {
                 a.awaitFocus(1500);
-                Actions.sendClipboard(a, Clip.read(a, true), new Actions.Report() { @Override public void say(String msg) { a.toast(msg); } });
+                Actions.sendClipboard(a, Clip.read(a, true), new Actions.Report() {
+                    @Override public void say(String msg) { a.toast(msg); }
+                });
             }
         });
     }

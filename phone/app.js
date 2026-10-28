@@ -2080,10 +2080,13 @@
   function thumbsAhead(items, ms) {
     const want = items.slice(0, 3).filter((x, i) => !x.dir && !x.thumbData && (i === 0 || x.kind === 'image' || x.kind === 'video'));
     if (!want.length || !NV || typeof NV.thumbsAsync !== 'function') return Promise.resolve();
-    const list = want.map((x) => (x.path ? { path: x.path, mtime: x.mtime || 0, mid: x.mid || 0, mt: x.mt || 0 } : { id: String(x.id) }));
+    const list = want.map((x) => (x.path ? { path: x.path, mtime: x.mtime || 0, mid: x.mid || 0, mt: x.mt || 0 }
+      : { id: String(x.id) }));
     return nreqT(ms, 'thumbsAsync', JSON.stringify(list)).then((r) => {
       const got = r && Array.isArray(r.thumbs) ? r.thumbs : [];
-      want.forEach((x, i) => { if (typeof got[i] === 'string' && got[i] && !x.thumbData) x.thumbData = 'data:image/jpeg;base64,' + got[i]; });
+      want.forEach((x, i) => {
+        if (typeof got[i] === 'string' && got[i] && !x.thumbData) x.thumbData = 'data:image/jpeg;base64,' + got[i];
+      });
     }, () => {});
   }
 

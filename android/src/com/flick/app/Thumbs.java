@@ -53,9 +53,10 @@ final class Thumbs {
     static final class Newest extends LinkedBlockingDeque<Runnable> {
         @Override public boolean offer(Runnable r) { return offerFirst(r); }
     }
-    private static final ThreadPoolExecutor MAKERS = new ThreadPoolExecutor(4, 4, 30, TimeUnit.SECONDS, new Newest(), new ThreadFactory() {
-        @Override public Thread newThread(Runnable r) { Thread t = new Thread(r, "flick-thumb"); t.setDaemon(true); return t; }
-    });
+    private static final ThreadPoolExecutor MAKERS = new ThreadPoolExecutor(4, 4, 30, TimeUnit.SECONDS, new Newest(),
+            new ThreadFactory() {
+                @Override public Thread newThread(Runnable r) { Thread t = new Thread(r, "flick-thumb"); t.setDaemon(true); return t; }
+            });
     static { MAKERS.allowCoreThreadTimeOut(true); }
 
     static WebResourceResponse respond(Context c, Uri u) {
@@ -99,7 +100,9 @@ final class Thumbs {
         private File out;
         private boolean done, gone;                  // guarded by this
 
-        Job(Context c, String path, long v, long mid, int mt) { this.c = c; this.path = path; this.v = v; this.mid = mid; this.mt = mt; }
+        Job(Context c, String path, long v, long mid, int mt) {
+            this.c = c; this.path = path; this.v = v; this.mid = mid; this.mt = mt;
+        }
 
         @Override
         public void run() {
@@ -122,7 +125,9 @@ final class Thumbs {
                     synchronized (Job.this) {
                         long end = SystemClock.uptimeMillis() + 10000;
                         try {
-                            for (long left = 10000; !done && !gone && left > 0; left = end - SystemClock.uptimeMillis()) Job.this.wait(left);
+                            for (long left = 10000; !done && !gone && left > 0; left = end - SystemClock.uptimeMillis()) {
+                                Job.this.wait(left);
+                            }
                         } catch (InterruptedException e) { throw new InterruptedIOException(); }
                         f = done ? out : null;
                     }
@@ -131,7 +136,11 @@ final class Thumbs {
                 }
 
                 @Override public int read() throws IOException { InputStream i = in(); return i == null ? -1 : i.read(); }
-                @Override public int read(byte[] b, int off, int len) throws IOException { InputStream i = in(); return i == null ? -1 : i.read(b, off, len); }
+                @Override
+                public int read(byte[] b, int off, int len) throws IOException {
+                    InputStream i = in();
+                    return i == null ? -1 : i.read(b, off, len);
+                }
                 @Override
                 public void close() throws IOException {
                     synchronized (Job.this) { gone = true; Job.this.notifyAll(); }
@@ -256,7 +265,8 @@ final class Thumbs {
         int files = kept.size();
         if (bytes > CAP_BYTES || files > CAP_FILES) {
             Collections.sort(kept, new Comparator<File>() {
-                @Override public int compare(File a, File b) { long x = used.get(a), y = used.get(b); return x < y ? -1 : x > y ? 1 : 0; }
+                @Override
+                public int compare(File a, File b) { long x = used.get(a), y = used.get(b); return x < y ? -1 : x > y ? 1 : 0; }
             });
             for (File f : kept) {
                 if (bytes <= CAP_BYTES * 3 / 4 && files <= CAP_FILES * 3 / 4) break;
