@@ -413,6 +413,8 @@
     const v = $('askInput').value;
     if (askDone && await askDone(v)) $('ask').hidden = true;
   };
+  // the keyboard's Enter (Go, Done) does what the button does: it did nothing, the keyboard stayed up
+  $('askInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('askOk').click(); } });
   async function connectManual(rawIn) {
     const raw = String(rawIn || '').trim();
     if (!raw) return false;
