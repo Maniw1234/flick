@@ -609,6 +609,9 @@
     $('cdot').classList.toggle('on', st.connected);
     nc('keepAwake', st.screen === 'main' && st.connected);
     if (SEL.on) renderSelection();
+    // Settings open: its PC row ("Connected over Wi-Fi", Disconnect or Connect) and the speed test follow
+    const sp = $('settings');
+    if (!sp.hidden && !sp.classList.contains('closing')) renderSettings();
     runHooks('conn');                        // the features (phone/features/*.js)
   }
 
