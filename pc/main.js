@@ -1052,9 +1052,22 @@ function panelState() {
     via: s && s.connected ? s.via || '' : '',
     devices: Object.entries(store.devices || {}).map(([id, d]) => ({ id, name: d.name, added: d.added, ask: !!(store.acceptMode && store.acceptMode[id] === 'ask') })),
     displays: displays().map((d, i) => ({ id: d.id, label: `Display ${i + 1} (${d.size.width}×${d.size.height})`, primary: d.id === screen.getPrimaryDisplay().id })),
-    displayId: store.displayId, firstRun: store.firstRun,
+    displayId: store.displayId, firstRun: store.firstRun, news: newsPending(),
   };
 }
+
+// What's new: the first time Flick starts after updating to a version with something to tell, a card at the top of its
+// window and, once, a notification pointing to it (a new install gets the intro instead, and nothing to catch up on)
+const NEWS = '2.0';
+function newsPending() { return !store.firstRun && store.seenNews !== NEWS; }
+function newsToast() {
+  if (!newsPending() || store.newsToast === NEWS) return;
+  store.newsToast = NEWS;
+  saveStore();
+  if (panel && !panel.isDestroyed() && panel.isVisible()) return;       // the card is already in front of them
+  if (feats) feats.toast({ title: 'Flick 2.0', body: 'Move files with your hand, new animations with sound, and more. Click to see what’s new.', click: () => showPanel() });
+}
+
 function pushPanelState() { if (panel && !panel.isDestroyed()) panel.webContents.send('panel:state', panelState()); updateTray(); }
 
 let previewOn = false;
@@ -1128,7 +1141,8 @@ ipcMain.on('panel:action', async (e, m) => {
     case 'demo': fx('demo', {}); break;
     // the volume slider let go: the animation's sound at the new volume (sound only, nothing on the screen)
     case 'soundTest': if (overlay && overlayReady && store.sound) overlay.webContents.send('fx:sound', {}); break;
-    case 'dismissIntro': store.firstRun = false; saveStore(); pushPanelState(); break;
+    case 'dismissIntro': store.firstRun = false; store.seenNews = store.newsToast = NEWS; saveStore(); pushPanelState(); break;
+    case 'dismissNews': store.seenNews = store.newsToast = NEWS; saveStore(); pushPanelState(); break;
     case 'openLog': shell.openPath(LOG); break;
     case 'openRelease': shell.openExternal(updateInfo.page && /^https:\/\/github\.com\//.test(updateInfo.page) ? updateInfo.page : 'https://github.com/Maniw1234/flick/releases/latest'); break;
     case 'checkUpdates': runUpdateCheck(true); break;
@@ -2257,6 +2271,7 @@ app.whenReady().then(async () => {
   if (startFiles.length) setTimeout(() => queueForPhone(startFiles), 1500);
   else if (openFiles.length) setTimeout(sendOpenFiles, 1500);
   else if (!(HIDDEN_START || openedAtLogin()) || store.firstRun) showPanel();
+  if (newsPending() && store.newsToast !== NEWS) setTimeout(newsToast, TEST_MODE ? 1500 : 10000);
   if (TEST_MODE) startTestControl();
 });
 

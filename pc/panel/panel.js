@@ -9,12 +9,14 @@
   const OS_TEXT = {
     mac: {
       hotkeyLbl: 'Send selected files with ⌘⌥F',
+      newsKey: 'Select files in Finder and press ⌘⌥F to send them to the phone.',
       sendSub: 'Or drop files on this window, or on Flick in the menu bar or the Dock. In Finder, right-click a file and choose Open With > Flick.',
       startupLbl: 'Open Flick when you log in',
       fNotifySub: 'As notifications on this Mac. Turn it on in Flick on the phone too.',
     },
     linux: {
       hotkeyLbl: 'Send copied files with Ctrl+Alt+F',
+      newsKey: 'Copy files and press Ctrl+Alt+F to send them to the phone.',
       sendSub: 'Or drop files on this window. In your file manager, right-click a file and choose Open With > Flick.',
       sendToLbl: 'Add Flick to your file manager’s Open With menu',
       startupLbl: 'Start Flick when you log in',
@@ -112,6 +114,7 @@
       $('ver').appendChild(line);
     }
     $('intro').hidden = !s.firstRun;
+    $('news').hidden = !s.news;
     const dr = $('displayRow');
     dr.hidden = !(s.displays && s.displays.length > 1);
     if (!dr.hidden) {
@@ -216,6 +219,8 @@
   $('openFolder').onclick = () => act('openFolder');
   $('firewall').onclick = () => act('fixFirewall');
   $('introOk').onclick = () => act('dismissIntro');
+  $('newsOk').onclick = () => act('dismissNews');
+  $('newsAll').onclick = () => act('openRelease');
   $('playFx').onclick = () => act('demo');
   for (const b of $('themes').querySelectorAll('.theme')) b.onclick = () => {
     for (const o of $('themes').querySelectorAll('.theme')) o.classList.toggle('on', o === b);
