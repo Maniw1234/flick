@@ -50,7 +50,7 @@ app.on('open-file', (e, p) => {
 });
 function sendOpenFiles() {
   if (!startedAt || !openFiles.length) return;
-  queueForPhone(openFiles.splice(0).slice(0, MAX_SEND));
+  queueForPhone(openFiles.splice(0).slice(0, MAX_SEND + 1));
 }
 // macOS: a click on Flick in the Dock (or opening it again) shows the panel; Flick's own start isn't such a click
 app.on('activate', () => { if (startedAt && Date.now() - startedAt > 2000) showPanel(); });
@@ -584,15 +584,16 @@ ipcMain.on('catcher:drop', async (e, d) => {
   if (!n) server.pushToPhone({ t: 'edge', on: false });
 });
 
-// files (folders are opened up, up to MAX_SEND files) in the order given
+// files (folders are opened up, up to MAX_SEND files) in the order given; .more: there were more than that
 const MAX_SEND = 100;
 function expandPaths(list) {
   const out = [];
+  out.more = false;
   const walk = (p, depth) => {
-    if (out.length >= MAX_SEND) return;
+    if (out.more) return;
     let st;
     try { st = fs.statSync(p); } catch (e) { return; }
-    if (st.isFile()) { out.push(p); return; }
+    if (st.isFile()) { if (out.length < MAX_SEND) out.push(p); else out.more = true; return; }
     if (!st.isDirectory() || depth > 6) return;
     let names = [];
     try { names = fs.readdirSync(p); } catch (e) { return; }
@@ -601,18 +602,25 @@ function expandPaths(list) {
   for (const p of list) walk(String(p), 0);
   return out;
 }
+// more files than go at once were picked: said, so nobody takes it that the rest went too
+function onlyFirst(what) {
+  const text = 'Only the first ' + MAX_SEND + ' files ' + what + '. Send the rest after them.';
+  panelSend('panel:note', { text });
+  if (feats && !(panel && panel.isVisible())) feats.toast({ title: 'Only the first ' + MAX_SEND + ' files ' + what, body: 'Send the rest after them.', silent: true });
+}
 
 // Files waiting for the phone (sent from Explorer while no phone was connected); they go out when it connects.
 let sendQueue = [];
 function queueForPhone(paths) {
   const files = expandPaths(paths);
   if (!files.length) return;
-  if (server && server.connected) { sendPathsToPhone(files); return; }
+  if (server && server.connected) { sendPathsToPhone(files); if (files.more) onlyFirst('go to the phone'); return; }
+  const cut = files.more || sendQueue.length + files.length > MAX_SEND;
   sendQueue = sendQueue.concat(files).slice(0, MAX_SEND);
   sendQueue.at = Date.now();
   log('queued', files.length, 'file(s) for the phone');
   showPanel();
-  if (panel) panelSend('panel:note', { text: 'Connect your phone and ' + (files.length === 1 ? path.basename(files[0]) : files.length + ' files') + ' will be sent.' });
+  if (panel) panelSend('panel:note', { text: 'Connect your phone and ' + (files.length === 1 ? path.basename(files[0]) : files.length + ' files') + ' will be sent.' + (cut ? ' (Only the first ' + MAX_SEND + ' files: send the rest after them.)' : '') });
 }
 function flushSendQueue() {
   if (!sendQueue.length || !server || !server.connected) return;
@@ -634,6 +642,7 @@ async function sendPathsToPhone(list, screenY, opts) {
   const device = (opts && opts.device) || undefined;
   const paths = expandPaths(list);
   if (!paths.length) return 0;
+  if (paths.more) onlyFirst('go to the phone');
   const sy = typeof screenY === 'number' ? screenY : overlayBounds().y + store.anchor * overlayBounds().height;
   const oy = overlayYFromScreenY(sy);
   const files = [];
@@ -1044,7 +1053,7 @@ ipcMain.on('panel:action', async (e, m) => {
       if (!r.canceled && r.filePaths.length) sendPathsToPhone(r.filePaths);
       break;
     }
-    case 'sendPaths': if (Array.isArray(arg)) queueForPhone(arg.slice(0, MAX_SEND)); break;
+    case 'sendPaths': if (Array.isArray(arg)) queueForPhone(arg.slice(0, MAX_SEND + 1)); break;
     default: break;
   }
 });
@@ -1116,7 +1125,7 @@ function createTray() {
   tray.on('click', togglePanel);
   tray.on('double-click', showPanel);
   // macOS: files dropped on the menu-bar icon go to the phone
-  if (IS_MAC) tray.on('drop-files', (_e, files) => { if (Array.isArray(files)) queueForPhone(files.slice(0, MAX_SEND)); });
+  if (IS_MAC) tray.on('drop-files', (_e, files) => { if (Array.isArray(files)) queueForPhone(files.slice(0, MAX_SEND + 1)); });
   updateTray();
 }
 
@@ -1963,10 +1972,16 @@ ipcMain.on('panel:web', async (e, m) => {
     case 'pick': {
       if (!web.active) break;
       const r = await dialog.showOpenDialog(panel, { title: 'Share with browsers', properties: ['openFile', 'multiSelections'] });
-      if (!r.canceled && r.filePaths.length) web.addFiles(expandPaths(r.filePaths));
+      if (!r.canceled && r.filePaths.length) { const f = expandPaths(r.filePaths); web.addFiles(f); if (f.more) onlyFirst('are shared'); }
       break;
     }
-    case 'add': if (web.active && Array.isArray(m.paths)) web.addFiles(expandPaths(m.paths.filter((p) => typeof p === 'string').slice(0, MAX_SEND))); break;
+    case 'add': {
+      if (!web.active || !Array.isArray(m.paths)) break;
+      const f = expandPaths(m.paths.filter((p) => typeof p === 'string').slice(0, MAX_SEND + 1));
+      web.addFiles(f);
+      if (f.more) onlyFirst('are shared');
+      break;
+    }
     case 'remove': web.removeFile(String(m.id)); break;
     case 'answer': if (m.allow) web.allow(String(m.id)); else web.deny(String(m.id)); break;
     case 'kick': web.kick(String(m.id)); break;
