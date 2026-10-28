@@ -139,7 +139,13 @@ function attach(o) {
     const was = camSays();
     camState = String((d && d.state) || 'off');
     if (camState === 'on') camProblem = null;
-    else if (/denied|nocamera|error/.test(camState)) { camProblem = camState; log('camera', camState, (d && d.detail) || ''); }
+    else if (/denied|nocamera|error/.test(camState)) {
+      camProblem = camState;
+      log('camera', camState, (d && d.detail) || '');
+      // it couldn't start, or it stopped by itself (unplugged, taken by another app): this run is over. Files in a fist
+      // it followed wait at the edge (not frozen where it was last seen), and the time isn't counted against grabs
+      if (camRunning()) stopCam();
+    }
     if (was !== camSays() && o.changed) o.changed();     // the panel says when there's no camera Flick can use
   });
   ipcMain.on('air:event', (e, ev) => { if (win && e.sender === win.webContents && ev) onHand(ev); });
