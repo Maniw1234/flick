@@ -609,7 +609,9 @@ function onlyFirst(what) {
   if (feats && !(panel && panel.isVisible())) feats.toast({ title: 'Only the first ' + MAX_SEND + ' files ' + what, body: 'Send the rest after them.', silent: true });
 }
 
-// Files waiting for the phone (sent from Explorer while no phone was connected); they go out when it connects.
+// Files waiting for the phone (sent from Explorer while no phone was connected); they go out when it connects, unless
+// that's more than 10 minutes later (then the user is told they didn't go: a send long after would surprise)
+const QUEUE_MS = (TEST_MODE && +process.env.FLICK_TEST_QUEUE_MS) || 10 * 60000;
 let sendQueue = [];
 function queueForPhone(paths) {
   const files = expandPaths(paths);
@@ -624,10 +626,14 @@ function queueForPhone(paths) {
 }
 function flushSendQueue() {
   if (!sendQueue.length || !server || !server.connected) return;
-  const fresh = Date.now() - (sendQueue.at || 0) < 10 * 60 * 1000;
+  const fresh = Date.now() - (sendQueue.at || 0) < QUEUE_MS;
   const q = sendQueue; sendQueue = [];
-  if (panel) panelSend('panel:note', { text: '' });
-  if (fresh) setTimeout(() => sendPathsToPhone(q), 1200);
+  if (fresh) { if (panel) panelSend('panel:note', { text: '' }); setTimeout(() => sendPathsToPhone(q), 1200); return; }
+  log('queued file(s) not sent: picked', Math.round((Date.now() - q.at) / 60000), 'min ago');
+  const what = q.length === 1 ? path.basename(q[0]) : q.length + ' files';
+  const why = 'Picked to send more than ' + Math.round(QUEUE_MS / 60000) + ' minutes ago. Send ' + (q.length === 1 ? 'it' : 'them') + ' again now.';
+  panelSend('panel:note', { text: what + ' didn’t go to the phone. ' + why });
+  if (feats && !(panel && panel.isVisible())) feats.toast({ title: what + ' didn’t go to the phone', body: why, silent: true });
 }
 
 // opts: { fx: false (their cards already fly: Air grab), device (to that phone, not the one in use) }
@@ -1244,7 +1250,7 @@ function scheduleRestart(ver) {
   if (restartT) return;
   const tryNow = () => {
     restartT = null;
-    const queued = sendQueue.length > 0 && Date.now() - (sendQueue.at || 0) < 10 * 60000;   // a queue goes stale after 10 min
+    const queued = sendQueue.length > 0 && Date.now() - (sendQueue.at || 0) < QUEUE_MS;   // a queue goes stale after 10 min
     const busy = filesBusy() || queued || overlayShown || (panel && panel.isVisible() && panel.isFocused());
     if (busy) { restartT = setTimeout(tryNow, 30000); return; }
     log('restarting into', ver);
