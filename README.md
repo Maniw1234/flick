@@ -57,11 +57,12 @@ Pick files up with your hand and drop them on the PC, without touching the scree
   the PC again puts them back. On Linux, file managers don't say what's selected: copy the files (Ctrl+C) instead of
   selecting them.
 - **The cameras:** the phone's front camera runs only while Air grab is on, Flick is open on screen and a PC is
-  connected. The PC's camera turns on only for a few seconds: after a grab on the phone, until the file lands, and
-  after you select files on the PC (or bring a window with files selected to the front) while Flick is open on the
-  phone; at most 30 seconds at a time and 45 seconds in any 2 minutes. macOS asks once for the camera, and once to let
-  Flick ask Finder what's selected; turn the PC's camera off in Flick's window: Files > Air grab. Hand tracking runs on
-  each device, with MediaPipe's hand models on Flick's own WebAssembly engine (`hand/`); no picture leaves the device.
+  connected. The PC's camera turns on only for a few seconds: after a grab on the phone, until the file lands, and after
+  you select files on the PC (or bring a window with files selected to the front) while Flick is open on the phone; at
+  most 30 seconds at a time and 45 seconds in any 2 minutes, of which selections no hand came up to grab get 20 at most
+  (the rest is kept for grabs). macOS asks once for the camera, and once to let Flick ask Finder what's selected; turn
+  the PC's camera off in Flick's window: Files > Air grab. Hand tracking runs on each device, with MediaPipe's hand
+  models on Flick's own WebAssembly engine (`hand/`); no picture leaves the device.
 - **Aiming:** a hand moves a little as it closes or opens, so the file grabbed is the one the hand was over just before
   it began to close, and a file lands on the PC where the hand was just before it opened (`phone/hand/stream.js`:
   `aim`). The hand's position is smoothed with a One Euro filter (a still hand doesn't jitter, a quick one doesn't lag),
