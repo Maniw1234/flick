@@ -56,10 +56,13 @@
   X.menu = function (order, fn) { menu.push({ order, fn }); menu.sort((a, b) => a.order - b.order); };
   A.on('menu', () => menu.map((m) => m.fn()).filter(Boolean));
 
-  // ---- Android's back button: one press does one thing, the topmost first (fn returns true when it handled it)
+  // ---- Android's back button: one press does one thing, the topmost first (fn returns true when it handled it).
+  // Those above the menus (90 and up: the ringing screen, the walkthrough) come before a menu or prompt under them:
+  // Back closed a menu hidden under the ringing screen, and the phone rang on.
   const backs = [];
   X.back = function (topmost, fn) { backs.push({ topmost, fn }); backs.sort((a, b) => b.topmost - a.topmost); };
-  A.on('back', () => backs.some((b) => b.fn()));
+  A.on('backTop', () => backs.some((b) => b.topmost >= 90 && b.fn()));
+  A.on('back', () => backs.some((b) => b.topmost < 90 && b.fn()));
 
   // ---- what's behind a page or an overlay is out of reach (taps, Tab, screen readers) while it is open
   X.block = function (owner, els, on) {

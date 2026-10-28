@@ -2884,6 +2884,7 @@
     }
   };
   window.__back = function () {
+    if (runHooks('backTop')) return true;    // overlays above everything (the ringing screen, the walkthrough)
     if (!$('ask').hidden) { $('ask').hidden = true; return true; }
     if (sheetOpen) { closeSheet(); return true; }
     if (runHooks('back')) return true;       // feature pages and overlays
@@ -3341,7 +3342,7 @@
   //   ws       a PC message the app doesn't handle itself (clip, link, ring, ring-stop)
   //   native   every Android event (before the app's own handling)
   //   sent     the items of a send the PC confirmed ('saved')
-  //   back     Android's back button (return true when handled)
+  //   back     Android's back button (return true when handled); backTop: the same, before the menus and prompts
   //   menu     items for the ••• sheet (return one item or a list)
   //   settings the Settings page is being drawn (its body element; add sections to it)
   //   settings-end  the same, after the app's own sections
