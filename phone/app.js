@@ -1079,6 +1079,7 @@
     if (!H.raf) H.raf = requestAnimationFrame(holdFrame);
   }
   function holdEnd() {
+    H.upAt = now();
     if (!H.down) return;
     H.down = false;
     btn.classList.remove('down');
@@ -1089,6 +1090,13 @@
   btn.addEventListener('pointercancel', holdEnd);
   btn.addEventListener('pointerleave', holdEnd);
   btn.addEventListener('contextmenu', (e) => e.preventDefault());
+  // A click with no hold before it is the go-ahead too: a screen reader's double tap (TalkBack) or a keyboard's Enter
+  // can't hold, so pairing was out of reach. A finger's or a mouse's own click, as it lets go, is left alone.
+  btn.addEventListener('click', () => {
+    if (btn.disabled || now() - (H.upAt || 0) < 600) return;
+    haptic('tick');
+    requestConnect();
+  });
 
   // ------------------------------------------------------------------ views (file manager)
   const CATS = [
@@ -1367,6 +1375,7 @@
     meta.appendChild(n); meta.appendChild(i);
     {
       const more = document.createElement('button'); more.className = 'more';
+      more.setAttribute('aria-label', 'More for ' + it.name);
       more.appendChild(svgEl('<svg viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="1.7" fill="currentColor"/><circle cx="12" cy="12" r="1.7" fill="currentColor"/><circle cx="18.5" cy="12" r="1.7" fill="currentColor"/></svg>'));
       more.onclick = (e) => { e.stopPropagation(); itemMenu(it); };
       meta.appendChild(more);
@@ -2637,13 +2646,27 @@
       T = null;
       if (quick && it && !it.incoming) {
         if (e.cancelable) e.preventDefault();
-        if (SEL.on) toggleSel(it);
-        else if (it.dir) { haptic('soft'); openDir(it.path, it.name); } else itemMenu(it);
+        tapCard(it);
       }
     }
   }
-  grid.addEventListener('touchend', touchEnd, { passive: false });
-  grid.addEventListener('touchcancel', () => { if (D && D.phase === 'drag') dragEnd(); else if (T) { clearTimeout(T.lp); T = null; } }, { passive: true });
+  // a tap on a card: while selecting it is selected or not; a folder opens; a file shows its menu
+  function tapCard(it) {
+    if (SEL.on) toggleSel(it);
+    else if (it.dir) { haptic('soft'); openDir(it.path, it.name); } else itemMenu(it);
+  }
+  let touchedAt = 0;
+  grid.addEventListener('touchend', (e) => { touchedAt = now(); touchEnd(e); }, { passive: false });
+  grid.addEventListener('touchcancel', () => { touchedAt = now(); if (D && D.phase === 'drag') dragEnd(); else if (T) { clearTimeout(T.lp); T = null; } }, { passive: true });
+  // A click no finger made does what a tap does: a screen reader's double tap (TalkBack), a switch, a keyboard or a
+  // mouse (cards answered only to touches: a folder couldn't be opened, nor a file's menu, without a finger). A
+  // finger's own click is left alone: its tap was handled as it ended, and a press that only selected must stay so.
+  grid.addEventListener('click', (e) => {
+    if (now() - touchedAt < 800 || !e.target.closest || e.target.closest('.more')) return;
+    const card = e.target.closest('.card');
+    const it = card && V.items.find((x) => x.id === card.dataset.id);
+    if (it && !it.incoming && !st.hidden.has(it.id)) tapCard(it);
+  });
   document.addEventListener('contextmenu', (e) => e.preventDefault());
 
   // ------------------------------------------------------------------ incoming (PC -> phone)
