@@ -48,6 +48,7 @@ final class Transfers {
         this.ctx = ctx.getApplicationContext();
         this.lib = lib;
         this.em = em;
+        Sends.Nets.install(this.ctx);               // sockets to the PC go over its network (see Wire.Binder)
     }
 
     /** Up to n threads; idle ones end, so a pool costs nothing between transfers. */

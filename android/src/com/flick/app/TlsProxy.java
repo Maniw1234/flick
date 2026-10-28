@@ -167,6 +167,7 @@ final class TlsProxy {
         Socket raw = new Socket();
         try {
             raw.setTcpNoDelay(true);
+            Wire.bind(raw, host);                                       // on the PC's network (see Wire.Binder)
             raw.connect(new InetSocketAddress(host, port), 5000);
             raw.setSoTimeout(10000);                                    // for the handshake
             SSLSocket s = (SSLSocket) f.createSocket(raw, host, port, true);

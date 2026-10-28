@@ -40,6 +40,31 @@ final class Wire {
 
     private Wire() {}
 
+    /**
+     * Puts a socket on the network a PC is on before it connects (Sends sets one on Android, see Sends.Nets). Android
+     * sends a socket over its default network, which isn't the PC's Wi-Fi when that has no internet (a laptop's hotspot
+     * while the laptop is offline) and mobile data is on: the PC's address can't be reached there.
+     */
+    interface Binder { void bind(Socket s, String host) throws IOException; }
+    static volatile Binder BINDER;
+
+    /** Binds s (not connected yet) to the network that reaches host, if it needs that; as it is when that fails. */
+    static void bind(Socket s, String host) {
+        Binder b = BINDER;
+        if (b == null || host == null || host.startsWith("127.")) return;          // (a port on this phone)
+        try { b.bind(s, host); } catch (Throwable e) { /* the default network, as before */ }
+    }
+
+    /** Whether address a is in the subnet net/prefix (both the same family, as raw bytes). */
+    static boolean inSubnet(byte[] net, int prefix, byte[] a) {
+        if (net == null || a == null || net.length != a.length || prefix < 0 || prefix > net.length * 8) return false;
+        int whole = prefix / 8, rest = prefix % 8;
+        for (int i = 0; i < whole; i++) if (net[i] != a[i]) return false;
+        if (rest == 0) return true;
+        int mask = (0xff << (8 - rest)) & 0xff;
+        return (net[whole] & mask) == (a[whole] & mask);
+    }
+
     /** How to reach a PC: host:port, and the fingerprint its certificate must show (null: plain, this phone only). */
     static final class Link {
         final String host;
@@ -65,6 +90,7 @@ final class Wire {
             Socket raw = new Socket();
             try {
                 raw.setTcpNoDelay(true);
+                bind(raw, host);
                 raw.connect(new InetSocketAddress(host, port), CONNECT_MS);
                 if (pin == null) return new Socket[]{raw, raw};
                 raw.setSoTimeout(10000);                                    // for the handshake

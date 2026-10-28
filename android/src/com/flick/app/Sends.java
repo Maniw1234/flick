@@ -3,6 +3,8 @@ package com.flick.app;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.net.ConnectivityManager;
+import android.net.LinkAddress;
+import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.os.SystemClock;
@@ -12,6 +14,8 @@ import org.json.JSONObject;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.InetAddress;
+import java.net.Socket;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -53,6 +57,7 @@ final class Sends {
     private Sends(Context app) {
         this.app = app;
         this.prefs = app.getSharedPreferences("flick", 0);
+        Nets.install(app);
         box = new Outbox(new File(app.getFilesDir(), "outbox"), new Outbox.Env() {
             @Override public File file(Outbox.Item it) throws IOException { return Sends.this.file(it); }
             @Override public Wire.Link link(Outbox.Job j, boolean look) throws IOException { return Sends.this.link(j, look); }
@@ -239,6 +244,60 @@ final class Sends {
         synchronized (looked) { looked.clear(); }
         PcClient.lookAgain();
         box.poke();
+    }
+
+    // ------------------------------------------------------------ the PC's network
+    /**
+     * Sockets to a PC go over the network it is on (see Wire.Binder): a Wi-Fi or Ethernet network one of whose own
+     * subnets holds the PC's address, when that network isn't the default one (a Wi-Fi without internet next to mobile
+     * data). Anything else is left to Android, as before. What it found for an address is kept a few seconds.
+     */
+    static final class Nets implements Wire.Binder {
+        private static volatile boolean installed;
+        private final ConnectivityManager cm;
+        private String lastHost;                    // guarded by this
+        private Network lastNet;
+        private long lastAt;
+
+        private Nets(ConnectivityManager cm) { this.cm = cm; }
+
+        /** Once per process; any thread. */
+        static void install(Context c) {
+            if (installed) return;
+            try {
+                ConnectivityManager cm = (ConnectivityManager) c.getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
+                if (cm != null) { Wire.BINDER = new Nets(cm); installed = true; }
+            } catch (Throwable e) { /* left to Android */ }
+        }
+
+        @Override public void bind(Socket s, String host) throws IOException {
+            if (!Wire.isIp(host)) return;
+            Network n = network(host);
+            if (n != null) n.bindSocket(s);
+        }
+
+        /** The network to put a socket to host on, or null for the default one. */
+        @SuppressWarnings("deprecation")
+        private Network network(String host) throws IOException {
+            long now = SystemClock.elapsedRealtime();
+            synchronized (this) { if (host.equals(lastHost) && now - lastAt < 3000) return lastNet; }
+            byte[] a = InetAddress.getByName(host).getAddress();                // an address: nothing is looked up
+            Network def = cm.getActiveNetwork(), found = null;
+            search:
+            for (Network n : cm.getAllNetworks()) {
+                NetworkCapabilities nc = cm.getNetworkCapabilities(n);
+                if (nc == null || !(nc.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || nc.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET))) continue;
+                LinkProperties lp = cm.getLinkProperties(n);
+                if (lp == null) continue;
+                for (LinkAddress la : lp.getLinkAddresses()) {
+                    if (la.getPrefixLength() < 8 || !Wire.inSubnet(la.getAddress().getAddress(), la.getPrefixLength(), a)) continue;
+                    if (!n.equals(def)) found = n;
+                    break search;
+                }
+            }
+            synchronized (this) { lastHost = host; lastNet = found; lastAt = now; }
+            return found;
+        }
     }
 
     /** The page reached a PC (at this address, over this link): sends waiting for it go there now. */
