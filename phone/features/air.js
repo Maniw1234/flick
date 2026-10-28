@@ -112,12 +112,14 @@
     if (M.mode === 'hover' && e.pose === 'fist' && !M.wasOpen && (Date.now() - M.enterT < 700 || pcHolds())) { M.mode = 'catch'; M.catchT = Date.now(); return; }
     if (M.mode === 'hover' && e.pose === 'fist') grab(e);
     else if (M.mode === 'carry' && e.pose === 'open') released(e.aim || e.pos);
-    else if (M.mode === 'catch' && e.pose === 'open') {
-      // a fist held over the phone for a moment, then opened (a hand that only passes through a fist doesn't count)
-      const ms = Date.now() - M.catchT;
-      if (ms >= CATCH_MS && ms < 4000) catchFromPc();
-      M.mode = 'hover';
-    }
+    else if (M.mode === 'catch' && e.pose === 'open') { opened(); M.mode = 'hover'; }
+  }
+
+  // a fist that came in opened over the phone: it catches once it was held there for a moment (a hand that only passes
+  // through a fist doesn't count), and not after resting closed for long, unless the PC said it holds files for here
+  function opened() {
+    const ms = Date.now() - M.catchT;
+    if (ms >= CATCH_MS && (ms < 4000 || pcHolds())) catchFromPc();
   }
 
   // the send a hand carries ended without it (the PC put it back after a very long hold, the link dropped)
@@ -241,13 +243,10 @@
     M.back = false;
     // lost as it opened (the tracker loses an opening hand now and then; its last frame was open, its pose not yet: a
     // fist, or half open on the way): it opened there
-    const opened = e.raw === 'open' && e.pose !== 'open';
-    if (M.mode === 'catch' && opened) {
-      const ms = Date.now() - M.catchT;
-      if (ms >= CATCH_MS && ms < 4000) catchFromPc();
-    }
+    const opening = e.raw === 'open' && e.pose !== 'open';
+    if (M.mode === 'catch' && opening) opened();
     if (M.mode === 'carry') {
-      if (opened) { released(e.aim || e.pos); M.mode = 'idle'; M.wasOpen = false; return; }
+      if (opening) { released(e.aim || e.pos); M.mode = 'idle'; M.wasOpen = false; return; }
       if (e.edge) { M.mode = 'idle'; go(); return; }
       // gone from the middle of the view: the tracker may have lost it for a moment; it goes unless it's back soon
       M.mode = 'away';
