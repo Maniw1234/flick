@@ -49,6 +49,9 @@ const USER_FLAG_CODE = 10800;
 const MAX_PHONES = 4;
 
 function rid(n = 12) { return crypto.randomBytes(n).toString('hex'); }
+// a write that failed because the drive is full: the phone hears 507 ("not enough space") and stops, instead of a 500
+// it takes for a hiccup and answers by sending the same bytes again every second
+const diskFull = (e) => !!(e && (e.code === 'ENOSPC' || e.code === 'EDQUOT'));
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 const hmac = (key, s) => crypto.createHmac('sha256', String(key)).update(s).digest('hex');
 function sameHex(a, b) {
@@ -948,7 +951,7 @@ class FlickServer extends EventEmitter {
     note('upload-start', { tid, name, total });
 
     const removeTmp = () => { if (out.closed) fs.unlink(tmpPath, () => {}); else out.once('close', () => fs.unlink(tmpPath, () => {})); };
-    const fail = (why) => {
+    const fail = (why, code) => {
       if (finished) return;
       finished = true;
       this._release(tid, entry);
@@ -956,7 +959,7 @@ class FlickServer extends EventEmitter {
       out.destroy();
       removeTmp();
       if (!entry.superseded) note('upload-failed', { tid, why });
-      if (!res.headersSent) { try { this._json(res, why === 'short' ? 400 : 500, { ok: false, error: why }); } catch (e) { /* ignore */ } }
+      if (!res.headersSent) { try { this._json(res, code || (why === 'short' ? 400 : 500), { ok: false, error: code === 507 ? 'no space' : why }); } catch (e) { /* ignore */ } }
       try { req.destroy(); } catch (e) { /* ignore */ }
     };
     const onData = (chunk) => {
@@ -966,7 +969,7 @@ class FlickServer extends EventEmitter {
       const now = Date.now();
       if (now - lastEmit > 40) { lastEmit = now; note('upload-progress', { tid, received, total }); }
     };
-    out.on('error', (e) => fail('disk ' + (e.code || e.message)));
+    out.on('error', (e) => fail('disk ' + (e.code || e.message), diskFull(e) ? 507 : 500));
     req.on('data', onData);
     req.on('aborted', () => fail('aborted'));
     req.on('error', () => fail('error'));
@@ -1135,12 +1138,15 @@ class FlickServer extends EventEmitter {
           }
           queued -= chunk.length;
           await rx.push(chunk);
+          A.nospace = 0;
           if (req.isPaused() && queued < 2 << 20 && !ended) req.resume();
         }
       } catch (e) {
         busy = false;
-        // the disk (full, a file held by another program): 500, and the phone carries on from where it got; a body that
+        // the drive is full: 507, the phone stops and says so (and /api/status says so too while it stays full); the
+        // disk otherwise (a file held by another program): 500, and the phone carries on from where it got; a body that
         // isn't a proper bundle: 400, and it starts over
+        if (diskFull(e)) { A.nospace = Date.now(); return fail('no space', 507); }
         return fail(e.message || 'bad bundle', e && typeof e.code === 'string' && /^E[A-Z]+$/.test(e.code) ? 500 : 400);
       }
       busy = false;
@@ -1205,7 +1211,7 @@ class FlickServer extends EventEmitter {
       busy = true;
       try {
         while (queue.length && !finished) await rx.push(queue.shift());
-      } catch (e) { fail(e.message || 'bad bundle', 400); return; }
+      } catch (e) { if (diskFull(e)) fail('no space', 507); else fail(e.message || 'bad bundle', 400); return; }
       busy = false;
       if (finished) return;
       if (ended) return complete();
@@ -1335,14 +1341,14 @@ class FlickServer extends EventEmitter {
     // unless a newer request for the part takes over meanwhile; then the part is let go
     let draining = false;
     const letGo = () => { draining = false; if (A.cur[index] === req) { A.cur[index] = null; A.got[index] = A.saved[index]; } };
-    const partFail = (why) => {
+    const partFail = (why, code) => {
       if (over) return;
       over = true;
       A.reqs.delete(req); A.live.delete(req); A.active = Date.now();
       // resumable: what's on disk stays and counts; otherwise the part starts over
       if (A.resumable && mine() && queue.length && !A.superseded) { draining = true; if (!writing) pump(); }
       else if (mine()) { A.got[index] = A.resumable ? A.saved[index] : 0; if (A.resumable) A.cur[index] = null; }
-      if (!res.headersSent) { try { this._json(res, 500, { ok: false, error: why }); } catch (e) { /* ignore */ } }
+      if (!res.headersSent) { try { this._json(res, code || 500, { ok: false, error: why }); } catch (e) { /* ignore */ } }
       try { req.destroy(); } catch (e) { /* ignore */ }
     };
     const partDone = async () => {
@@ -1394,9 +1400,16 @@ class FlickServer extends EventEmitter {
             const ph = A.ph[index];
             if (ph.h && ph.at === at) { for (const b of wrote) ph.h.update(b); ph.at += n; } else ph.h = null;
           }
+          A.nospace = 0;
           if (req.isPaused() && queued < 4 * 1024 * 1024) req.resume();
         }
-      } catch (e) { writing = false; if (draining) return letGo(); return partFail('disk ' + (e.code || e.message)); }
+      } catch (e) {
+        writing = false;
+        // the drive is full: 507 (the phone stops and says so; /api/status says so too while it stays full)
+        if (diskFull(e)) A.nospace = Date.now();
+        if (draining) return letGo();
+        return diskFull(e) ? partFail('no space', 507) : partFail('disk ' + (e.code || e.message));
+      }
       writing = false;
       if (draining) return letGo();
       if (A.superseded && !over) return partFail('replaced');
@@ -1530,13 +1543,18 @@ class FlickServer extends EventEmitter {
     if (!tid || (owner && owner !== q.get('device'))) return this._json(res, 404, { ok: false, error: 'gone' });
     const seen = this.partsSeen.get(tid + ':' + att);
     if (seen && seen.until > Date.now()) return seen.what === 'done' ? this._json(res, 200, { ok: true, done: true }) : this._json(res, 410, this._aborted(seen.why));
+    // (a transfer whose writes ran into a full drive, which still has no room for the rest: 507, and the phone stops
+    // and says so, even when it didn't hear the answer to the write that failed)
+    const full = (X, got) => X.nospace && !this._roomFor(X.total - got);
     const A = this.assemblies.get(tid);
     if (A && A.att === att && !A.finished && A.resumable) {
+      if (full(A, A.saved.reduce((x, y) => x + y, 0))) return this._json(res, 507, { ok: false, error: 'no space' });
       return this._json(res, 200, { ok: true, kind: 'parts', total: A.total, parts: A.parts, start: A.start, plen: A.plen, saved: A.saved, done: A.done,
         complete: A.complete, checking: !!A.check, verify: A.verify });
     }
     const B = this.bundleAsm.get(tid);
     if (B && B.att === att && !B.finished && B.resumable) {
+      if (full(B, B.got.reduce((x, y) => x + y, 0))) return this._json(res, 507, { ok: false, error: 'no space' });
       const at = B.ents.map((e, si) => this._streamAt(B, si));
       return this._json(res, 200, { ok: true, kind: 'bundle', streams: B.K, next: at.map((x) => x.next), part: at.map((x) => x.part),
         done: B.done, bytes: B.got.reduce((x, y) => x + y, 0) });
