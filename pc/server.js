@@ -898,6 +898,12 @@ class FlickServer extends EventEmitter {
     const a = this.assemblies.get(tid);
     return !!(a && a.check && !a.finished);
   }
+  /** Bytes are arriving right now (files sent quietly too), or a file is being checked: not a moment to restart. */
+  receiving() {
+    if (this.uploads.size) return true;
+    const all = [...this.assemblies.values(), ...this.bundleAsm.values()];
+    return all.some((a) => !a.finished && (a.reqs.size > 0 || !!a.check));
+  }
   _sweepSoon() { if (!this.sweepT) { this.sweepT = setInterval(() => this._sweepAssemblies(), 5000); if (this.sweepT.unref) this.sweepT.unref(); } }
   _release(tid, entry) { if (this.uploads.get(tid) === entry) this.uploads.delete(tid); }
 

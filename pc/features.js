@@ -460,6 +460,9 @@ class Features {
     }
   }
 
+  /** Something here is moving files or waiting on the user: folder sync, a Browse phone copy, a question asked. */
+  busy() { return this.sync.busy() || this.browse._running() || this.ask.asks.length > 0; }
+
   stop() {
     this.sync.flush();
     this.history.flush();

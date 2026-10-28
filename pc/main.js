@@ -1156,9 +1156,26 @@ const BOOT = global.FLICK_BOOT || null;     // set by boot.js: which copy of the
 let updater = null, updateBusy = false, restartT = null, healthy = false;
 let updateInfo = { state: 'idle' };
 
+// Files moving, or waiting on the user, in any of the ways they move: thrown or sent (and their questions), sent
+// quietly, folder sync, Browse phone copies, Quick Share, browsers, files the phone is fetching from here. A thrown
+// file still waiting its turn on the phone after a minute doesn't count: it comes in anew when it starts.
+function filesBusy() {
+  const now = Date.now();
+  const moving = [...transfers.values()].some((t) => !t.done && (t.state === 'lifted' ||
+    (t.state === 'dropped' && !(t.upload === 'none' && now - (t.seen || t.t0) > 60000))));
+  return moving || !!(server && (server.receiving() || server.outgoingBusy())) || !!(feats && feats.busy()) ||
+    !!(web && web.busy());
+}
+
 async function runUpdateCheck(manual) {
   if (!updater || updateBusy || process.env.FLICK_NO_UPDATES === '1') return;
   if (!manual && store.autoUpdate === false) return;
+  // not while files move: the download would compete with them for the network, the unpacking for the disk
+  if (!manual && filesBusy()) {
+    clearTimeout(runUpdateCheck.t);
+    runUpdateCheck.t = setTimeout(runUpdateCheck, 2 * 60000);
+    return;
+  }
   updateBusy = true;
   try {
     updateInfo = await updater.check();
@@ -1174,9 +1191,8 @@ function scheduleRestart(ver) {
   if (restartT) return;
   const tryNow = () => {
     restartT = null;
-    const moving = [...transfers.values()].some((t) => !t.done && (t.state === 'lifted' || t.state === 'dropped'));
     const queued = sendQueue.length > 0 && Date.now() - (sendQueue.at || 0) < 10 * 60000;   // a queue goes stale after 10 min
-    const busy = moving || queued || (server && server.outgoingBusy()) || overlayShown || (panel && panel.isVisible() && panel.isFocused()) || (web && web.busy());
+    const busy = filesBusy() || queued || overlayShown || (panel && panel.isVisible() && panel.isFocused());
     if (busy) { restartT = setTimeout(tryNow, 30000); return; }
     log('restarting into', ver);
     // only --hidden: the original command line may hold "--send <files>" from Explorer, which must not be sent again

@@ -288,6 +288,12 @@ class PhoneApi {
     const sy = await this._sync(req, res);
     if (!sy) return;
     const f = await sy.open(device, q.get('pair'), q.get('p'));
+    // a sync under way: Flick doesn't restart for an update while the phone fetches a file
+    let counted = true;
+    const over = () => { if (counted) { counted = false; sy.active--; } };
+    sy.active++;
+    res.once('close', over);
+    if (res.destroyed) over();
     this.s._cors(res);
     res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': f.size, 'X-Flick-Mtime': String(f.mtime), 'Cache-Control': 'no-store' });
     if (!f.size) { await f.fh.close().catch(() => {}); res.end(); sy.sent(device, this.nameOf(device), f); return; }

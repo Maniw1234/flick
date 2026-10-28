@@ -105,7 +105,11 @@ class SyncStore extends EventEmitter {
     this.persist = opts.persist || (() => {});
     this.markOfWeb = opts.markOfWeb || (() => {});
     this.locks = new Map();
+    this.active = 0;            // files being stored or sent right now
   }
+
+  /** A sync is going on: a file on its way, or a pair used in the last half minute (a sync goes file by file). */
+  busy() { return this.active > 0 || Object.values(this.pairs).some((p) => Date.now() - (p.last || 0) < 30000); }
 
   _pair(device, id) {
     const p = typeof id === 'string' && Object.prototype.hasOwnProperty.call(this.pairs, id) ? this.pairs[id] : null;
@@ -234,6 +238,11 @@ class SyncStore extends EventEmitter {
    * "name (<phone>).ext". The same file again (same size, modified within 2 s: a retry) isn't stored twice.
    */
   async put(device, phone, id, rel, mtime, size, req) {
+    this.active++;
+    try { return await this._put(device, phone, id, rel, mtime, size, req); } finally { this.active--; }
+  }
+
+  async _put(device, phone, id, rel, mtime, size, req) {
     const p = this._pair(device, id);
     const abs = await this._resolve(p, rel);
     const dir = path.dirname(abs);
