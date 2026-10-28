@@ -292,6 +292,11 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 30) {
             int[] tb = Api30.insets(in);
             top = tb[0]; bottom = tb[1];
+            // Drawn edge to edge, Flick gets no adjustResize: the keyboard covered the page and the field being typed
+            // in. The page is made shorter by the keyboard instead (the field then scrolls into view, as adjustResize
+            // did), and the bars' inset under the keyboard no longer counts.
+            keyboard(tb[2]);
+            bottom = Math.max(0, bottom - tb[2]);
         } else {
             top = in.getSystemWindowInsetTop();
             bottom = in.getSystemWindowInsetBottom();
@@ -312,6 +317,12 @@ public class MainActivity extends Activity {
         } catch (Throwable e) { /* ignore */ }
     }
 
+    /** The keyboard's height over the bottom of the window (px): the page's view (with the lock's cover) ends above it. */
+    private void keyboard(int px) {
+        View box = web == null || !(web.getParent() instanceof View) ? null : (View) web.getParent();
+        if (box != null && box.getPaddingBottom() != px) box.setPadding(0, 0, 0, px);
+    }
+
     @TargetApi(30)
     static final class Api30 {
         static void edgeToEdge(Window w) {
@@ -321,9 +332,10 @@ public class MainActivity extends Activity {
             WindowInsetsController c = w.getInsetsController();
             if (c != null) c.setSystemBarsAppearance(0, WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
         }
+        /** {top, bottom} of the bars and the cutout, and how far the keyboard reaches up from the bottom (0: none). */
         static int[] insets(WindowInsets in) {
             Insets i = in.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
-            return new int[]{i.top, i.bottom};
+            return new int[]{i.top, i.bottom, in.getInsets(WindowInsets.Type.ime()).bottom};
         }
     }
 
