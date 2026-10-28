@@ -2591,18 +2591,23 @@
   // A file downloads as soon as the PC offers it; its card comes in when the PC's card reaches the phone (m.delay).
   // Cards due together (a big batch: the PC staggers only the first dozen) are laid out once a frame and only a few
   // of them fly in; a file that arrives before its card has landed shows once it has.
-  const IN = { q: [], raf: 0, fly: [], flyRaf: 0, wait: new Set(), got: new Map(), tickAt: 0 };
+  const IN = { q: [], raf: 0, t: 0, fly: [], flyRaf: 0, wait: new Set(), got: new Map(), tickAt: 0 };
   function onIncoming(m) {
     (st.incoming = st.incoming || new Map()).set(m.fid, String(m.name || 'file'));
     IN.wait.add(m.fid);
     const tok = pref.get(tokenKey(st.pc.id), '');
     const url = linkBase() + m.url + '?device=' + encodeURIComponent(DEVICE) + '&token=' + encodeURIComponent(tok) + parallelArg();
     nc('download', m.fid, url, m.name, String(m.size || 0), m.mime || '');
-    setTimeout(() => { IN.q.push(m); if (!IN.raf) IN.raf = requestAnimationFrame(incomingNow); }, m.delay || 0);
+    setTimeout(() => {
+      IN.q.push(m);
+      // with the next frame; a timer stands in when no frame comes (Flick in the background)
+      if (!IN.raf) { IN.raf = requestAnimationFrame(incomingNow); IN.t = setTimeout(incomingNow, 100); }
+    }, m.delay || 0);
   }
   function incomingNow() {
-    IN.raf = 0;
+    cancelAnimationFrame(IN.raf); clearTimeout(IN.t); IN.raf = 0;
     const batch = IN.q.splice(0);
+    if (!batch.length) return;
     if (st.screen !== 'main') showScreen('main');
     const its = batch.map((m) => {
       const aspect = clamp(m.aspect || 1.33, 0.5, 2);
@@ -2622,7 +2627,7 @@
       setCardProgress(it.id, 0);
       // (scrolled far down, its card isn't drawn yet: it shows once the view is back at the top)
       const el = cards.get(it.id);
-      if (el && flew < 2 && IN.fly.length < 8) { flyIn(it, batch[i], el); flew++; } else landed(it.fid);
+      if (el && !document.hidden && flew < 2 && IN.fly.length < 8) { flyIn(it, batch[i], el); flew++; } else landed(it.fid);
     });
     if (flew) haptic('tick');
   }
