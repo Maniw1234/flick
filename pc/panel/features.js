@@ -44,7 +44,7 @@
     return new Date(t).toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long' });
   }
   const HOW = { auto: 'auto', share: 'shared', quickshare: 'Quick Share', browser: 'browser', sync: 'sync', pull: 'Browse phone' };
-  const WHY = { declined: 'Declined', timeout: 'Not accepted in time' };
+  const WHY = { declined: 'Declined', timeout: 'Not accepted in time', save: 'Couldn’t be saved' };
 
   let F = null;            // the latest state
   let H = { items: [], total: 0 };
@@ -121,7 +121,9 @@
     let t = 'Files you send and receive show up here.';
     if (l) {
       const who = l.deviceName ? (l.dir === 'out' ? ' to ' : ' from ') + l.deviceName : '';
-      t = !l.ok ? (WHY[l.why] ? 'Declined ' + l.name + who : l.name + ' didn’t arrive') + ' · ' + ago(l.time)
+      const bad = l.why === 'save' ? l.name + ' couldn’t be saved'
+        : WHY[l.why] ? 'Declined ' + l.name + who : l.name + ' didn’t arrive';
+      t = !l.ok ? bad + ' · ' + ago(l.time)
         : (l.dir === 'out' ? 'Sent ' + l.name + who : l.name + who) + ' · ' + ago(l.time);
     }
     $('fHistSub').textContent = t;

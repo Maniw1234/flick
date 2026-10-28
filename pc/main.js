@@ -1273,12 +1273,49 @@ function uniqueDirPath(dir, name) {
   return p;
 }
 
-// move one staged file or folder into place; across drives (or when Windows briefly locks a fresh file) copy instead
+// Move one staged file or folder into place. Windows can hold a fresh file for a moment (an antivirus or a thumbnailer
+// reading it): the move is tried again for a few seconds. Across drives, or when it stays locked, it's copied instead.
+const LOCKED = ['EBUSY', 'EACCES', 'EPERM'];
 async function placeItem(src, dest) {
-  try { await fs.promises.rename(src, dest); return; }
-  catch (e) { if (!['EXDEV', 'EPERM', 'EBUSY', 'EACCES', 'ENOTEMPTY'].includes(e.code)) throw e; }
-  await fs.promises.cp(src, dest, { recursive: true, errorOnExist: true, force: false, preserveTimestamps: true });
+  for (let i = 0; ; i++) {
+    try { await fs.promises.rename(src, dest); return; }
+    catch (e) {
+      if (LOCKED.includes(e.code) && i < 5) { await sleep(150 * 2 ** i); continue; }     // 150 ms ... 2.4 s
+      if (!['EXDEV', 'ENOTEMPTY'].concat(LOCKED).includes(e.code)) throw e;
+      break;
+    }
+  }
+  try {
+    await fs.promises.cp(src, dest, { recursive: true, errorOnExist: true, force: false, preserveTimestamps: true });
+  } catch (e) {
+    // no half copy is left behind (the staged one is still whole)
+    if (e.code !== 'ERR_FS_CP_EEXIST' && e.code !== 'EEXIST') {
+      await fs.promises.rm(dest, { recursive: true, force: true }).catch(() => {});
+    }
+    throw e;
+  }
   await fs.promises.rm(src, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => {});
+}
+
+// A received file (or what's left of a received folder) that couldn't be saved where it belongs. Its phone was told it
+// arrived and won't send it again, so it's never deleted: it goes under its own name into "Not saved" beside where it
+// was staged (the same drive: a rename) and the user is told where. If even that fails it stays where it is.
+const KEPT_DIR = 'Not saved';
+async function keepUnsaved(src, name) {
+  let dest = src;
+  try {
+    const dir = path.join(path.dirname(src), KEPT_DIR);
+    await fs.promises.mkdir(dir, { recursive: true });
+    const d = uniquePath(dir, sanitizeName(name));
+    try { await fs.promises.rename(src, d); dest = d; } finally { release(d); }
+  } catch (e) { /* it stays where it is */ }
+  log('could not save', name, '- kept in', dest);
+  const where = path.dirname(dest);
+  const text = 'Couldn’t save ' + name + ' in ' + saveDirLabel() + '. It’s kept in ' + where + '.';
+  panelSend('panel:note', { text });
+  const show = () => shell.showItemInFolder(dest);
+  if (feats) feats.toast({ title: 'Couldn’t save ' + name, body: 'It’s kept in ' + where, click: show });
+  return dest;
 }
 
 async function finalizeBundle(t, dir) {
@@ -1305,9 +1342,18 @@ async function finalizeBundle(t, dir) {
       finally { release(dest); }
     }
   } finally {
-    fs.rm(t.tmpPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }, () => {});
+    // what couldn't be put in place is kept (see keepUnsaved); otherwise the staging folder goes
+    if (lost) t.kept = await keepUnsaved(t.tmpPath, t.name && t.name !== 'file' ? t.name : 'Files');
+    else {
+      fs.rm(t.tmpPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }, () => {});
+      t.tmpPath = null;                                  // (nothing was left in it to keep)
+    }
   }
   if (!placed.length) throw new Error('nothing received');
+  if (lost) {
+    const name = lost + (lost === 1 ? ' item' : ' items');
+    hist({ dir: 'in', tid: t.tid, name, size: 0, ok: false, how: 'fling', why: 'save', path: t.kept });
+  }
   log('saved', placed.length, 'item(s) in', dir, t.bundle.files, 'files', lost ? '(' + lost + ' could not be saved)' : '');
   return placed.length === 1 ? placed[0] : placed.length + ' items';
 }
@@ -1395,11 +1441,7 @@ async function finalize(t) {
     }
     fs.mkdirSync(dir, { recursive: true });
     dest = uniquePath(dir, sanitizeName(t.name));
-    try { await fs.promises.rename(t.tmpPath, dest); }
-    catch (e) {
-      if (e.code === 'EXDEV' || e.code === 'EPERM') { await fs.promises.copyFile(t.tmpPath, dest); await fs.promises.unlink(t.tmpPath).catch(() => {}); }
-      else throw e;
-    }
+    await placeItem(t.tmpPath, dest);
     release(dest);
     const now = new Date(); fs.utimes(dest, now, now, () => {});
     markOfWeb(dest);
@@ -1413,9 +1455,10 @@ async function finalize(t) {
     if (server) server.pushToPhone({ t: 'saved', tid: t.tid, name: path.basename(dest), where: saveDirLabel() });
   } catch (e) {
     log('finalize failed', e.message);
-    hist({ dir: 'in', tid: t.tid, name: t.name, size: 0, ok: false, how: 'fling' });
     release(dest);
-    if (t.tmpPath) fs.rm(t.tmpPath, { recursive: true, force: true }, () => {});   // don't leave the received copy in temp
+    // the phone already heard its upload arrived and won't send it again: the received copy is kept, never deleted
+    if (t.tmpPath && !t.kept) t.kept = await keepUnsaved(t.tmpPath, t.name && t.name !== 'file' ? t.name : 'Files');
+    hist({ dir: 'in', tid: t.tid, name: t.name, size: 0, ok: false, how: 'fling', why: 'save', path: t.kept });
     fx('failed', { tid: t.tid });
     if (server) server.pushToPhone({ t: 'failed', tid: t.tid, why: 'save' });
   }
@@ -1877,11 +1920,13 @@ app.on('before-quit', () => {
 // Leftovers of transfers that never finished: at start, anything older than 10 minutes; while Flick runs (every 30
 // minutes), files untouched for six hours (a file still arriving is written to all the time; folders are left to the
 // transfers that own them)
+// (the files kept because they couldn't be saved, in "Not saved", stay: see keepUnsaved)
 function sweepDir(dir, running) {
   const now = Date.now(), age = running ? 6 * 3600000 : 10 * 60000;
   fs.readdir(dir, (e, names) => {
     if (e) return;
     for (const n of names) {
+      if (n === KEPT_DIR) continue;
       const full = path.join(dir, n);
       fs.stat(full, (er, st) => {
         const old = !er && now - st.mtimeMs > age && (!running || st.isFile());
