@@ -1026,7 +1026,7 @@ class FlickServer extends EventEmitter {
       if (pa) this._dropAssembly(pa, true);
       const root = path.join(this.tmpDir, 'b-' + tid + '-' + att + '-' + rid(3));
       try { fs.mkdirSync(root, { recursive: true }); } catch (e) { req.resume(); return this._json(res, 500, { ok: false, error: 'staging' }); }
-      A = { tid, att, K, root, shared: { taken: new Map(), tops: [], assigned: new Map() }, got: new Array(K).fill(0), done: new Array(K).fill(false),
+      A = { tid, att, K, root, shared: { taken: new Map(), tops: [], topSet: new Set(), assigned: new Map() }, got: new Array(K).fill(0), done: new Array(K).fill(false),
         reqs: new Set(), manifest: null, total: +q.get('bytes') || 0, finished: false, superseded: false, t0: Date.now(), lastEmit: 0, active: Date.now(),
         // resumable: each stream's delivered entries, the file it was writing when cut off, and the request sending it
         resumable: resume, ents: Array.from({ length: K }, () => []), part: new Array(K).fill(null), cur: new Array(K).fill(null),
@@ -1106,9 +1106,11 @@ class FlickServer extends EventEmitter {
       A.finished = true;
       this.bundleAsm.delete(tid);
       this._remember(tid, att, 'done', A.resumable);
-      // the items in the order the phone listed them, whichever stream carried them
-      const roots = (A.manifest && Array.isArray(A.manifest.roots)) ? A.manifest.roots.map(String) : [];
-      const order = (x) => { const i = roots.indexOf(x); return i < 0 ? 1e9 : i; };
+      // the items in the order the phone listed them, whichever stream carried them (looked up in a map: a search of
+      // the list for each comparison froze the PC for seconds with thousands of picked files)
+      const rank = new Map();
+      if (A.manifest && Array.isArray(A.manifest.roots)) A.manifest.roots.forEach((x, i) => { x = String(x); if (!rank.has(x)) rank.set(x, i); });
+      const order = (x) => (rank.has(x) ? rank.get(x) : 1e9);
       const tops = A.shared.tops.slice().sort((a, b) => order(a) - order(b));
       const received = A.got.reduce((x, y) => x + y, 0);
       this.emit('upload-progress', { tid, received, total: A.total || received });

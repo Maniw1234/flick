@@ -41,6 +41,8 @@ final class Bundle {
 
     interface Progress { void onBytes(long sent, long total); }
 
+    static final int MANIFEST_MAX = 192 * 1024;
+
     final List<Entry> entries = new ArrayList<Entry>();
     final List<String> roots = new ArrayList<String>();
     private final Set<String> rootKeys = new HashSet<String>();
@@ -136,7 +138,17 @@ final class Bundle {
         o.write("FLKB1\n".getBytes("UTF-8"));
         StringBuilder m = new StringBuilder("{\"v\":1,\"files\":").append(manifestFiles >= 0 ? manifestFiles : files)
                 .append(",\"bytes\":").append(manifestBytes >= 0 ? manifestBytes : bytes).append(",\"roots\":[");
-        for (int i = 0; i < roots.size(); i++) { if (i > 0) m.append(','); m.append(quote(roots.get(i))); }
+        // the picked items' names, as many as keep the manifest well under 256 KB (a PC up to 1.1.0 refuses a larger
+        // one, and with it the whole send: thousands of photos picked one by one). They only order the items there.
+        int size = m.length();
+        for (int i = 0; i < roots.size(); i++) {
+            String q = quote(roots.get(i));
+            int n = q.getBytes("UTF-8").length + 1;
+            if (size + n > MANIFEST_MAX) break;
+            if (i > 0) m.append(',');
+            m.append(q);
+            size += n;
+        }
         block(o, m.append("]}").toString());
         byte[] buf = new byte[256 * 1024];
         long sent = 0;
