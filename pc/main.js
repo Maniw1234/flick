@@ -1223,7 +1223,7 @@ function filesBusy() {
   const moving = [...transfers.values()].some((t) => !t.done && (t.state === 'lifted' ||
     (t.state === 'dropped' && !(t.upload === 'none' && now - (t.seen || t.t0) > 60000))));
   return moving || !!(server && (server.receiving() || server.outgoingBusy())) || !!(feats && feats.busy()) ||
-    !!(web && web.busy());
+    !!(web && web.busy()) || !!qsAsking;            // (a phone waiting for an answer about its Quick Share, too)
 }
 
 async function runUpdateCheck(manual) {
