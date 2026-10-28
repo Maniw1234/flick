@@ -77,6 +77,14 @@ img { -webkit-user-drag: none; user-select: none; pointer-events: none; }
 .plinks { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
 .plink { padding: 9px 14px; border-radius: 18px; background: rgba(255,255,255,0.08); color: #d1d1d6; font-size: 13px; font-weight: 550; }
 .plink:active { background: rgba(255,255,255,0.16); }
+/* a short window (split screen, a phone on its side): the text, the button and the hint below follow one another
+   (placed by the screen's height, the button covered the text and the pairing code) */
+@media (max-height: 560px) {
+  #pair { overflow-y: auto; overscroll-behavior: contain; }
+  .ptext { margin-top: calc(var(--top) + 3vh); }
+  #connect { position: relative; flex: none; left: auto; top: auto; margin: 22px 0 14px; }
+  .pfoot { position: static; flex: none; margin-top: auto; padding-bottom: calc(var(--bottom) + 16px); }
+}
 
 /* ---------------- header (file manager) ---------------- */
 :root { --hdr: 104px; }
