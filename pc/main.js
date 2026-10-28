@@ -1257,15 +1257,24 @@ function isGone(tid) {
   return gone.has(tid);
 }
 
+// Windows' device names in every spelling it takes for one ("con.txt", "con .txt", "COM\u00b9.png", "CONIN$"): a file named
+// so can't be opened or deleted in Explorer (sync.js has the same rule)
+const DEVICE_NAME = /^(con|prn|aux|nul|com[0-9\u00b9\u00b2\u00b3]|lpt[0-9\u00b9\u00b2\u00b3]|conin\$|conout\$)( *\..*)?$/i;
+// A name fits when Windows takes it (255 UTF-16 units) and so do macOS and Linux (255 bytes: 85 letters of Chinese,
+// 127 of Hebrew or Russian), with room left for " (2)"
+const fitsName = (s) => s.length <= 180 && (IS_WIN || Buffer.byteLength(s) <= 230);
 function sanitizeName(n) {
-  // also drop invisible direction-control characters, which can make "photo\u202Egnp.exe" read as "photoexe.png"
+  // also drop invisible direction-control characters, which can make "photo\u202egnp.exe" read as "photoexe.png"
   let s = String(n || 'file').replace(/[<>:"/\\|?*\u0000-\u001f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '_').replace(/[. ]+$/, '').trim();
   if (!s) s = 'file';
-  if (/^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i.test(s)) s = '_' + s;
-  if (s.length > 180) {
+  if (DEVICE_NAME.test(s)) s = '_' + s;
+  if (!fitsName(s)) {
     let e = path.extname(s);
     if (e.length > 16) e = '';                         // a "dot near the start" isn't an extension worth keeping
-    s = s.slice(0, 180 - e.length) + e;
+    // shortened by whole characters: half an emoji would leave a broken one in the name
+    const cs = Array.from(s.slice(0, Math.min(180, s.length - e.length)).replace(/[\ud800-\udbff]$/, ''));
+    while (cs.length && !fitsName(cs.join('') + e)) cs.pop();
+    s = (cs.join('').replace(/[. ]+$/, '') || 'file') + e;
   }
   return s;
 }
