@@ -28,12 +28,17 @@ const FOLLOW_MAX_MS = 10000; // a file following a fist in front of the PC lands
 const LIFT_MAX_MS = 90000;   // a file held this long without being let go of is put back
 const CAM_BUDGET_MS = 45000; // the camera runs at most this long in any 2 minutes (however many grabs ask for it)
 const ARM_MS = 10000;        // selecting files: the camera looks for the grab this long
+const SEL_CAP_MS = 20000;    // selecting files with no hand coming up to grab them (selections mostly made for something
+                             // else) keeps the camera on this long at most in any 2 minutes: the rest of its budget is
+                             // left for grabs
 const HELD_MS = 20000;       // files picked up on the PC wait this long for the phone to catch them
 const HAND_MORE_MS = 4000;   // a hand in view while the camera waits for the grab: it waits this much longer
 const BACK_MS = 700;         // a hand opening in front of the PC puts the files back after this, unless the phone
                              // catches them first (a phone the PC's camera sees too, under the hand)
 const MIN_RUN_MS = 3000;     // less camera time than this left: it rests (a blink of its light helps no one)
-const THUMB_WAIT_MS = 1500;  // the picked-up card waits at most this long for its picture
+const FACE_WAIT_MS = 120;    // the picked-up card shows at once with its picture if that's ready this soon; else with its
+                             // file type, and its picture follows (within THUMB_WAIT_MS)
+const THUMB_WAIT_MS = 1500;
 const IDLE_CLOSE_MS = 3 * 60000;
 
 /**
@@ -56,7 +61,9 @@ function attach(o) {
   const camSays = () => camProblem || camState;
   const lifted = new Map();    // tid -> { t, m, at, go, landed, waitT, video, device }: files a hand carries from a phone
   let lastOpen = null;         // { x, y, at }: where the camera last saw the carrying fist open
-  let hand = null;             // { x, y, pose, at }: the hand the camera sees now
+  // the hand the camera sees now: { x, y (where it is), ax, ay (where it aims), pose (settled), raw (this frame's own),
+  // openN (frames in a row it looked open: a hand's first frame can look open when it isn't), at }
+  let hand = null;
   const camRuns = [];          // [from, to] (to: null while on): when the camera ran, for its budget
   function camUsed(now) {
     let ms = 0;
@@ -64,6 +71,17 @@ function attach(o) {
     while (camRuns.length && camRuns[0][1] && camRuns[0][1] < now - 120000) camRuns.shift();
     return ms;
   }
+  // { from, to, hand }: when selecting files set the camera looking for a grab (hand: a hand came up meanwhile)
+  const armRuns = [];
+  function armUsed(now) {
+    let ms = 0;
+    for (const r of armRuns) if (!r.hand) ms += Math.max(0, Math.min(r.to, now) - Math.max(r.from, now - 120000));
+    while (armRuns.length && armRuns[0].to < now - 120000) armRuns.shift();
+    return ms;
+  }
+  function armEnded(now) { const r = armRuns[armRuns.length - 1]; if (r && r.to > now) r.to = now; }
+  // a clearly open hand: its pose settled open, and its last few frames all open
+  const openNow = (h) => !!h && h.pose === 'open' && h.raw === 'open' && h.openN >= 3;
 
   // PC to phone: the phones ready to catch, what's selected, and what a fist picked up
   const phones = new Set();    // devices with Air grab on and Flick open
@@ -192,6 +210,7 @@ function attach(o) {
   const newest = () => { let b = null; for (const a of lifted.values()) if (!a.landed && (!b || a.at > b.at)) b = a; return b; };
 
   function onHand(ev) {
+    if (ev.type === 'pinch') return;                     // (not used here)
     const now = Date.now();
     const a = newest();
     if (o.debug && ev.type !== 'move') log('hand', ev.type, ev.pose || '', a ? a.t.tid + (a.go ? ' (let go)' : '') + (a.sawFist ? ' fist seen' : '') : G.held ? 'holding ' + G.held.state : Date.now() < G.armedUntil ? 'armed' : '-');
@@ -201,7 +220,10 @@ function attach(o) {
       // aim: where the hand was aimed before its pose began to change (stream.js): a fist that opens lands its file
       // where the fist was, not where opening moved the hand
       const q = Array.isArray(ev.aim) ? toScreen(ev.aim) : p;
-      hand = { x: p.x, y: p.y, ax: q.x, ay: q.y, pose: ev.pose, at: now };
+      const raw = ev.raw || ev.pose;
+      // (one move a frame: frames in a row it looked open)
+      const openN = ev.type === 'enter' ? 0 : ev.type !== 'move' ? (hand ? hand.openN : 0) : raw === 'open' ? (hand ? hand.openN : 0) + 1 : 0;
+      hand = { x: p.x, y: p.y, ax: q.x, ay: q.y, pose: ev.pose, raw, openN, at: now };
     }
     if (a) onCarry(ev, a, now);         // a phone's file on its way here comes first
     else onPick(ev, now);
@@ -211,16 +233,25 @@ function attach(o) {
   function onCarry(ev, a, now) {
     if (ev.type === 'leave') {
       a.sawFist = 0;                                     // a hand coming back is a new one until seen as a fist
+      // the fist it followed lost as it opened (the tracker loses an opening hand now and then): it opened there
+      const opening = ev.raw === 'open' || (ev.pose === 'fist' && ev.raw === 'other');
+      if (a.go && a.follow && opening && Array.isArray(ev.aim)) {
+        const q = toScreen(ev.aim);
+        lastOpen = { x: q.x, y: q.y, at: now };
+        land(a, q);
+        return;
+      }
       // the fist it followed went out of view: the file goes back to waiting at the edge
       if (a.follow) { a.follow = false; o.fx('air', { tid: a.t.tid, off: true }); bob(a); }
       return;
     }
     if (!hand) return;
     const p = hand;
-    if (ev.pose === 'fist') {
-      a.sawFist = now;                                   // the hand carrying it, in front of this PC
-      // once the phone has let go, the fist carries the file here: it follows, and lands where the hand opens
-      if (a.go) {
+    if (ev.pose !== 'open') {
+      if (ev.pose === 'fist') a.sawFist = now;           // the hand carrying it, in front of this PC
+      // once the phone has let go, the fist carries the file here: it follows (also while it looks half open: a fist
+      // on the move often does), and lands where the hand opens
+      if (a.go && (ev.pose === 'fist' || a.follow)) {
         a.follow = true;
         a.followAt = { x: p.x, y: p.y };
         o.fx('air', { tid: a.t.tid, x: p.x, y: p.y });
@@ -229,10 +260,14 @@ function attach(o) {
       }
       return;
     }
-    if (ev.pose !== 'open' || (ev.type !== 'pose' && ev.type !== 'enter')) return;
     const at = { x: p.ax, y: p.ay };                     // where the fist was when it began to open
-    // once the phone has let go, a hand opening (or coming into view open) picks where it lands
-    if (a.go) { lastOpen = { x: at.x, y: at.y, at: now }; land(a, at); return; }
+    // once the phone has let go, a hand opening picks where it lands; one that came into view open, once it's clearly
+    // open (its first frame alone can look open when it isn't)
+    if (a.go) {
+      if (ev.type === 'pose' || (ev.type === 'move' && openNow(p))) { lastOpen = { x: at.x, y: at.y, at: now }; land(a, at); }
+      return;
+    }
+    if (ev.type !== 'pose' && ev.type !== 'enter') return;
     // before that, only the fist this camera saw (without it leaving the view) opening tells the phone to let go:
     // another hand, or one never seen closed, sends nothing
     if (ev.type !== 'pose' || !a.sawFist) return;
@@ -283,9 +318,18 @@ function attach(o) {
     // what was selected already when the watching started isn't a selection just made: the next one turns it on
     if (s.first) return;
     // just selected, or a window with files selected brought to the front (copied, on Linux): the camera looks for the
-    // grab for a few seconds
-    G.armedAt = Date.now();
-    armUntil(G.armedAt + ARM_MS);
+    // grab for a few seconds. Most selections are made for something else, so they get only part of the camera's
+    // time, and leave the rest for grabs on the phone
+    const now = Date.now();
+    const left = Math.min(ARM_MS, SEL_CAP_MS - armUsed(now));
+    if (left < MIN_RUN_MS) {
+      if (o.debug) log('selected', G.sel.length, 'file(s): the camera rests (its time is kept for grabs)');
+      return;
+    }
+    G.armedAt = now;
+    armUntil(now + left);
+    const last = armRuns[armRuns.length - 1];
+    if (last && now <= last.to) last.to = Math.max(last.to, now + left); else armRuns.push({ from: now, to: now + left, hand: false });
     if (o.debug) log('selected', G.sel.length, 'file(s): the camera looks for a grab');
     startCam();
   }
@@ -295,6 +339,7 @@ function attach(o) {
     G.armT = setTimeout(stopCamIfIdle, Math.max(0, t - Date.now()) + 50);
   }
   function disarm() {
+    armEnded(Date.now());
     G.armedUntil = 0;
     clearTimeout(G.armT);
     stopCamIfIdle();
@@ -310,13 +355,16 @@ function attach(o) {
       return;
     }
     if (!hand) return;
-    // a hand in view while the camera waits for the grab: a few more seconds (within the camera's half minute)
+    // a hand in view while the camera waits for the grab: a few more seconds (within the camera's half minute); and that
+    // selection was meant for a grab (it doesn't count against the time selections may use)
     if (!h && now < G.armedUntil) {
+      const r = armRuns[armRuns.length - 1];
+      if (r && r.to >= now - 1000) r.hand = true;
       const t = Math.min(G.armedAt + CAM_RUN_MS, now + HAND_MORE_MS);
       if (t > G.armedUntil + 500) armUntil(t);
     }
-    if (ev.type === 'enter') G.open = ev.pose === 'open';
-    if (ev.pose === 'open' && (ev.type === 'pose' || ev.type === 'enter')) {
+    if (ev.type === 'enter') G.open = false;            // (its first frame's pose: open counts once it's clearly so)
+    if (ev.pose === 'open' && (ev.type === 'pose' || (ev.type === 'move' && openNow(hand)))) {
       G.open = true;
       if (h && h.state === 'hand') backSoon(h);          // opened in front of the PC again: put back
       return;
@@ -340,20 +388,26 @@ function attach(o) {
     const name = path.basename(paths[0]);
     log('picked up', paths.length, 'file(s)');
     tellPhones({ t: 'air-held', n: paths.length, name });
-    let th = null;
-    try {
-      th = o.thumbFor ? await Promise.race([o.thumbFor(paths[0]), new Promise((r) => setTimeout(() => r(null), THUMB_WAIT_MS))]) : null;
-    } catch (e) { th = null; }
-    if (G.held !== h) return;                            // put back or caught while the picture was being made
-    const aspect = th ? th.w / th.h : 0.72;
-    const cw = 150, ch = Math.round(Math.max(110, Math.min(220, cw / Math.max(0.55, Math.min(1.8, aspect)))));
+    // the card is in the hand at once: with its picture when that's quick to make, else with its file type until the
+    // picture is ready
+    const thumb = o.thumbFor ? Promise.resolve().then(() => o.thumbFor(paths[0])).catch(() => null) : Promise.resolve(null);
+    const within = (ms) => Promise.race([thumb, new Promise((r) => setTimeout(() => r(null), ms))]);
+    const size = (th) => {
+      const aspect = th ? th.w / th.h : 0.72;
+      return { w: 150, h: Math.round(Math.max(110, Math.min(220, 150 / Math.max(0.55, Math.min(1.8, aspect))))) };
+    };
+    let th = await within(FACE_WAIT_MS);
+    if (G.held !== h) return;                            // put back or caught meanwhile
     const kind = o.kindOf ? o.kindOf(name) : 'doc';
     const ext = (/\.([^.]+)$/.exec(name) || [])[1] || '';
     // (the hand may have left the view meanwhile: the card goes straight to the edge)
     o.fx('air-out', {
       id: h.id, x: h.x, y: h.y, edge: h.state === 'edge', name: paths.length > 1 ? paths.length + ' items' : name, count: paths.length, kind,
-      badge: kind === 'doc' ? (ext || 'file').toUpperCase().slice(0, 4) : '', thumb: th && th.url, card: { w: cw, h: ch },
+      badge: kind === 'doc' ? (ext || 'file').toUpperCase().slice(0, 4) : '', thumb: th && th.url, card: size(th),
     });
+    if (th || (kind === 'doc' && ext.toLowerCase() !== 'pdf')) return;  // (of documents, only PDFs have a picture)
+    th = await within(THUMB_WAIT_MS);
+    if (th && G.held === h) o.fx('air-out', { id: h.id, thumb: th.url, card: size(th) });
   }
   // (fromStop: the camera has just stopped)
   function toEdge(h, fromStop) {
@@ -429,7 +483,7 @@ function attach(o) {
       const now = Date.now();
       // where the hand opened (just now, or a moment ago), or an open hand the camera sees right now
       const seen = (a.landAt && now - a.landAt.at < SEEN_MS && a.landAt) || (lastOpen && lastOpen.at > a.at && now - lastOpen.at < 900 && lastOpen)
-        || (hand && hand.pose === 'open' && now - hand.at < 600 && hand);
+        || (openNow(hand) && now - hand.at < 600 && hand);
       if (seen) { land(a, seen); return a.video; }
       // no camera to see the hand: in from the edge now; otherwise the hand has a moment to reach the PC and open
       if (a.cam === false || !camOn() || /denied|nocamera|error/.test(camSays())) { land(a, null); return a.video; }

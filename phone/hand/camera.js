@@ -13,7 +13,9 @@
 //   await cam.start(); ... cam.stop();
 //
 // Frames: about 6 a second while no hand is in view (the tracker skips frames where nothing moves), as many as the
-// tracker manages while one is near.
+// tracker manages while one is near, each of the camera's frames at most once. For a moment after a hand was last seen
+// the tracker looks for it in every frame, even a still one (it loses a hand now and then: a fist held still over the
+// phone is found again before it counts as gone).
 (function (root) {
   'use strict';
   const MAX_SIDE = 320;
@@ -44,6 +46,11 @@
       this.seen = 0;          // when the hand was last in view
       this.looked = 0;        // when the palm detector last ran on a still frame
       this.id = 0;
+      this.vfc = false;       // the video says when it has a new frame (requestVideoFrameCallback)
+      this.vf = 0;            // frames it has shown
+      this.gf = -1;           // the frame last handed to the tracker
+      this.want = null;       // what runs with the next new frame
+      this.lastGrab = 0;
       this.stats = { frames: 0, ms: 0, simd: null };
     }
 
@@ -51,7 +58,7 @@
 
     async _worker() {
       if (this.ready) return this.ready;
-      this.ready = (async () => {
+      const p = (this.ready = (async () => {
         const files = await this.o.files();
         const w = this.o.worker();
         await new Promise((res, rej) => {
@@ -65,12 +72,24 @@
           const list = Object.values(files).filter((b) => b && b.byteLength);
           w.postMessage({ t: 'init', files }, list);
         });
+        // closed meanwhile (close()): not wanted any more
+        if (this.ready !== p) { try { w.terminate(); } catch (e) { /* ignore */ } throw new Error('closed'); }
         w.onmessage = (e) => this._result(e.data || {});
         this.worker = w;
         return w;
-      })();
-      this.ready.catch(() => { this.ready = null; });
-      return this.ready;
+      })());
+      p.catch(() => { if (this.ready === p) this.ready = null; });
+      return p;
+    }
+
+    // done with it for now (Air grab turned off): the camera off, and the tracker's memory given back (it loads again
+    // on the next start)
+    close() {
+      this.stop();
+      const w = this.worker;
+      this.worker = null;
+      this.ready = null;
+      if (w) try { w.terminate(); } catch (e) { /* ignore */ }
     }
 
     // the tracker loaded ahead (its models are compiled and ready), with the camera still off
@@ -112,6 +131,10 @@
       }
       if (!current()) { for (const t of stream.getTracks()) try { t.stop(); } catch (e) { /* ignore */ } return false; }
       this.stream = stream;
+      // a camera that ends by itself (unplugged, taken by another app, turned off in Android's quick settings): off, and
+      // said so (frames would stop, and the last one would keep showing a hand that isn't there)
+      const track = stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+      if (track && track.addEventListener) track.addEventListener('ended', () => this._fail(gen, new Error('the camera stopped')));
       // a page that is never shown (the PC's camera window) draws a video element only a few times a second: there the
       // frames come straight from the camera's track, each one once
       if (this.o.reader && typeof MediaStreamTrackProcessor === 'function' && typeof OffscreenCanvas === 'function') {
@@ -126,14 +149,32 @@
       if (!current()) return false;                 // stop() released this stream meanwhile
       this.cv = document.createElement('canvas');
       this.cx = this.cv.getContext('2d', { willReadFrequently: true });
+      this._frames(v, gen);
       this.state('on');
       this._tick();
       return true;
     }
 
+    // the video's frames as it shows them (requestVideoFrameCallback): the tracker gets each one at most once. Grabbing
+    // again before a new one comes only hands it the same picture: work for nothing (and a hand that seems to stop)
+    _frames(v, gen) {
+      this.vf = 0; this.gf = -1; this.want = null;
+      this.vfc = typeof v.requestVideoFrameCallback === 'function';
+      if (!this.vfc) return;
+      const on = () => {
+        if (!this.on || this.gen !== gen || this.video !== v) return;
+        this.vf++;
+        const f = this.want;
+        if (f) { this.want = null; clearTimeout(this.timer); f(); }
+        v.requestVideoFrameCallback(on);
+      };
+      v.requestVideoFrameCallback(on);
+    }
+
     stop() {
       this.on = false;
       this.gen = (this.gen || 0) + 1;
+      this.want = null;
       clearTimeout(this.timer);
       this._release();
       if (this.worker) this.worker.postMessage({ t: 'reset' });
@@ -147,18 +188,35 @@
       if (this.video) { try { this.video.srcObject = null; } catch (e) { /* ignore */ } this.video = null; }
     }
 
-    // the next frame: at once while a hand is near (as fast as the tracker goes), else after a short rest; never while
-    // the tracker still has one (its result asks for the next)
+    // the next frame: as soon as there is a new one while a hand is near (as fast as the tracker goes), else after a
+    // short rest; never while the tracker still has one (its result asks for the next)
     _tick() {
       clearTimeout(this.timer);
+      this.want = null;
       if (!this.on || this.busy || this.rd) return;    // (frames read from the track come by themselves)
       const go = () => {
         if (!this.on || this.busy) return;
         try { if (!this._grab()) this.timer = setTimeout(() => this._tick(), 40); }    // no picture yet
         catch (e) { this.timer = setTimeout(() => this._tick(), 200); }               // a frame that can't be read
       };
-      if (performance.now() - this.seen < 1200) soon(go);
-      else this.timer = setTimeout(go, 160);
+      if (performance.now() - this.seen < 1200) this._next(go);
+      else this.timer = setTimeout(() => this._next(go), 160);
+    }
+
+    // go, with a frame the tracker hasn't had: at once if the video has one, else as soon as it shows the next
+    _next(go) {
+      if (!this.vfc) {
+        // (no word from the video about its frames: at most one a camera frame's time)
+        const wait = this.lastGrab + 30 - performance.now();
+        if (wait <= 0) soon(go); else this.timer = setTimeout(go, wait);
+        return;
+      }
+      if (this.vf !== this.gf) { soon(go); return; }
+      this.want = go;
+      // a video that never says (frame callbacks that don't come here): it's asked no more, and frames are timed instead.
+      // One that said before and stops (a camera that froze) is waited for: its last picture would only show a hand
+      // that may have gone
+      if (!this.vf) this.timer = setTimeout(() => { if (this.want === go && !this.vf) { this.vfc = false; this.want = null; go(); } }, 600);
     }
 
     // frames from the camera's track as they come (reader: true): one at a time to the tracker, every third one while
@@ -195,6 +253,8 @@
           if (f) try { f.close(); } catch (e) { /* ignore */ }
         }
       }
+      // the camera ended by itself (not stopped here): off, and said so
+      this._fail(gen, new Error('the camera stopped'));
     }
 
     // the camera can't be read: off, and said so
@@ -210,6 +270,8 @@
       const k = Math.min(1, (this.o.size || MAX_SIDE) / Math.max(v.videoWidth, v.videoHeight));
       const w = Math.round(v.videoWidth * k), h = Math.round(v.videoHeight * k);
       if (this.cv.width !== w || this.cv.height !== h) { this.cv.width = w; this.cv.height = h; this.bufs = []; }
+      this.gf = this.vf;
+      this.lastGrab = performance.now();
       this.cx.drawImage(v, 0, 0, w, h);
       this._send(this.cx.getImageData(0, 0, w, h), w, h);
       return true;
@@ -221,8 +283,10 @@
       if (!buf || buf.byteLength !== img.data.length) buf = new ArrayBuffer(img.data.length);
       new Uint8Array(buf).set(img.data);
       const now = performance.now();
-      const look = now - this.looked > 1000;
-      if (look) this.looked = now;
+      const every = now - this.looked > 1000;
+      if (every) this.looked = now;
+      // a hand seen a moment ago is looked for in every frame, moving or not (the tracker lost it: it comes back)
+      const look = every || now - this.seen < 1200;
       this.busy = true;
       this.sent = now;
       this.w = w; this.h = h;
@@ -246,7 +310,8 @@
         this.stats.ms = this.stats.ms * 0.9 + (m.ms || 0) * 0.1;
         const now = performance.now();
         if (m.hand) this.seen = now;
-        if (this.o.onResult) try { this.o.onResult({ hand: m.hand, g: m.g, w: this.w, h: this.h, t: now }); } catch (e) { /* ignore */ }
+        // (detected: the tracker had lost the hand and looked for it afresh: it may be another one)
+        if (this.o.onResult) try { this.o.onResult({ hand: m.hand, g: m.g, w: this.w, h: this.h, t: now, detected: !!m.detected }); } catch (e) { /* ignore */ }
       }
       if (!this.rd) this._tick();                   // (frames read from the track come by themselves)
     }

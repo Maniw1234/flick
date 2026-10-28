@@ -4,7 +4,8 @@
 //        { t: 'frame', id, buf: ArrayBuffer (RGBA), w, h, look: bool }   look: run the palm detector even if
 //        nothing moved (the page asks for that every second or so)
 //   out  { t: 'ready', simd } | { t: 'error', message }
-//        { t: 'result', id, buf (handed back for the next frame), hand: null | { lm, score }, g: gesture, ms, skipped }
+//        { t: 'result', id, buf (handed back for the next frame), hand: null | { lm, score }, g: gesture, ms, skipped,
+//          detected (the palm detector ran: no hand was being followed) }
 //
 // Where Web Workers can't be made, FlickHandWorker.inline() runs the same code on the page (slower to the page).
 (function (root) {
@@ -41,6 +42,7 @@
         } else {
           const r = hands.track(px, m.w, m.h);
           out.ms = r.ms;
+          out.detected = !!r.detected;
           if (r.hand) {
             out.hand = { lm: Array.from(r.hand.lm), score: r.hand.score };
             out.g = FH.gesture(r.hand.lm, m.w, m.h);

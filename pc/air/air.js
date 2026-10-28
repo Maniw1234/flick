@@ -20,7 +20,8 @@
     stream = new window.FlickHandStream({
       mirror: true,                                   // the camera faces the user: the hand moves the way it looks
       // (aim: where the hand was aimed before its pose began to change: a fist that opens lands what it holds there)
-      onEvent: (type, e) => api.send('air:event', { type, pose: e.pose, pos: e.pos, aim: e.aim, size: e.size, edge: e.edge }),
+      // (raw: the frame's own pose; on a leave, the last frame's: a fist lost as it opened says 'open')
+      onEvent: (type, e) => api.send('air:event', { type, pose: e.pose, raw: e.raw, pos: e.pos, aim: e.aim, size: e.size, edge: e.edge }),
     });
     cam = new window.FlickHandCam({
       worker: () => window.FlickHandWorker.inline(),  // this window shows nothing: the tracker can run on its page

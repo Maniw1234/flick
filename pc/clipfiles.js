@@ -60,8 +60,15 @@ async function clipFiles() {
       if (list.length) break;
     }
   }
-  const seen = new Set();
-  return list.filter((p) => path.isAbsolute(p) && !seen.has(p) && seen.add(p) && exists(p)).slice(0, MAX);
+  // (each one looked up on the disk only until there are enough: this runs every second while files are copied)
+  const seen = new Set(), out = [];
+  for (const p of list) {
+    if (out.length >= MAX) break;
+    if (!path.isAbsolute(p) || seen.has(p)) continue;
+    seen.add(p);
+    if (exists(p)) out.push(p);
+  }
+  return out;
 }
 
 module.exports = { clipFiles, fromUriList };

@@ -108,6 +108,7 @@
       this.lmk = landmark;
       this.opts = Object.assign({ minDetect: 0.5, minPresence: 0.5 }, opts || {});
       this.roi = null;  // the rotated square around the hand for the next frame (tracking)
+      this.last = null; // { x, y, t }: where the hand followed was last (0..1 of the frame), to find it again
       this.frame = 0;
       this.frameBytes = 0;
       this.mat = engine.malloc(6 * 4);
@@ -257,7 +258,17 @@
         if (opts.detect === false) return { hand: null, ms: 0 };
         const palms = this.detectPalms();
         if (!palms.length) return { hand: null, ms: now() - t0, detected: true };
-        this.roi = this.roiFromPalm(palms[0]);
+        // the hand just lost, found again: the palm nearest where it was (not the likeliest one: the camera may see
+        // another hand, holding the phone, say), else the likeliest
+        let best = palms[0];
+        if (this.last && t0 - this.last.t < 700) {
+          let bd = Infinity;
+          for (const d of palms) {
+            const dd = Math.hypot((d.x0 + d.x1) / 2 - this.last.x, (d.y0 + d.y1) / 2 - this.last.y);
+            if (dd < bd) { bd = dd; best = d; }
+          }
+        }
+        this.roi = this.roiFromPalm(best);
         detected = true;
       }
       const r = this.landmarks(this.roi);
@@ -266,10 +277,11 @@
         return { hand: null, ms: now() - t0, detected };
       }
       this.roi = this.roiFromLandmarks(r.lm);
+      this.last = { x: this.roi.cx, y: this.roi.cy, t: t0 };
       return { hand: { lm: r.lm, score: r.presence, handedness: r.handedness }, ms: now() - t0, detected };
     }
 
-    reset() { this.roi = null; }
+    reset() { this.roi = null; this.last = null; }
   }
 
   const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());

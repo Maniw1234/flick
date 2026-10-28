@@ -385,6 +385,12 @@
       E.A.tone && E.A.tone({ type: 'sine', f0: 520, f1: 880, sweep: 0.12, dur: 0.16, gain: 0.02, attack: 0.005 });
     }
     if (c.state !== 'airout') return;
+    // its picture, made after it was picked up (it showed its file type until then)
+    if (m.thumb && !c.info.thumb) {
+      c.info.thumb = m.thumb;
+      if (m.card && m.card.w && m.card.h) { c.w = m.card.w * S.k; c.h = m.card.h * S.k; }
+      c.loadTexture();
+    }
     if (m.edge) c.airEdge = now();
     else if (typeof m.x === 'number') { c.air = handAt(c.air, m); c.airEdge = 0; }
     kick();
