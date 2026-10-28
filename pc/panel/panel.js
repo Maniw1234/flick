@@ -167,8 +167,10 @@
   });
   api.on('panel:pair-cancel', (d) => { if (d && d.device === pairDevice) { $('pair').hidden = true; pairDevice = null; } });
 
-  // Quick Share: someone's phone wants to send files
-  let qsId = null;
+  // Quick Share: someone's phone wants to send files. Any phone nearby can ask, and the question comes to the front
+  // by itself: focus starts on Decline and Accept ignores clicks for a moment (as for pairing), so a keystroke or
+  // click meant for something else can't accept a stranger's files.
+  let qsId = null, qsShownAt = 0;
   const fmt = (n) => (n >= 1e9 ? (n / 1e9).toFixed(1) + ' GB' : n >= 1e6 ? (n / 1e6).toFixed(1) + ' MB' : n >= 1e3 ? Math.round(n / 1e3) + ' KB' : n + ' bytes');
   api.on('panel:qs', (m) => {
     qsId = m.id;
@@ -186,10 +188,11 @@
     }
     list.hidden = n < 2;
     $('qs').hidden = false;
-    $('qsAllow').focus();
+    qsShownAt = Date.now();
+    $('qsDeny').focus();
   });
   api.on('panel:qs-done', (m) => { if (!m || m.id === qsId) { $('qs').hidden = true; qsId = null; } });
-  $('qsAllow').onclick = () => { if (qsId) api.send('panel:qs-answer', { id: qsId, accept: true }); $('qs').hidden = true; qsId = null; };
+  $('qsAllow').onclick = () => { if (Date.now() - qsShownAt < 1000) return; if (qsId) api.send('panel:qs-answer', { id: qsId, accept: true }); $('qs').hidden = true; qsId = null; };
   $('qsDeny').onclick = () => { if (qsId) api.send('panel:qs-answer', { id: qsId, accept: false }); $('qs').hidden = true; qsId = null; };
 
   $('allow').onclick = () => { if (Date.now() - pairShownAt < 1000) return; if (pairDevice) api.send('panel:pair-answer', { device: pairDevice, allow: true }); $('pair').hidden = true; pairDevice = null; };

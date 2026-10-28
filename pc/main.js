@@ -50,7 +50,7 @@ app.on('open-file', (e, p) => {
 });
 function sendOpenFiles() {
   if (!startedAt || !openFiles.length) return;
-  queueForPhone(openFiles.splice(0).slice(0, MAX_SEND));
+  queueForPhone(openFiles.splice(0).slice(0, MAX_SEND + 1));
 }
 // macOS: a click on Flick in the Dock (or opening it again) shows the panel; Flick's own start isn't such a click
 app.on('activate', () => { if (startedAt && Date.now() - startedAt > 2000) showPanel(); });
@@ -123,6 +123,7 @@ function writeStore() {
         try { await fh.writeFile(JSON.stringify(store, null, 2)); await fh.sync(); } finally { await fh.close(); }
         if (app.isQuitting) return;                     // quitting: writeStoreNow writes it, and has the newest
         if (storeWhole) await fs.promises.copyFile(SETTINGS, SETTINGS + '.bak').catch(() => {});
+        if (app.isQuitting) return;                     // (it may have come meanwhile: this copy is older than its)
         storeWhole = false;
         // (briefly locked by an antivirus: copied instead)
         try { await fs.promises.rename(tmp, SETTINGS); }
@@ -315,15 +316,17 @@ function createOverlay() {
   });
 }
 
-// the GPU was reset: reload the overlay page so its effects work again
-let lostAt = 0;
+// The GPU was reset: reload the overlay page so its effects work again. At most once per 10 s, in case the GPU keeps
+// failing, but a loss in that time (a second reset right after the first: docking, a driver update) is put off, never
+// dropped: the page it happened to draws nothing until it's loaded again.
+let lostAt = 0, lostT = null;
 ipcMain.on('fx:lost', () => {
-  if (!overlay || Date.now() - lostAt < 10000) return;      // at most once per 10 s, in case the GPU keeps failing
-  lostAt = Date.now();
-  log('overlay graphics reset: reloading it');
+  if (!overlay || lostT) return;
+  const wait = Math.max(500, lostAt + 10000 - Date.now());
+  log('overlay graphics reset: reloading it' + (wait > 500 ? ' in ' + Math.round(wait / 1000) + ' s' : ''));
   overlayReady = false;
   if (overlayShown) { overlay.hide(); overlayShown = false; }
-  setTimeout(() => { if (overlay) overlay.webContents.reload(); }, 500);
+  lostT = setTimeout(() => { lostT = null; lostAt = Date.now(); if (overlay) overlay.webContents.reload(); }, wait);
 });
 
 function placeOverlay() {
@@ -581,15 +584,16 @@ ipcMain.on('catcher:drop', async (e, d) => {
   if (!n) server.pushToPhone({ t: 'edge', on: false });
 });
 
-// files (folders are opened up, up to MAX_SEND files) in the order given
+// files (folders are opened up, up to MAX_SEND files) in the order given; .more: there were more than that
 const MAX_SEND = 100;
 function expandPaths(list) {
   const out = [];
+  out.more = false;
   const walk = (p, depth) => {
-    if (out.length >= MAX_SEND) return;
+    if (out.more) return;
     let st;
     try { st = fs.statSync(p); } catch (e) { return; }
-    if (st.isFile()) { out.push(p); return; }
+    if (st.isFile()) { if (out.length < MAX_SEND) out.push(p); else out.more = true; return; }
     if (!st.isDirectory() || depth > 6) return;
     let names = [];
     try { names = fs.readdirSync(p); } catch (e) { return; }
@@ -598,25 +602,38 @@ function expandPaths(list) {
   for (const p of list) walk(String(p), 0);
   return out;
 }
+// more files than go at once were picked: said, so nobody takes it that the rest went too
+function onlyFirst(what) {
+  const text = 'Only the first ' + MAX_SEND + ' files ' + what + '. Send the rest after them.';
+  panelSend('panel:note', { text });
+  if (feats && !(panel && panel.isVisible())) feats.toast({ title: 'Only the first ' + MAX_SEND + ' files ' + what, body: 'Send the rest after them.', silent: true });
+}
 
-// Files waiting for the phone (sent from Explorer while no phone was connected); they go out when it connects.
+// Files waiting for the phone (sent from Explorer while no phone was connected); they go out when it connects, unless
+// that's more than 10 minutes later (then the user is told they didn't go: a send long after would surprise)
+const QUEUE_MS = (TEST_MODE && +process.env.FLICK_TEST_QUEUE_MS) || 10 * 60000;
 let sendQueue = [];
 function queueForPhone(paths) {
   const files = expandPaths(paths);
   if (!files.length) return;
-  if (server && server.connected) { sendPathsToPhone(files); return; }
+  if (server && server.connected) { sendPathsToPhone(files); if (files.more) onlyFirst('go to the phone'); return; }
+  const cut = files.more || sendQueue.length + files.length > MAX_SEND;
   sendQueue = sendQueue.concat(files).slice(0, MAX_SEND);
   sendQueue.at = Date.now();
   log('queued', files.length, 'file(s) for the phone');
   showPanel();
-  if (panel) panelSend('panel:note', { text: 'Connect your phone and ' + (files.length === 1 ? path.basename(files[0]) : files.length + ' files') + ' will be sent.' });
+  if (panel) panelSend('panel:note', { text: 'Connect your phone and ' + (files.length === 1 ? path.basename(files[0]) : files.length + ' files') + ' will be sent.' + (cut ? ' (Only the first ' + MAX_SEND + ' files: send the rest after them.)' : '') });
 }
 function flushSendQueue() {
   if (!sendQueue.length || !server || !server.connected) return;
-  const fresh = Date.now() - (sendQueue.at || 0) < 10 * 60 * 1000;
+  const fresh = Date.now() - (sendQueue.at || 0) < QUEUE_MS;
   const q = sendQueue; sendQueue = [];
-  if (panel) panelSend('panel:note', { text: '' });
-  if (fresh) setTimeout(() => sendPathsToPhone(q), 1200);
+  if (fresh) { if (panel) panelSend('panel:note', { text: '' }); setTimeout(() => sendPathsToPhone(q), 1200); return; }
+  log('queued file(s) not sent: picked', Math.round((Date.now() - q.at) / 60000), 'min ago');
+  const what = q.length === 1 ? path.basename(q[0]) : q.length + ' files';
+  const why = 'Picked to send more than ' + Math.round(QUEUE_MS / 60000) + ' minutes ago. Send ' + (q.length === 1 ? 'it' : 'them') + ' again now.';
+  panelSend('panel:note', { text: what + ' didn’t go to the phone. ' + why });
+  if (feats && !(panel && panel.isVisible())) feats.toast({ title: what + ' didn’t go to the phone', body: why, silent: true });
 }
 
 // opts: { fx: false (their cards already fly: Air grab), device (to that phone, not the one in use) }
@@ -631,6 +648,7 @@ async function sendPathsToPhone(list, screenY, opts) {
   const device = (opts && opts.device) || undefined;
   const paths = expandPaths(list);
   if (!paths.length) return 0;
+  if (paths.more) onlyFirst('go to the phone');
   const sy = typeof screenY === 'number' ? screenY : overlayBounds().y + store.anchor * overlayBounds().height;
   const oy = overlayYFromScreenY(sy);
   const files = [];
@@ -741,6 +759,8 @@ function answerQs(id, accept, why) {
   qs.answer(id, accept, why);
 }
 ipcMain.on('panel:qs-answer', (e, m) => { if (fromPanel(e) && m) answerQs(m.id, !!m.accept); });
+// what a share of only a link or some text is called on its card
+const qsTextName = (texts) => (texts.length === 1 ? (texts[0].type === 2 ? 'Link' : 'Text') : texts.length + ' items');
 function onQsAccepted(m) {
   const tid = 'qs-' + m.id;
   qsTransfers.set(m.id, tid);
@@ -748,7 +768,7 @@ function onQsAccepted(m) {
   const offer = qsOffers.get(m.id);
   qsOffers.delete(m.id);
   const files = (offer && offer.files) || [];
-  t.name = m.files === 1 && files[0] ? files[0].name : m.files + (m.files === 1 ? ' file' : ' files');
+  t.name = m.files === 1 && files[0] ? files[0].name : m.files ? m.files + ' files' : qsTextName((offer && offer.texts) || []);
   log('quick share accepted:', t.name, Math.round(m.total / 1024) + ' KB');
   t.state = 'dropped'; t.upload = 'uploading'; t.seen = Date.now(); t.qs = true;
   // fly in from the phone's side of the screen, like a throw
@@ -772,16 +792,32 @@ async function onQsDone(m) {
   const tid = qsTransfers.get(m.id);
   qsTransfers.delete(m.id);
   const t = tid && transfers.get(tid);
-  const dir = await saveDirNow();
-  fs.mkdirSync(dir, { recursive: true });
-  const placed = [];
+  const who = m.from || 'Quick Share';
+  let dir = null;
+  try { dir = await saveDirNow(); await fs.promises.mkdir(dir, { recursive: true }); }
+  catch (e) { log('quick share: no folder to save in', e.message); dir = null; }
+  // The phone shows the share as sent once it's all here: a file that can't be saved where it belongs is kept in
+  // "Not saved" (see keepUnsaved), never left in the temp folder to be swept away, and the others still go
+  const placed = [], kept = [];
   for (const f of m.files) {
-    const dest = uniquePath(dir, sanitizeName(f.name));
-    try { await placeItem(f.tmpPath, dest); } finally { release(dest); }
+    let dest = null;
+    try {
+      if (!dir) throw new Error('no folder to save in');
+      dest = uniquePath(dir, sanitizeName(f.name));
+      await placeItem(f.tmpPath, dest);
+    } catch (e) {
+      release(dest);
+      log('could not save', f.name, e.message);
+      const k = await keepUnsaved(f.tmpPath, f.name, true);
+      kept.push(k);
+      hist({ dir: 'in', name: f.name, size: 0, ok: false, how: 'quickshare', why: 'save', path: k, deviceName: who });
+      continue;
+    }
+    release(dest);
     const now = new Date(); fs.utimes(dest, now, now, () => {});
     markOfWeb(dest);
     placed.push(dest);
-    hist({ dir: 'in', path: dest, deviceName: m.from || 'Quick Share', how: 'quickshare' });
+    hist({ dir: 'in', path: dest, deviceName: who, how: 'quickshare' });
   }
   for (const x of m.texts) {
     if (!x.value) continue;
@@ -793,23 +829,42 @@ async function onQsDone(m) {
     } catch (e) { log('clipboard write failed', e.message); }
     if (panel) panelSend('panel:note', { text: (m.from || 'Your phone') + ' sent ' + (x.type === 2 ? 'a link' : 'some text') + ', now on your clipboard: ' + x.value.slice(0, 200) });
   }
-  log('quick share saved', placed.length, 'file(s) from', m.from);
-  if (store.openAfter && placed.length === 1) setTimeout(() => openAfterArrival(placed[0]), 900);
+  // (after the note about a link: this one matters more)
+  if (kept.length) toldUnsaved(kept.length === 1 ? path.basename(kept[0]) : kept.length + ' files', kept[kept.length - 1], kept.length > 1);
+  log('quick share saved', placed.length, 'file(s) from', m.from, kept.length ? '(' + kept.length + ' could not be saved)' : '');
+  if (store.openAfter && placed.length === 1 && !kept.length) setTimeout(() => openGuestFile(placed[0]), 900);
   if (t) {
     t.done = true;
-    const name = placed.length === 1 ? path.basename(placed[0]) : placed.length ? placed.length + ' items' : 'Link copied';
-    fx('saved', { tid, name, where: placed.length ? saveDirLabel() : 'Clipboard' });
+    const texts = m.texts.filter((x) => x.value);
+    if (placed.length) fx('saved', { tid, name: placed.length === 1 ? path.basename(placed[0]) : placed.length + ' items', where: saveDirLabel() });
+    else if (!kept.length && texts.length) fx('saved', { tid, name: qsTextName(texts), note: 'On your clipboard' });
+    else fx('failed', { tid });
     setTimeout(() => transfers.delete(tid), 5000);
   }
 }
 function onQsFailed(m) {
   log('quick share failed', m.why);
   if (m.why === 'no space') panelSend('panel:note', { text: 'Not enough free space on this PC to receive that.' });
+  else if (/^disk/.test(m.why)) panelSend('panel:note', { text: 'Couldn’t receive that: this PC couldn’t write the files.' });
   qsOffers.delete(m.id);
   if (qsAsking && qsAsking.id === m.id) { qsAsking = null; if (panel) { panel.setAlwaysOnTop(false); panelSend('panel:qs-done', { id: m.id }); } }
   const tid = qsTransfers.get(m.id);
   qsTransfers.delete(m.id);
   if (tid && transfers.get(tid)) { fx('failed', { tid }); hist({ dir: 'in', name: transfers.get(tid).name, size: 0, ok: false, how: 'quickshare' }); transfers.delete(tid); }
+}
+
+// Windows shows a desktop app's notifications only under an app id it knows: one on a Start menu shortcut, or one
+// registered for the user. Flick's installer makes a plain shortcut, so its id (setAppUserModelId above) is registered
+// here, with the name and icon its notifications show.
+function registerAppId() {
+  if (!IS_WIN || !app.isPackaged) return;
+  const key = 'HKCU\\Software\\Classes\\AppUserModelId\\com.flick.pc';
+  const icon = path.join(path.dirname(process.execPath), 'Flick.ico');
+  const add = (name, value, then) => execFile('reg', ['add', key, '/v', name, '/t', 'REG_SZ', '/d', value, '/f'], { windowsHide: true, timeout: 15000 }, (e) => {
+    if (e) log('notifications: app id not registered', e.message);
+    else if (then) then();
+  });
+  add('DisplayName', 'Flick', () => fs.access(icon, (e) => { if (!e) add('IconUri', icon); }));
 }
 
 // Explorer's right-click "Send to" menu gets "Flick (phone)" (a shortcut that starts Flick with --send <files>)
@@ -1004,7 +1059,7 @@ ipcMain.on('panel:action', async (e, m) => {
       if (!r.canceled && r.filePaths.length) sendPathsToPhone(r.filePaths);
       break;
     }
-    case 'sendPaths': if (Array.isArray(arg)) queueForPhone(arg.slice(0, MAX_SEND)); break;
+    case 'sendPaths': if (Array.isArray(arg)) queueForPhone(arg.slice(0, MAX_SEND + 1)); break;
     default: break;
   }
 });
@@ -1076,7 +1131,7 @@ function createTray() {
   tray.on('click', togglePanel);
   tray.on('double-click', showPanel);
   // macOS: files dropped on the menu-bar icon go to the phone
-  if (IS_MAC) tray.on('drop-files', (_e, files) => { if (Array.isArray(files)) queueForPhone(files.slice(0, MAX_SEND)); });
+  if (IS_MAC) tray.on('drop-files', (_e, files) => { if (Array.isArray(files)) queueForPhone(files.slice(0, MAX_SEND + 1)); });
   updateTray();
 }
 
@@ -1168,7 +1223,7 @@ function filesBusy() {
   const moving = [...transfers.values()].some((t) => !t.done && (t.state === 'lifted' ||
     (t.state === 'dropped' && !(t.upload === 'none' && now - (t.seen || t.t0) > 60000))));
   return moving || !!(server && (server.receiving() || server.outgoingBusy())) || !!(feats && feats.busy()) ||
-    !!(web && web.busy());
+    !!(web && web.busy()) || !!qsAsking;            // (a phone waiting for an answer about its Quick Share, too)
 }
 
 async function runUpdateCheck(manual) {
@@ -1195,7 +1250,7 @@ function scheduleRestart(ver) {
   if (restartT) return;
   const tryNow = () => {
     restartT = null;
-    const queued = sendQueue.length > 0 && Date.now() - (sendQueue.at || 0) < 10 * 60000;   // a queue goes stale after 10 min
+    const queued = sendQueue.length > 0 && Date.now() - (sendQueue.at || 0) < QUEUE_MS;   // a queue goes stale after 10 min
     const busy = filesBusy() || queued || overlayShown || (panel && panel.isVisible() && panel.isFocused());
     if (busy) { restartT = setTimeout(tryNow, 30000); return; }
     log('restarting into', ver);
@@ -1235,15 +1290,24 @@ function isGone(tid) {
   return gone.has(tid);
 }
 
+// Windows' device names in every spelling it takes for one ("con.txt", "con .txt", "COM¹.png", "CONIN$"): a file named
+// so can't be opened or deleted in Explorer (sync.js has the same rule)
+const DEVICE_NAME = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$)( *\..*)?$/i;
+// A name fits when Windows takes it (255 UTF-16 units) and so do macOS and Linux (255 bytes: 85 letters of Chinese,
+// 127 of Hebrew or Russian), with room left for " (2)"
+const fitsName = (s) => s.length <= 180 && (IS_WIN || Buffer.byteLength(s) <= 230);
 function sanitizeName(n) {
   // also drop invisible direction-control characters, which can make "photo\u202Egnp.exe" read as "photoexe.png"
   let s = String(n || 'file').replace(/[<>:"/\\|?*\u0000-\u001f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '_').replace(/[. ]+$/, '').trim();
   if (!s) s = 'file';
-  if (/^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i.test(s)) s = '_' + s;
-  if (s.length > 180) {
+  if (DEVICE_NAME.test(s)) s = '_' + s;
+  if (!fitsName(s)) {
     let e = path.extname(s);
     if (e.length > 16) e = '';                         // a "dot near the start" isn't an extension worth keeping
-    s = s.slice(0, 180 - e.length) + e;
+    // shortened by whole characters: half an emoji would leave a broken one in the name
+    const cs = Array.from(s.slice(0, Math.min(180, s.length - e.length)).replace(/[\ud800-\udbff]$/, ''));
+    while (cs.length && !fitsName(cs.join('') + e)) cs.pop();
+    s = (cs.join('').replace(/[. ]+$/, '') || 'file') + e;
   }
   return s;
 }
@@ -1264,10 +1328,16 @@ function uniquePath(dir, name) {
 // receives as downloaded so Windows SmartScreen / Office Protected View still warn if the user opens one by hand.
 const RISKY_EXT = new Set(['.exe', '.msi', '.msp', '.bat', '.cmd', '.com', '.scr', '.pif', '.cpl', '.ps1', '.psm1',
   '.vbs', '.vbe', '.js', '.jse', '.wsf', '.wsh', '.hta', '.lnk', '.url', '.reg', '.jar', '.msc', '.inf', '.scf',
-  '.application', '.gadget', '.ws', '.vb', '.jnlp', '.chm', '.sct', '.appref-ms']);
+  '.application', '.gadget', '.ws', '.vb', '.jnlp', '.chm', '.sct', '.appref-ms',
+  // and what opens into something that runs or reaches out: disk images (mounted, their files unmarked), app
+  // packages and installers, Excel add-ins, remote desktop and search/library/settings shortcuts, themes
+  '.iso', '.img', '.vhd', '.vhdx', '.appx', '.appxbundle', '.msix', '.msixbundle', '.appinstaller', '.msu', '.diagcab',
+  '.xll', '.rdp', '.wsb', '.settingcontent-ms', '.library-ms', '.search-ms', '.searchconnector-ms', '.theme', '.themepack',
+  '.deskthemepack', '.website', '.xbap', '.psd1', '.ps1xml', '.psc1']);
 // and their macOS and Linux kin: apps, installers, disk images, scripts, launchers
 if (!IS_WIN) for (const x of ['.app', '.pkg', '.mpkg', '.dmg', '.command', '.tool', '.terminal', '.workflow', '.scpt', '.applescript',
-  '.sh', '.bash', '.zsh', '.csh', '.ksh', '.fish', '.py', '.pl', '.rb', '.desktop', '.appimage', '.run', '.bin', '.deb', '.rpm', '.flatpakref']) RISKY_EXT.add(x);
+  '.sh', '.bash', '.zsh', '.csh', '.ksh', '.fish', '.py', '.pl', '.rb', '.desktop', '.appimage', '.run', '.bin', '.deb', '.rpm', '.flatpakref',
+  '.fileloc', '.inetloc', '.webloc']) RISKY_EXT.add(x);
 const riskyExt = (p) => RISKY_EXT.has(path.extname(p).toLowerCase());
 
 function markOfWeb(dest) {
@@ -1316,6 +1386,13 @@ function openAfterArrival(dest) {
   if (riskyExt(dest)) { try { shell.showItemInFolder(dest); } catch (e) { /* ignore */ } return; }
   shell.openPath(dest);
 }
+// ...and from a guest (a browser, Quick Share from any phone nearby, not a paired one): only pictures, videos, music,
+// PDFs and plain text open; anything else is shown in its folder
+const GUEST_OPENABLE = /\.(jpe?g|png|gif|webp|heic|heif|bmp|tiff?|mp4|mov|m4v|webm|mkv|avi|mp3|m4a|aac|wav|flac|ogg|opus|pdf|txt)$/i;
+function openGuestFile(p) {
+  if (GUEST_OPENABLE.test(p)) openAfterArrival(p);
+  else { try { shell.showItemInFolder(p); } catch (e) { /* ignore */ } }
+}
 
 // what the overlay needs to draw the card: a photo, a document, a folder, or a stack of several items
 function liftInfo(m, t) {
@@ -1361,9 +1438,10 @@ async function placeItem(src, dest) {
 
 // A received file (or what's left of a received folder) that couldn't be saved where it belongs. Its phone was told it
 // arrived and won't send it again, so it's never deleted: it goes under its own name into "Not saved" beside where it
-// was staged (the same drive: a rename) and the user is told where. If even that fails it stays where it is.
+// was staged (the same drive: a rename) and the user is told where (quiet: the caller tells, once for several). If
+// even that fails it stays where it is.
 const KEPT_DIR = 'Not saved';
-async function keepUnsaved(src, name) {
+async function keepUnsaved(src, name, quiet) {
   let dest = src;
   try {
     const dir = path.join(path.dirname(src), KEPT_DIR);
@@ -1372,12 +1450,16 @@ async function keepUnsaved(src, name) {
     try { await fs.promises.rename(src, d); dest = d; } finally { release(d); }
   } catch (e) { /* it stays where it is */ }
   log('could not save', name, '- kept in', dest);
+  if (!quiet) toldUnsaved(name, dest);
+  return dest;
+}
+// what couldn't be saved (a name, or "3 files") and where it is now (dest: the last of them)
+function toldUnsaved(what, dest, several) {
   const where = path.dirname(dest);
-  const text = 'Couldn’t save ' + name + ' in ' + saveDirLabel() + '. It’s kept in ' + where + '.';
+  const text = 'Couldn’t save ' + what + ' in ' + saveDirLabel() + '. ' + (several ? 'They’re' : 'It’s') + ' kept in ' + where + '.';
   panelSend('panel:note', { text });
   const show = () => shell.showItemInFolder(dest);
-  if (feats) feats.toast({ title: 'Couldn’t save ' + name, body: 'It’s kept in ' + where, click: show });
-  return dest;
+  if (feats) feats.toast({ title: 'Couldn’t save ' + what, body: (several ? 'They’re' : 'It’s') + ' kept in ' + where, click: show });
 }
 
 async function finalizeBundle(t, dir) {
@@ -1865,17 +1947,15 @@ function onWebProgress(g) {
   t.seen = now;
   fx('progress', { tid: t.tid, p: Math.min(1, g.received / g.total), rate: store.showSpeed ? t.rate || 0 : 0 });
 }
-const WEB_OPENABLE = /\.(jpe?g|png|gif|webp|heic|heif|bmp|tiff?|mp4|mov|m4v|webm|mkv|avi|mp3|m4a|aac|wav|flac|ogg|opus|pdf|txt)$/i;
 function onWebDone(g) {
   const t = webCards.get(g.gid);
   webCards.delete(g.gid);
   const n = g.saved.length;
   log('from a browser:', n + ' saved', g.failed ? g.failed + ' not' : '');
-  // "open after it arrives", for a browser (a guest's device): only pictures, videos, music, PDFs and plain text open;
-  // anything else is shown in its folder
+  // "open after it arrives", for a browser (a guest's device): see openGuestFile
   if (store.openAfter && n === 1 && !g.failed) {
     const p = g.saved[0].path;
-    setTimeout(() => { if (WEB_OPENABLE.test(p)) openAfterArrival(p); else { try { shell.showItemInFolder(p); } catch (e) { /* ignore */ } } }, 900);
+    setTimeout(() => openGuestFile(p), 900);
   }
   if (!t || transfers.get(t.tid) !== t) return;
   t.done = true;
@@ -1898,10 +1978,16 @@ ipcMain.on('panel:web', async (e, m) => {
     case 'pick': {
       if (!web.active) break;
       const r = await dialog.showOpenDialog(panel, { title: 'Share with browsers', properties: ['openFile', 'multiSelections'] });
-      if (!r.canceled && r.filePaths.length) web.addFiles(expandPaths(r.filePaths));
+      if (!r.canceled && r.filePaths.length) { const f = expandPaths(r.filePaths); web.addFiles(f); if (f.more) onlyFirst('are shared'); }
       break;
     }
-    case 'add': if (web.active && Array.isArray(m.paths)) web.addFiles(expandPaths(m.paths.filter((p) => typeof p === 'string').slice(0, MAX_SEND))); break;
+    case 'add': {
+      if (!web.active || !Array.isArray(m.paths)) break;
+      const f = expandPaths(m.paths.filter((p) => typeof p === 'string').slice(0, MAX_SEND + 1));
+      web.addFiles(f);
+      if (f.more) onlyFirst('are shared');
+      break;
+    }
     case 'remove': web.removeFile(String(m.id)); break;
     case 'answer': if (m.allow) web.allow(String(m.id)); else web.deny(String(m.id)); break;
     case 'kick': web.kick(String(m.id)); break;
@@ -2068,6 +2154,7 @@ app.whenReady().then(async () => {
   screen.on('display-removed', () => { placeOverlay(); ensureCatcher(); });
 
   applySendTo();
+  registerAppId();
   applyBluetooth();
   applyQuickShare();
   // macOS: the menu bar's Edit menu is what makes copy and paste work in the panel's fields (Electron's default menu

@@ -272,7 +272,8 @@
     d.className = 'label';
     const a = document.createElement('div');
     a.className = 'name';
-    a.textContent = card.info.name || (card.saved && card.saved.name) || '';
+    // the name it was saved under ("Photo (2).jpg" next to an older Photo.jpg; "Link" for a link put on the clipboard)
+    a.textContent = (card.saved && card.saved.name) || card.info.name || '';
     d.appendChild(a);
     const where = card.saved && card.saved.where;
     if (card.saved && card.saved.note) {

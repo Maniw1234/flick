@@ -464,22 +464,28 @@ class Inbound extends EventEmitter {
       setTimeout(() => { this._bye(); this._close('declined'); }, 1000);
       return;
     }
-    fs.mkdirSync(this.srv.tmpDir, { recursive: true });
+    // the files can't be made where they're staged (that drive was unplugged, a read-only disk): the phone hears no at
+    // once, rather than waiting for an answer that never comes
+    const refuse = (status, why) => {
+      for (const f of this.files.values()) { try { fs.closeSync(f.fd); fs.unlinkSync(f.tmp); } catch (e) { /* ignore */ } }
+      this.files.clear();
+      this._sendSharing({ type: SHARE.RESPONSE, connection_response: { status } });
+      this.emit('failed', { id: this.id, why, accepted: false });
+      setTimeout(() => { this._bye(); this._close(why); }, 1000);
+    };
+    try { fs.mkdirSync(this.srv.tmpDir, { recursive: true }); } catch (e) { this.srv.log('quick share: ' + e.message); return refuse(2, 'disk'); }
     // not enough room for what the phone offers: tell it so (Quick Share shows "not enough space") instead of failing midway
     try {
       const st = fs.statfsSync(this.srv.tmpDir);
-      if (st.bavail * st.bsize < this.total + 256 * 1024 * 1024) {
-        this._sendSharing({ type: SHARE.RESPONSE, connection_response: { status: 3 } });
-        this.emit('failed', { id: this.id, why: 'no space', accepted: false });
-        setTimeout(() => { this._bye(); this._close('no space'); }, 1000);
-        return;
-      }
+      if (st.bavail * st.bsize < this.total + 256 * 1024 * 1024) return refuse(3, 'no space');
     } catch (e) { /* can't tell: go ahead */ }
-    for (const f of this.offer.files) {
-      const tmp = path.join(this.srv.tmpDir, 'qs-' + this.id + '-' + crypto.randomBytes(3).toString('hex') + '.part');
-      this.files.set(String(f.payload_id), { meta: f, tmp, fd: fs.openSync(tmp, 'w'), got: 0, size: f.size,
-        w: Promise.resolve(), end: false, done: false });
-    }
+    try {
+      for (const f of this.offer.files) {
+        const tmp = path.join(this.srv.tmpDir, 'qs-' + this.id + '-' + crypto.randomBytes(3).toString('hex') + '.part');
+        this.files.set(String(f.payload_id), { meta: f, tmp, fd: fs.openSync(tmp, 'w'), got: 0, size: f.size,
+          w: Promise.resolve(), end: false, done: false });
+      }
+    } catch (e) { this.srv.log('quick share: ' + e.message); return refuse(2, 'disk'); }
     this.accepted = true;
     this._touch();
     this._sendSharing({ type: SHARE.RESPONSE, connection_response: { status: 1 } });
