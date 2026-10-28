@@ -15,10 +15,14 @@ import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.security.MessageDigest;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -118,6 +122,9 @@ final class Outbox {
         AtomicBoolean stop = new AtomicBoolean(false);
         final Object disk = new Object();             // its record is written by one thread at a time (see save)
         String[] psums;                               // each part's checksum once the PC has it whole (this attempt)
+        // each part's checksum so far at a few points it passed (this attempt, this process): carrying on after a cut
+        // starts from the last point the PC has, instead of reading everything the PC has again (see sendPart)
+        final Map<Integer, TreeMap<Long, MessageDigest>> marks = new HashMap<Integer, TreeMap<Long, MessageDigest>>();
         // progress (any thread)
         final AtomicLong sent = new AtomicLong();
         private double rate;
@@ -619,6 +626,7 @@ final class Outbox {
         j.ways = 0;
         j.begun = false;
         j.psums = null;
+        synchronized (j.marks) { j.marks.clear(); }
     }
 
     // what the PC answered to a part, a stream or a commit
@@ -793,12 +801,15 @@ final class Outbox {
         long off = index * size, len = Math.max(0, Math.min(size, total - off));
         String target = "/api/part?" + q(j, auth) + "&parts=" + n + "&total=" + total + "&index=" + index + "&offset=" + off +
                 "&resume=1&from=" + from + "&verify=1&name=" + Wire.enc(name) + (j.committed() ? "&committed=1" : "");
-        java.security.MessageDigest md = sha256();
+        // a part carried on from the middle: its checksum starts with the bytes the PC has already, from the last point
+        // this part's checksum passed before them (or from its start)
+        long[] at = {0};
+        MessageDigest md = mark(j, index, from, at);
+        if (md == null) md = sha256();
         RandomAccessFile raf = new RandomAccessFile(f, "r");
         byte[] buf = new byte[BUF];
         try {
-            // a part carried on from the middle: its checksum starts with the bytes the PC has already
-            if (from > 0) { raf.seek(off); hashFrom(raf, md, from, buf, stop); }
+            if (from > at[0]) { raf.seek(off + at[0]); hashFrom(raf, md, from - at[0], buf, stop); }
         } catch (IOException e) {
             try { raf.close(); } catch (IOException x) { /* ignore */ }
             throw e;
@@ -811,12 +822,14 @@ final class Outbox {
         try {
             OutputStream out = g.watch(c.body());
             raf.seek(off + from);
-            long left = len - from;
+            long left = len - from, pos = from, next = (from / MARK + 1) * MARK;
             while (left > 0) {
                 if (stop.get()) throw new IOException("stopped");
                 int r = raf.read(buf, 0, (int) Math.min(buf.length, left));
                 if (r < 0) throw new Restart("the file changed");
                 md.update(buf, 0, r);
+                pos += r;
+                if (pos >= next) { mark(j, index, pos, md); next = (pos / MARK + 1) * MARK; }
                 out.write(buf, 0, r);
                 left -= r;
                 progress(j, r);
@@ -851,6 +864,30 @@ final class Outbox {
         if (g.ended() != null || stop.get()) return;
         Wire.Answer a = c.answerAfterCut(64 * 1024);
         if (a != null && a.code != 200) check(j, a);
+    }
+
+    static final long MARK = 16L << 20;                    // a part's checksum so far is kept every this many bytes
+
+    /** Part index's checksum so far (bytes [0, pos) of it): kept, the last few. */
+    private static void mark(Job j, int index, long pos, MessageDigest md) {
+        MessageDigest copy;
+        try { copy = (MessageDigest) md.clone(); } catch (CloneNotSupportedException e) { return; }
+        synchronized (j.marks) {
+            TreeMap<Long, MessageDigest> m = j.marks.get(index);
+            if (m == null) j.marks.put(index, m = new TreeMap<Long, MessageDigest>());
+            m.put(pos, copy);
+            while (m.size() > 4) m.pollFirstEntry();
+        }
+    }
+
+    /** Part index's checksum at the last kept point at or before from (that point in at[0]), or null (from its start). */
+    private static MessageDigest mark(Job j, int index, long from, long[] at) {
+        synchronized (j.marks) {
+            TreeMap<Long, MessageDigest> m = j.marks.get(index);
+            Map.Entry<Long, MessageDigest> e = m == null ? null : m.floorEntry(from);
+            if (e == null) return null;
+            try { at[0] = e.getKey(); return (MessageDigest) e.getValue().clone(); } catch (CloneNotSupportedException x) { return null; }
+        }
     }
 
     private static java.security.MessageDigest sha256() throws IOException {
