@@ -240,10 +240,10 @@ jobs:
           ( cd "$OUT" && sha256sum * > SHA256SUMS )
           awk -v v="## $V" '$0==v{f=1;next} /^## /{f=0} f' CHANGES.md > notes.md
           [ -s notes.md ] || echo "Flick $V" > notes.md
-          # A draft of this release made by the repository's owner beforehand (its tag v<version>, or no tag yet and the
-          # version in its title) gets the files and goes out, so the release shows as the owner's; without one, this
-          # workflow makes the release.
-          DRAFT=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=50" --jq "[.[] | select(.draft and (.tag_name == \"v$V\" or (.tag_name == \"\" and ((.name // \"\") | contains(\"$V\")))))][0].id // empty")
+          # A draft of this release made by the repository's owner beforehand (its tag v<version> or V<version>, or no tag
+          # yet and the version in its title) gets the files and goes out as v<version>, so the release shows as the
+          # owner's; without one, this workflow makes the release.
+          DRAFT=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=50" --jq "[.[] | select(.draft and (((.tag_name // \"\") | ascii_downcase) == \"v$V\" or ((.tag_name // \"\") == \"\" and ((.name // \"\") | contains(\"$V\")))))][0].id // empty")
           if [ -n "$DRAFT" ]; then
             for f in "$OUT"/*; do
               curl -fsS -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Content-Type: application/octet-stream" --data-binary @"$f" \
