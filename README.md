@@ -135,7 +135,10 @@ builds can be downloaded from the run for five days).
   (several files or folders) are split across several `/api/bundle` streams (`streams=k&stream=i`) that write into one
   staging folder on the PC. Once every part of a large file is in, the phone sends the file's SHA-256
   (`commit=1&sha256=…`) and the PC reads back the file it assembled: only a match counts as received; a mismatch is
-  refused (422) and the phone sends the file again.
+  refused (422) and the phone sends the file again. Files are put together in the system's temp folder
+  (`flick-incoming`), or, when the save folder is on another drive, in a hidden `.flick-incoming` inside it, so that
+  saving is a rename; one that can't be put in place is moved to a "Not saved" folder next to the staging folder and
+  the user is told, never deleted.
 - **Sends that carry on** (protocol 7): the phone's sends are jobs in the app (`Outbox`, `Sends`; written down in
   `files/outbox`), sent straight over pinned TLS (`Wire`) and kept going by a foreground service, with `ResumeJob`
   (JobScheduler) bringing the app back if Android stopped it. With `resume=1` the PC keeps what arrived of each part

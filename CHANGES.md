@@ -18,15 +18,45 @@
   no longer lags behind, and the card on the PC follows your hand more closely. A fist that comes in half closed
   still catches files from the PC, and right after a throw the same hand can grab again without leaving the camera's
   view. On the PC, hand tracking loads ahead of time while a phone is ready, so the camera follows your hand sooner.
+- **Air grab holds on better.** A fist that slows down or loosens as it travels is still followed, and a file lands
+  where your hand opens even when the camera loses it mid-opening; a hand whose first frame only looks open no longer
+  drops or picks up anything. The tracker no longer jumps to your other hand (the one holding the phone, say), and a
+  fist held still over the phone is found again at once instead of the file being sent. Opening your hand over the
+  phone when nothing is held on the PC no longer buzzes or shows a hint every time. Right after a hand leaves the
+  phone's camera, the phone no longer redraws the same camera picture thousands of times a second. Files picked up on
+  the PC show in your hand at once (their picture follows). Selecting files on the PC for other reasons keeps its
+  camera on 20 seconds at most in any 2 minutes, so the camera is there when you grab on the phone. The hand tracker's
+  memory is freed when Air grab is turned off.
 - **Faster transfers.** The phone keeps its encrypted connections to the PC open between requests, so a send no longer
   pays for a new handshake on every file and check (in tests, a single photo arrived in about 40% less time), and a
   fresh send skips a round trip it didn't need. The PC checks for files it already has, and for free space, much
   faster (a few milliseconds for 2,000 files instead of most of a second) and writes many small files faster. On
   Windows, a large file coming in several parts no longer stalls at the start while Windows fills it with zeros
   (seconds for a big video on a hard drive). On Android 10 and newer, the phone keeps Wi-Fi in its low-latency mode
-  while files move.
+  while files move. Files from the PC start downloading the moment the PC offers them (not when their card lands),
+  and the PC offers a batch without waiting for each file's picture.
+- **Smoother on the phone.** Coming back to Flick no longer freezes while the clipboard is checked; a big folder opens
+  without stalling, and a tab, folder or search only waits for the listing on screen; thumbnails are made newest
+  first (after a fast scroll, the cards you can see come first) and their cache stays under 192 MB; a lifted card
+  follows your finger at once; removing files from the Flick list is instant; a batch of files from the PC and a big
+  send coming back into the grid arrive without jank; the Transfers page updates in place.
+- **Lighter on the PC.** The animation overlay only draws what changed; settings and history are written in the
+  background; a picture left on the clipboard isn't read again every second; received Quick Share files are written
+  in the background.
+- **Saving on the PC.** With the save folder on another drive than the system's temp folder, incoming files are put
+  together on that drive (saving is a rename, and the free-space check looks at the right drive). A received file that
+  can't be put in place (locked by another program, say) is kept in a "Not saved" folder and you're told where,
+  never deleted. Updates wait while files move.
 - Fixed: a send canceled while it was waiting for the PC could still go through, and a pause tapped while a try was
   failing could be lost.
+- Fixed: a send that was only waiting for the PC (or paused) kept the phone from switching PC, moving to a USB cable
+  or turning Bluetooth off; the PC's edge glow could stay on after a Teleport drop or a lost link; a send whose
+  "saved" note was lost with the link stayed in the list; a drag in progress was lost when the link moved; a photo
+  swiped to quickly in the preview stayed blurry; a file thrown from the phone that was waiting its turn could be
+  failed on the PC; effects that came while the PC took its desktop picture could be missed.
+- Security: the phone takes a shared file:// address only from shared storage (never Flick's own files, Android/data
+  or Android/obb), and Browse phone only takes a MediaStore id that matches its file; on the PC, the settings panel's
+  messages are taken only from the panel, and a drop only from the drop window.
 
 ## 1.1.0
 
