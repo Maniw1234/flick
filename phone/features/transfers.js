@@ -135,7 +135,10 @@
     if (r._text !== text) {
       r._text = text;
       r._sm.textContent = '';
-      bits.forEach((b, i) => { if (i) r._sm.appendChild(document.createTextNode(' · ')); r._sm.appendChild(h('span', 'fbit', b)); });
+      bits.forEach((b, i) => {
+        if (i) r._sm.appendChild(document.createTextNode(' · '));
+        r._sm.appendChild(h('span', 'fbit', b));
+      });
     }
     if (r._fill) r._fill.style.transform = 'scaleX(' + (pct(j) / 100) + ')';
   }

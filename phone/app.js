@@ -320,9 +320,13 @@
   const rankOf = (p) => LINK_RANK[(p && p.via) || 'wifi'] || 2;
   // files moving now. A send the app carries on with (a job) counts only while it runs or is about to, not while it
   // waits for the PC (that can go on for hours) or is paused: those carry on wherever this page connects.
-  const jobMoving = (tid) => { const j = st.jobs.get(tid); return !j || j.state === 'running' || j.state === 'queued'; };
-  const busyMoving = () => [...st.pending].some(([tid, p]) => p.phase === 'sent' && !p.uploaded && (!p.job || jobMoving(tid))) ||
-    (st.incoming && st.incoming.size > 0) || V.items.some((x) => x.incoming);
+  function sendMoving(tid, p) {
+    if (p.phase !== 'sent' || p.uploaded) return false;
+    const j = p.job && st.jobs.get(tid);
+    return !j || j.state === 'running' || j.state === 'queued';
+  }
+  const busyMoving = () => [...st.pending].some(([tid, p]) => sendMoving(tid, p)) || (st.incoming && st.incoming.size > 0) ||
+    V.items.some((x) => x.incoming);
   function onPcs() {
     // Bluetooth reports the PC it reached through the same list
     st.pcs = (st.lanList || []).filter((p) => p && p.ip && p.port).concat(st.btPc ? [st.btPc] : []);
@@ -504,7 +508,11 @@
     // A live session moves to a new link (a faster one, or the phone's new name): not connected until the PC says so
     // again, so nothing is sent into the gap (a drop sent there was lost, and the PC threw the file away), and every
     // try asks the PC to pick the session back up (else a retry left the phone "connected" and the PC not).
-    if (st.connected) { st.connected = false; st.wantResume = true; st.relinkAt = Date.now(); updateConn(); linkEnded(true); }
+    if (st.connected) {
+      st.connected = false; st.wantResume = true; st.relinkAt = Date.now();
+      updateConn();
+      linkEnded(true);
+    }
     prepareLink(st.pc).then((lk) => {
       if (gen !== wsGen) return;
       if (!lk) { st.connecting = false; scheduleReconnect(st.linkBlocked ? 20000 : 0); return; }
@@ -766,7 +774,7 @@
           G.hold = 1;
           pairHint('');
           flashScreen(() => { showScreen('main'); G.hold = 0; staggerIn(); });
-        } else if (st.wantResume && Date.now() - (st.relinkAt || 0) > 5000) {    // (a quick move to a new link: quietly)
+        } else if (st.wantResume && Date.now() - (st.relinkAt || 0) > 5000) {   // (moved to a new link: quietly)
           toast('Connected to ' + st.pc.name, 1400);
         }
         st.wantResume = false;
@@ -2452,7 +2460,8 @@
   // ask its user when it asked.
   function settleSoon(tid, p) {
     clearTimeout(p.settleT);
-    p.settleT = setTimeout(() => { if (st.pending.get(tid) === p) settleSent(tid, p); }, p.asking ? 75000 : p.relinked ? 5000 : 60000);
+    const ms = p.asking ? 75000 : p.relinked ? 5000 : 60000;
+    p.settleT = setTimeout(() => { if (st.pending.get(tid) === p) settleSent(tid, p); }, ms);
   }
 
   function onFailed(m) {
@@ -2627,7 +2636,9 @@
       setCardProgress(it.id, 0);
       // (scrolled far down, its card isn't drawn yet: it shows once the view is back at the top)
       const el = cards.get(it.id);
-      if (el && !document.hidden && flew < 2 && IN.fly.length < 8) { flyIn(it, batch[i], el); flew++; } else landed(it.fid);
+      if (!el || document.hidden || flew >= 2 || IN.fly.length >= 8) { landed(it.fid); return; }
+      flyIn(it, batch[i], el);
+      flew++;
     });
     if (flew) haptic('tick');
   }
