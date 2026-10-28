@@ -5,8 +5,9 @@
  * camera sees your hand open, or come in from the screen's edge on a PC without one. Opening your hand over the phone
  * again puts them back. The other way round: with this on and Flick open, select files on the PC (copy them, on Linux),
  * close your open hand into a fist in front of its screen, then bring it over the phone and open it.
- * The camera runs only while this is on (Settings), Flick is open on screen and a PC is connected. The hand tracking
- * runs on the phone (phone/hand/: MediaPipe's hand models on Flick's own engine); no picture leaves the phone. */
+ * The camera runs only while this is on (Settings), Flick is open on screen (not behind Lock Flick's cover) and a PC is
+ * connected. The hand tracking runs on the phone (phone/hand/: MediaPipe's hand models on Flick's own engine); no
+ * picture leaves the phone. */
 (window.FlickFeatures = window.FlickFeatures || []).push(function (A, X) {
   'use strict';
   if (!A.has('cameraState')) return;                     // a phone app without the camera bridge
@@ -19,6 +20,7 @@
 
   let on = A.pref.get('air', '') === '1';
   let paused = false;                                     // Flick is in the background
+  let locked = false;                                     // Lock Flick's cover is over the page until it's unlocked
   let cam = null, stream = null, building = null, camState = 'off', deniedSaid = false;
 
   // ---- what you see: a soft spot where the hand is, a light on the file under it, what the fist carries
@@ -73,6 +75,7 @@
   }
 
   function onEvent(type, e) {
+    if (camState !== 'on') return;                        // (the camera is off: nothing it saw counts any more)
     if (type === 'move') move(e);
     else if (type === 'enter') enter(e);
     else if (type === 'pose') pose(e);
@@ -387,7 +390,8 @@
     return building;
   }
 
-  const wanted = () => on && !paused && !document.hidden && A.st.connected && camOk();
+  // (locked: Lock Flick's cover hides the page; a hand mustn't pick files up behind it)
+  const wanted = () => on && !paused && !locked && !document.hidden && A.st.connected && camOk();
   async function update() {
     if (wanted()) {
       try { await build(); } catch (e) { console.log('air: ' + e); return; }
@@ -410,6 +414,7 @@
   A.on('conn', () => { saidReady = null; update(); tellReady(true); });
   A.on('native', (e) => {
     if (e.t === 'pause') { paused = true; update(); }
+    else if (e.t === 'locked' || e.t === 'unlocked') { locked = e.t === 'locked'; update(); }
     else if (e.t === 'resume') { paused = false; deniedSaid = false; if (/denied|nocamera|error/.test(camState)) camState = 'off'; update(); }
     else if (e.t === 'camera') {
       on = camOk();
