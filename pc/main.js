@@ -185,6 +185,12 @@ let overlay = null, overlayShown = false, overlayReady = false;
 let panel = null, catcher = null, tray = null;
 let server = null;
 
+// Every Flick window has the same preload, so any of them could send any message. What acts for the user (pairing,
+// sending files, sharing, settings) is taken only from the window it belongs to; the test control passes TEST_EV.
+const TEST_EV = { test: true };
+const fromWin = (e, w) => !!e && (e === TEST_EV || (!!w && !w.isDestroyed() && e.sender === w.webContents));
+const fromPanel = (e) => fromWin(e, panel);
+
 function displays() { return screen.getAllDisplays(); }
 function targetDisplay() {
   const ds = displays();
@@ -461,7 +467,8 @@ async function thumbFor(p) {
   return null;
 }
 
-ipcMain.on('catcher:drop', async (_e, d) => {
+ipcMain.on('catcher:drop', async (e, d) => {
+  if (!fromWin(e, catcher)) return;
   hoverOn = false;
   if (!server || !server.connected) return;
   const sy = catcher ? catcher.getBounds().y + ((d && d.y) || 0) : overlayBounds().y + store.anchor * overlayBounds().height;
@@ -609,7 +616,7 @@ function answerQs(id, accept, why) {
   if (!accept) qsOffers.delete(id);
   qs.answer(id, accept, why);
 }
-ipcMain.on('panel:qs-answer', (_e, { id, accept }) => answerQs(id, !!accept));
+ipcMain.on('panel:qs-answer', (e, m) => { if (fromPanel(e) && m) answerQs(m.id, !!m.accept); });
 function onQsAccepted(m) {
   const tid = 'qs-' + m.id;
   qsTransfers.set(m.id, tid);
@@ -800,7 +807,9 @@ function sendPreview(on) {
   fx('preview', { on, ph: phoneScreen().h });
 }
 
-ipcMain.on('panel:set', (_e, { key, value }) => {
+ipcMain.on('panel:set', (e, m) => {
+  if (!fromPanel(e) || !m) return;
+  const { key, value } = m;
   switch (key) {
     case 'name': {
       const v = String(value || '').trim().slice(0, 40);
@@ -836,7 +845,9 @@ ipcMain.on('panel:set', (_e, { key, value }) => {
   }
 });
 
-ipcMain.on('panel:action', async (_e, { what, arg }) => {
+ipcMain.on('panel:action', async (e, m) => {
+  if (!fromPanel(e) || !m) return;
+  const { what, arg } = m;
   switch (what) {
     case 'hide': if (panel) panel.hide(); sendPreview(false); break;
     case 'show': showPanel(); break;
@@ -866,12 +877,12 @@ ipcMain.on('panel:action', async (_e, { what, arg }) => {
   }
 });
 
-ipcMain.on('panel:pair-answer', (_e, { device, allow }) => {
-  if (!server) return;
-  if (allow) server.approve(device); else server.deny(device);
+ipcMain.on('panel:pair-answer', (e, m) => {
+  if (!server || !fromPanel(e) || !m) return;
+  if (m.allow) server.approve(m.device); else server.deny(m.device);
 });
 
-ipcMain.on('panel:preview', (_e, d) => sendPreview(!!(d && d.on)));
+ipcMain.on('panel:preview', (e, d) => { if (fromPanel(e)) sendPreview(!!(d && d.on)); });
 
 function fixFirewall() {
   if (!IS_WIN) {
@@ -1664,8 +1675,8 @@ function onWebDone(g) {
   setTimeout(() => transfers.delete(t.tid), 5000);
 }
 
-ipcMain.on('panel:web', async (_e, m) => {
-  if (!web || !m || typeof m !== 'object') return;
+ipcMain.on('panel:web', async (e, m) => {
+  if (!web || !fromPanel(e) || !m || typeof m !== 'object') return;
   switch (m.what) {
     case 'start': web.start(); break;
     case 'stop': web.stop('user'); hotspot.stop(); hotAddr = null; break;
@@ -1721,8 +1732,8 @@ function startFeedback() {
     },
   });
 }
-ipcMain.on('panel:feedback', async (_e, m) => {
-  if (!fb || !m || typeof m !== 'object') return;
+ipcMain.on('panel:feedback', async (e, m) => {
+  if (!fb || !fromPanel(e) || !m || typeof m !== 'object') return;
   if (m.what === 'send') {
     const r = await fb.send({ type: m.type === 'idea' ? 'idea' : 'bug', message: String(m.message || ''), email: String(m.email || ''), device: m.device === true });
     panelSend('panel:feedback', Object.assign({ result: r }, fb.info()));
@@ -1882,16 +1893,16 @@ function startTestControl() {
         return res.end(JSON.stringify(r));
       }
       if (u.pathname === '/set') {
-        ipcMain.emit('panel:set', {}, { key: u.searchParams.get('key'), value: u.searchParams.get('value') });
+        ipcMain.emit('panel:set', TEST_EV, { key: u.searchParams.get('key'), value: u.searchParams.get('value') });
         return res.end('ok');
       }
       if (u.pathname === '/action') {
         const arg = u.searchParams.get('arg');
-        ipcMain.emit('panel:action', {}, { what: u.searchParams.get('what'), arg: arg ? JSON.parse(arg) : undefined });
+        ipcMain.emit('panel:action', TEST_EV, { what: u.searchParams.get('what'), arg: arg ? JSON.parse(arg) : undefined });
         return res.end('ok');
       }
       if (u.pathname === '/catcher-drop') {
-        ipcMain.emit('catcher:drop', {}, { paths: [u.searchParams.get('path')], y: +(u.searchParams.get('y') || 300) });
+        ipcMain.emit('catcher:drop', TEST_EV, { paths: [u.searchParams.get('path')], y: +(u.searchParams.get('y') || 300) });
         return res.end('ok');
       }
       if (u.pathname === '/pair') {
