@@ -1145,7 +1145,11 @@
     if (SRCH.on) endSearch(true);            // a search belongs to the view it was started in
     V.gen++;
     V.cat = cat; V.title = title; V.items = []; V.more = false; V.total = 0; V.offset = 0; V.loading = false;
-    st.hidden.clear();
+    // a Flick-list file on its way to the PC stays out of the list until the PC has it (it came back as if never sent
+    // once the user had looked at another tab meanwhile); anything else hidden is let go
+    const going = new Set();
+    for (const p of st.pending.values()) if (p.phase === 'sent') for (const x of itemsOf(p)) going.add(x.id);
+    for (const id of st.hidden) if (!going.has(id)) st.hidden.delete(id);
     for (const [, el] of cards) el.remove();
     cards.clear();
     scroller.scrollTop = 0;
@@ -1281,6 +1285,8 @@
   }
 
   function visibleItems() { return V.items.filter((it) => !st.hidden.has(it.id) && shown(it)); }
+  // the hidden files this view has (one on its way is hidden in every tab, but counted only in its own)
+  function hiddenHere() { let n = 0; if (st.hidden.size) for (const it of V.items) if (st.hidden.has(it.id)) n++; return n; }
 
   function updateCount() {
     let sending = 0, sent = 0, total = 0, rate = 0, waiting = 0;
@@ -1292,7 +1298,7 @@
     }
     $('count').classList.toggle('busy', sending + waiting > 0);
     if (!sending && waiting) { $('count').textContent = 'Waiting for ' + (([...st.jobs.values()].find((j) => j.state === 'waiting') || {}).pcName || 'your PC') + '…'; return void updateEmpty(); }
-    const n = needsPermission() ? 0 : V.cat === 'dir' || SRCH.f ? visibleItems().filter((i) => !i.incoming).length : Math.max(V.total - st.hidden.size, visibleItems().length);
+    const n = needsPermission() ? 0 : V.cat === 'dir' || SRCH.f ? visibleItems().filter((i) => !i.incoming).length : Math.max(V.total - hiddenHere(), visibleItems().length);
     const pct = total > 0 ? Math.min(99, Math.floor((sent / total) * 100)) : -1;
     $('count').textContent = sending ? 'Sending' + (pct >= 0 ? ' ' + pct + '%' : '…') + (rate > 0 && settings.showSpeed ? ' · ' + fmtRate(rate) : '') : n.toLocaleString() + (n === 1 ? ' item' : ' items');
     updateEmpty();
