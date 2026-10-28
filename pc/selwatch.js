@@ -1,7 +1,8 @@
 'use strict';
 // Which files are selected in the file manager in front, for Air grab on the PC (pc/air.js): selecting files is what
 // turns the PC's camera on for a few seconds, and what a fist in front of the screen picks up. It runs only while a
-// phone is ready to catch (Flick open on it with Air grab on).
+// phone is ready to catch (Flick open on it with Air grab on), and a minute after (pc/air.js: a phone back from a look
+// at another app finds it running; nothing it sees meanwhile turns the camera on).
 //   Windows  File Explorer's window in front (the tab in front, on Windows 11) or the desktop: a PowerShell loop asks
 //            the shell for its selected items
 //   macOS    Finder in front: an osascript loop asks Finder for its selection (macOS asks once to let Flick do that)

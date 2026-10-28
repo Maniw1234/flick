@@ -36,6 +36,9 @@ const HAND_MORE_MS = 4000;   // a hand in view while the camera waits for the gr
 const BACK_MS = 700;         // a hand opening in front of the PC puts the files back after this, unless the phone
                              // catches them first (a phone the PC's camera sees too, under the hand)
 const MIN_RUN_MS = 3000;     // less camera time than this left: it rests (a blink of its light helps no one)
+const SEL_LINGER_MS = 60000; // the selection watching goes on this long after the last phone ready to catch went: one
+                             // back meanwhile (after a look at another app) doesn't start it again (on Windows, a
+                             // PowerShell that compiles its helper each time it starts)
 const FACE_WAIT_MS = 120;    // the picked-up card shows at once with its picture if that's ready this soon; else with its
                              // file type, and its picture follows (within THUMB_WAIT_MS)
 const THUMB_WAIT_MS = 1500;
@@ -85,12 +88,18 @@ function attach(o) {
 
   // PC to phone: the phones ready to catch, what's selected, and what a fist picked up
   const phones = new Set();    // devices with Air grab on and Flick open
-  const G = { sel: [], armedAt: 0, armedUntil: 0, armT: null, open: false, held: null, n: 0 };
+  // (selDenied: macOS doesn't let Flick ask Finder what's selected)
+  const G = { sel: [], armedAt: 0, armedUntil: 0, armT: null, open: false, held: null, n: 0, selDenied: false, selStopT: null };
   const sel = o.selwatch || new SelWatch({ log: o.log });
   sel.on('change', (s) => onSelection(s));
   function watchSelection() {
-    if (phones.size && camOn()) { sel.start(); warm(); }
-    else { sel.stop(); disarm(); closeLater(); }
+    clearTimeout(G.selStopT);
+    if (phones.size && camOn()) { sel.start(); warm(); return; }
+    disarm();
+    closeLater();
+    // (selections made meanwhile turn nothing on: no phone is ready to catch)
+    if (!camOn()) sel.stop();
+    else { G.selStopT = setTimeout(() => { if (!(phones.size && camOn())) sel.stop(); }, SEL_LINGER_MS); if (G.selStopT.unref) G.selStopT.unref(); }
   }
   // a phone ready to grab: the camera window and its hand tracker get ready now (the camera itself stays off), so a
   // grab doesn't wait for them to load
@@ -139,15 +148,21 @@ function attach(o) {
     const was = camSays();
     camState = String((d && d.state) || 'off');
     if (camState === 'on') camProblem = null;
-    else if (/denied|nocamera|error/.test(camState)) { camProblem = camState; log('camera', camState, (d && d.detail) || ''); }
+    else if (/denied|nocamera|error/.test(camState)) {
+      camProblem = camState;
+      log('camera', camState, (d && d.detail) || '');
+      // it couldn't start, or it stopped by itself (unplugged, taken by another app): this run is over. Files in a fist
+      // it followed wait at the edge (not frozen where it was last seen), and the time isn't counted against grabs
+      if (camRunning()) stopCam();
+    }
     if (was !== camSays() && o.changed) o.changed();     // the panel says when there's no camera Flick can use
   });
   ipcMain.on('air:event', (e, ev) => { if (win && e.sender === win.webContents && ev) onHand(ev); });
 
   // the camera is wanted while a hand carries a phone's file here, for a few seconds after files are selected, and
-  // while a fist in view holds files it picked up
+  // while a fist in view holds files it picked up; never once it's turned off in Flick's window (it stops at once)
   function needCam() {
-    return [...lifted.values()].some((x) => !x.landed) || Date.now() < G.armedUntil || !!(G.held && (G.held.state === 'hand' || G.held.state === 'back'));
+    return camOn() && ([...lifted.values()].some((x) => !x.landed) || Date.now() < G.armedUntil || !!(G.held && (G.held.state === 'hand' || G.held.state === 'back')));
   }
 
   async function startCam() {
@@ -232,15 +247,21 @@ function attach(o) {
   // ---- phone to PC: the hand carrying a phone's file
   function onCarry(ev, a, now) {
     if (ev.type === 'leave') {
+      const sawFist = a.sawFist;
       a.sawFist = 0;                                     // a hand coming back is a new one until seen as a fist
-      // the fist it followed lost as it opened (the tracker loses an opening hand now and then): it opened there
+      // the fist it followed lost as it opened (the tracker loses an opening hand now and then): it opened there. Also
+      // one only seen before the phone let go: the phone's word can come between its last frame and the hand counting
+      // as gone
       const opening = ev.raw === 'open' || (ev.pose === 'fist' && ev.raw === 'other');
-      if (a.go && a.follow && opening && Array.isArray(ev.aim)) {
+      if (a.go && (a.follow || sawFist) && opening && Array.isArray(ev.aim)) {
         const q = toScreen(ev.aim);
         lastOpen = { x: q.x, y: q.y, at: now };
         land(a, q);
         return;
       }
+      // the same before the phone let go: the fist this camera saw, lost with its last frame open (a pose that hadn't
+      // settled yet), opened here: the phone is told as for one seen opening
+      if (!a.go && sawFist && ev.raw === 'open' && ev.pose !== 'open' && Array.isArray(ev.aim)) { openedHere(a, toScreen(ev.aim), now); return; }
       // the fist it followed went out of view: the file goes back to waiting at the edge
       if (a.follow) { a.follow = false; o.fx('air', { tid: a.t.tid, off: true }); bob(a); }
       return;
@@ -271,6 +292,11 @@ function attach(o) {
     // before that, only the fist this camera saw (without it leaving the view) opening tells the phone to let go:
     // another hand, or one never seen closed, sends nothing
     if (ev.type !== 'pose' || !a.sawFist) return;
+    openedHere(a, at, now);
+  }
+  // the fist carrying a's file opened in front of the PC (at: where it was aimed) before the phone let go: the phone is
+  // told ('air-land'), and when it lets go the file lands there
+  function openedHere(a, at, now) {
     lastOpen = a.landAt = { x: at.x, y: at.y, at: now };
     if (o.server) o.server.pushToPhone({ t: 'air-land', tid: a.t.tid }, a.device);
   }
@@ -314,6 +340,7 @@ function attach(o) {
   // ---- PC to phone: selecting files, picking them up, and the phone catching them
   function onSelection(s) {
     G.sel = (s && s.paths) || [];
+    G.selDenied = !!s && s.kind === 'denied';
     if (!G.sel.length || !phones.size) { disarm(); return; }
     // what was selected already when the watching started isn't a selection just made: the next one turns it on
     if (s.first) return;
@@ -344,7 +371,7 @@ function attach(o) {
     clearTimeout(G.armT);
     stopCamIfIdle();
   }
-  function tellPhones(msg) { if (o.server) for (const d of phones) o.server.pushToPhone(msg, d); }
+  function tellPhones(msg, but) { if (o.server) for (const d of phones) if (d !== but) o.server.pushToPhone(msg, d); }
 
   function onPick(ev, now) {
     const h = G.held;
@@ -504,8 +531,8 @@ function attach(o) {
       const h = G.held;
       if (!h) {
         // nothing picked up: the phone says how (select files, or copy them on Linux), or why it can't be done here
-        // (the camera off, or none Flick can use)
-        const why = o.store.airCam === false ? 'camoff' : !HAND || /denied|nocamera|error/.test(camSays()) ? 'nocamera' : 'nothing';
+        // (the camera off, none Flick can use, or macOS not letting Flick ask Finder what's selected)
+        const why = o.store.airCam === false ? 'camoff' : !HAND || /denied|nocamera|error/.test(camSays()) ? 'nocamera' : G.selDenied ? 'finder' : 'nothing';
         if (o.server) o.server.pushToPhone({ t: 'air-none', why, how: (o.platform || process.platform) === 'linux' ? 'copy' : 'select' }, device);
         log('catch: nothing picked up' + (why === 'nothing' ? '' : ' (' + why + ')'));
         return 0;
@@ -514,6 +541,9 @@ function attach(o) {
       clearTimeout(h.backT);
       G.held = null;
       o.fx('air-out', { id: h.id, go: true });          // the card goes into the phone
+      // the other phones ready to catch heard a fist holds files for them: not any more (else their next fist that
+      // opens asks for files that went, and is told how to pick some up)
+      tellPhones({ t: 'air-held', n: 0 }, device);
       log('caught', h.paths.length, 'file(s)');
       o.sendPaths(h.paths, { fx: false, y: h.y, device });   // to the phone that caught them
       // done: a grab again takes files selected again
@@ -550,6 +580,7 @@ function attach(o) {
     },
 
     stop() {
+      clearTimeout(G.selStopT);
       sel.stop();
       for (const tid of [...lifted.keys()]) this.cancel(tid);
       if (G.held) drop(G.held, 'Flick closed');

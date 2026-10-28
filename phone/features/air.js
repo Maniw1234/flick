@@ -5,8 +5,9 @@
  * camera sees your hand open, or come in from the screen's edge on a PC without one. Opening your hand over the phone
  * again puts them back. The other way round: with this on and Flick open, select files on the PC (copy them, on Linux),
  * close your open hand into a fist in front of its screen, then bring it over the phone and open it.
- * The camera runs only while this is on (Settings), Flick is open on screen and a PC is connected. The hand tracking
- * runs on the phone (phone/hand/: MediaPipe's hand models on Flick's own engine); no picture leaves the phone. */
+ * The camera runs only while this is on (Settings), Flick is open on screen (not behind Lock Flick's cover) and a PC is
+ * connected. The hand tracking runs on the phone (phone/hand/: MediaPipe's hand models on Flick's own engine); no
+ * picture leaves the phone. */
 (window.FlickFeatures = window.FlickFeatures || []).push(function (A, X) {
   'use strict';
   if (!A.has('cameraState')) return;                     // a phone app without the camera bridge
@@ -15,10 +16,12 @@
   const BASE = 'https://flick.local/hand/';              // served by the app: a file:// page can't fetch files
   const FILES = ['hand-simd.wasm', 'hand.wasm', 'palm.fhm', 'landmark.fhm'];
   const AIR_PROTO = 8;                                    // PCs that know Air grab
+  const pcKnows = () => (A.st.pcProto || 1) >= AIR_PROTO;
   const camOk = () => A.nc('cameraState') === 'granted';
 
   let on = A.pref.get('air', '') === '1';
   let paused = false;                                     // Flick is in the background
+  let locked = false;                                     // Lock Flick's cover is over the page until it's unlocked
   let cam = null, stream = null, building = null, camState = 'off', deniedSaid = false;
 
   // ---- what you see: a soft spot where the hand is, a light on the file under it, what the fist carries
@@ -54,13 +57,16 @@
   // ---- the hand. Modes: idle | hover (a hand over the phone) | carry (a fist holding files) | away (carrying, out of
   // view for a moment) | sent (they went; the hand is still in view) | catch (a fist that came in from outside: files
   // from the PC when it opens). pos, size: the hand in the camera's view (0..1); x, y: on the screen
-  const M = { mode: 'idle', wasOpen: false, x: 0, y: 0, pos: [0.5, 0.5], size: 0, grabPos: null, grabSize: 0, tid: null, items: null, video: null,
-    catchT: 0, enterT: 0, sentAt: 0, pcHeldAt: 0, askedAt: 0, goT: 0, hideT: 0, inT: 0, touch: 0, paint: null, painted: null, hint: 0, openN: 0 };
+  // wasOpen: the hand has been clearly open since it came into view (openRun: its frames in a row that were open)
+  const M = { mode: 'idle', wasOpen: false, openRun: 0, back: false, x: 0, y: 0, pos: [0.5, 0.5], size: 0, grabPos: null, grabSize: 0, tid: null, items: null,
+    video: null, catchT: 0, enterT: 0, sentAt: 0, pcHeldAt: 0, askedAt: 0, goT: 0, hideT: 0, inT: 0, touch: 0, paint: null, painted: null, hint: 0 };
   const pcHolds = () => !!M.pcHeldAt && Date.now() - M.pcHeldAt < 20000;   // the PC said a fist holds files for here
   const AWAY_MS = 600;         // carrying, the hand lost in the middle of the view: the files go after this (the
                                // tracker looks for it in every frame meanwhile: a fist held still is found again)
   const CATCH_MS = 200;        // a fist that came in must be held over the phone this long before it opens to catch
   const STICK = 12;            // px: the file a hand aims at stays lit until the aim is this far over another
+  const OPEN_N = 3;            // frames in a row a hand must look open to count as open (the first frame of a hand
+                               // coming into view can look open when it isn't: a fist bringing files from the PC)
 
   // the file at the aim point (x, y on the screen), keeping the one lit until the aim is clearly over another, so the
   // light doesn't flicker between neighbours at a border
@@ -73,6 +79,7 @@
   }
 
   function onEvent(type, e) {
+    if (camState !== 'on') return;                        // (the camera is off: nothing it saw counts any more)
     if (type === 'move') move(e);
     else if (type === 'enter') enter(e);
     else if (type === 'pose') pose(e);
@@ -81,16 +88,19 @@
   }
 
   function enter(e) {
+    M.openRun = 0;                                        // (its frames are counted by move, this one too)
     if (M.mode === 'away') {                              // back before the files went
       clearTimeout(M.goT);
       held.classList.remove('gone');
       M.mode = 'carry';
-      // back open: it let go out of view, once its next frames say open too (a first frame can be wrong)
-      M.openN = e.pose === 'open' ? 1 : 0;
+      // back open: it let go out of view, once it's clearly open (a first frame can be wrong)
+      M.back = e.pose === 'open';
       return;
     }
     if (M.mode === 'carry') return;
-    M.wasOpen = e.pose === 'open';
+    // open once it's clearly so (move): a hand that only looks open in its first frame and then a fist is one coming in
+    // closed, bringing files from the PC, not one grabbing here
+    M.wasOpen = false;
     M.mode = e.pose === 'fist' ? 'catch' : 'hover';
     M.catchT = M.enterT = Date.now();
   }
@@ -102,12 +112,14 @@
     if (M.mode === 'hover' && e.pose === 'fist' && !M.wasOpen && (Date.now() - M.enterT < 700 || pcHolds())) { M.mode = 'catch'; M.catchT = Date.now(); return; }
     if (M.mode === 'hover' && e.pose === 'fist') grab(e);
     else if (M.mode === 'carry' && e.pose === 'open') released(e.aim || e.pos);
-    else if (M.mode === 'catch' && e.pose === 'open') {
-      // a fist held over the phone for a moment, then opened (a hand that only passes through a fist doesn't count)
-      const ms = Date.now() - M.catchT;
-      if (ms >= CATCH_MS && ms < 4000) catchFromPc();
-      M.mode = 'hover';
-    }
+    else if (M.mode === 'catch' && e.pose === 'open') { opened(); M.mode = 'hover'; }
+  }
+
+  // a fist that came in opened over the phone: it catches once it was held there for a moment (a hand that only passes
+  // through a fist doesn't count), and not after resting closed for long, unless the PC said it holds files for here
+  function opened() {
+    const ms = Date.now() - M.catchT;
+    if (ms >= CATCH_MS && (ms < 4000 || pcHolds())) catchFromPc();
   }
 
   // the send a hand carries ended without it (the PC put it back after a very long hold, the link dropped)
@@ -120,6 +132,8 @@
   }
 
   function move(e) {
+    M.openRun = e.pose === 'open' && (e.raw || e.pose) === 'open' ? M.openRun + 1 : 0;
+    if (M.openRun >= OPEN_N) M.wasOpen = true;
     // files thrown with the hand still in view: a moment later it can hover and grab again (no need to leave first)
     if (M.mode === 'sent' && Date.now() - M.sentAt > 450 && e.pose !== 'fist') { M.mode = 'hover'; M.wasOpen = e.pose === 'open'; }
     const [x, y] = toScreen(e.pos);
@@ -132,7 +146,7 @@
     if (M.mode === 'carry') {
       place(held, x, y);
       // came back into view open: let go there once it's clearly open
-      if (M.openN) { if (e.pose !== 'open' || e.raw !== 'open') M.openN = 0; else if (++M.openN >= 3) { M.openN = 0; released(e.aim || e.pos); } }
+      if (M.back) { if (!M.openRun) M.back = false; else if (M.openRun >= OPEN_N) { M.back = false; released(e.aim || e.pos); } }
       return;
     }
     if (M.mode !== 'hover') return;
@@ -225,9 +239,14 @@
     spot.hidden = true;
     setHover(null);
     M.paint = null;
+    M.openRun = 0;
+    M.back = false;
+    // lost as it opened (the tracker loses an opening hand now and then; its last frame was open, its pose not yet: a
+    // fist, or half open on the way): it opened there
+    const opening = e.raw === 'open' && e.pose !== 'open';
+    if (M.mode === 'catch' && opening) opened();
     if (M.mode === 'carry') {
-      // lost as it opened (the tracker loses an opening hand now and then): it opened there
-      if (e.pose === 'fist' && e.raw === 'open') { released(e.aim || e.pos); M.mode = 'idle'; M.wasOpen = false; return; }
+      if (opening) { released(e.aim || e.pos); M.mode = 'idle'; M.wasOpen = false; return; }
       if (e.edge) { M.mode = 'idle'; go(); return; }
       // gone from the middle of the view: the tracker may have lost it for a moment; it goes unless it's back soon
       M.mode = 'away';
@@ -316,7 +335,8 @@
       const pc = X.pcName();
       A.toast(m.why === 'camoff' ? 'Air grab is off in Flick’s window on ' + pc + ': turn it on to grab files there'
         : m.why === 'nocamera' ? pc + ' has no camera Flick can use, so files there can’t be grabbed by hand'
-          : (m.how === 'copy' ? 'Copy files on ' : 'Select files on ') + pc + ', grab them with a fist in front of the screen, then open it here', 3200);
+          : m.why === 'finder' ? pc + ' doesn’t let Flick see what’s selected in Finder: allow it in System Settings › Privacy & Security › Automation'
+            : (m.how === 'copy' ? 'Copy files on ' : 'Select files on ') + pc + ', grab them with a fist in front of the screen, then open it here', 3200);
     } else if (m.t === 'air-held') {
       // a fist picked files up in front of the PC: they come here when it opens over the phone
       M.pcHeldAt = +m.n > 0 ? Date.now() : 0;
@@ -369,6 +389,7 @@
           onResult: (r) => stream.push(r),
           onState: (s, d) => {
             camState = s;
+            if (s !== 'on' && s !== 'starting') handGone();
             tellReady();
             // said once until Flick comes back to the screen: no camera, a camera Android won't give, one that's busy
             if ((s === 'denied' || s === 'nocamera' || s === 'error') && !deniedSaid) {
@@ -387,22 +408,29 @@
     return building;
   }
 
-  const wanted = () => on && !paused && !document.hidden && A.st.connected && camOk();
+  // the camera is off (turned off here, or it stopped by itself: taken by another app): the hand it followed is gone
+  // with it. Files it carried go back (no frame would ever say it left, and they'd wait in the fist for good)
+  function handGone() {
+    if (M.mode === 'carry' || M.mode === 'away') putBack();
+    Object.assign(M, { mode: 'idle', wasOpen: false, openRun: 0, back: false, paint: null });
+    spot.hidden = true;
+    setHover(null);
+    if (stream) stream.reset();
+  }
+
+  // (locked: Lock Flick's cover hides the page; a hand mustn't pick files up behind it. A PC whose Flick doesn't know
+  // Air grab can do nothing with a hand: the camera stays off, and that's said once)
+  const wanted = () => on && !paused && !locked && !document.hidden && A.st.connected && pcKnows() && camOk();
+  let oldSaid = false;
   async function update() {
+    if (on && A.st.connected && !pcKnows() && !oldSaid && !paused && !document.hidden) { oldSaid = true; A.toast('Update Flick on ' + X.pcName() + ' to use Air grab with it', 3200); }
     if (wanted()) {
       try { await build(); } catch (e) { console.log('air: ' + e); return; }
       if (wanted() && camState !== 'on' && camState !== 'starting' && !/denied|nocamera/.test(camState)) cam.start();
       return;
     }
     if (!cam) return;
-    if (camState !== 'off') {
-      cam.stop();
-      if (M.mode === 'carry' || M.mode === 'away') putBack();
-      M.mode = 'idle';
-      spot.hidden = true;
-      setHover(null);
-      stream.reset();
-    }
+    if (camState !== 'off') cam.stop();                 // (its 'off' puts back what a hand carried: handGone)
     // Air grab turned off: the hand tracker's memory goes too (it loads again when it's turned on)
     if (!on) cam.close();
   }
@@ -410,6 +438,7 @@
   A.on('conn', () => { saidReady = null; update(); tellReady(true); });
   A.on('native', (e) => {
     if (e.t === 'pause') { paused = true; update(); }
+    else if (e.t === 'locked' || e.t === 'unlocked') { locked = e.t === 'locked'; update(); }
     else if (e.t === 'resume') { paused = false; deniedSaid = false; if (/denied|nocamera|error/.test(camState)) camState = 'off'; update(); }
     else if (e.t === 'camera') {
       on = camOk();
@@ -451,7 +480,11 @@
     l.append(i, h('span'));
     row.appendChild(l);
     card.appendChild(row);
-    if (on && camState === 'on' && A.st.connected) {
+    if (on && A.st.connected && !pcKnows()) {
+      const n = h('div', 'srow fsnote airtip');
+      n.appendChild(h('span', '', 'Update Flick on ' + X.pcName() + ' to use Air grab with it.'));
+      card.appendChild(n);
+    } else if (on && camState === 'on' && A.st.connected) {
       const n = h('div', 'srow fsnote airtip');
       n.appendChild(h('span', '', 'Pinch over a file to select it, and keep pinching across more. To bring files here, select them on ' + X.pcName() + ', make a fist in front of its screen, then open it over the phone.'));
       card.appendChild(n);
