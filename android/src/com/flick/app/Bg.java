@@ -28,8 +28,11 @@ import java.util.concurrent.TimeUnit;
 final class Bg {
     static final String TAG = "Flick";
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
-    // small jobs (a clipboard to send, a link, a notification): never on the main thread, never waiting behind a sync
+    // small jobs (a clipboard from the PC, a link, the checks when Flick comes to the front): never on the main thread,
+    // never waiting behind a sync or a send
     static final ExecutorService POOL = Transfers.pool("flick-bg", 2);
+    // sends to the PC (the newest photo, a clipboard, auto-send): a slow one never holds up the small jobs
+    static final ExecutorService SENDS = Transfers.pool("flick-bg-send", 2);
 
     private static PcClient client;
     private static HistoryStore history;
@@ -152,9 +155,14 @@ final class Bg {
     }
 
     /** Runs r off the main thread; whatever it throws is logged, never a crash. False if it couldn't be started. */
-    static boolean run(final String what, final Runnable r) {
+    static boolean run(String what, Runnable r) { return runOn(POOL, what, r); }
+
+    /** run() for a send to the PC (it can take minutes): on its own threads. */
+    static boolean send(String what, Runnable r) { return runOn(SENDS, what, r); }
+
+    private static boolean runOn(ExecutorService pool, final String what, final Runnable r) {
         try {
-            POOL.execute(new Runnable() {
+            pool.execute(new Runnable() {
                 @Override public void run() { try { r.run(); } catch (Throwable e) { Log.w(TAG, what + ": " + e, e); } }
             });
             return true;

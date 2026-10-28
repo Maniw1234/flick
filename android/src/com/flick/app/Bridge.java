@@ -6,6 +6,8 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Build;
+import android.os.CancellationSignal;
+import android.os.OperationCanceledException;
 import android.view.HapticFeedbackConstants;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
@@ -221,24 +223,59 @@ final class Bridge {
         return s.toString();
     }
 
+    // ---------------- the file view's listings ----------------
+    // The view shows one listing at a time, so a newer request (another tab, folder or order, or a search as it is
+    // typed) makes the ones before it pointless: one still waiting is answered at once without running, and the one
+    // running is cancelled (its MediaStore query stops). Either answers {error:"superseded"}, which the page, already
+    // on to the newer one, ignores.
+    private final Object views = new Object();
+    private long viewSeq;                                // the newest request (views)
+    private CancellationSignal viewRunning;              // the one running, if it is the newest (views)
+    static final String SUPERSEDED = "{\"error\":\"superseded\",\"items\":[]}";
+
+    interface Listing { String run(CancellationSignal cancel); }
+
+    private void listing(final String req, final Listing work) {
+        final long my;
+        CancellationSignal old;
+        synchronized (views) { my = ++viewSeq; old = viewRunning; viewRunning = null; }
+        if (old != null) old.cancel();
+        a.io().execute(new Runnable() {
+            @Override
+            public void run() {
+                CancellationSignal cancel = null;
+                synchronized (views) { if (my == viewSeq) viewRunning = cancel = new CancellationSignal(); }
+                String out = SUPERSEDED;
+                if (cancel != null) {
+                    try { out = work.run(cancel); }
+                    catch (OperationCanceledException e) { out = SUPERSEDED; }
+                    finally { synchronized (views) { if (viewRunning == cancel) viewRunning = null; } }
+                }
+                a.result(req, out);
+            }
+        });
+    }
+
     @JavascriptInterface
     public void listDirAsync(final String req, final String path) {
-        a.io().execute(new Runnable() { @Override public void run() { a.result(req, Files.listDir(a, path)); } });
+        listing(req, new Listing() {
+            @Override public String run(CancellationSignal c) { return Files.listDir(a, path, c); }
+        });
     }
 
     @JavascriptInterface
     public void queryAsync(final String req, final String cat, final int offset, final int limit) {
-        a.io().execute(new Runnable() { @Override public void run() { a.result(req, Files.query(a, cat, Math.max(0, offset), Math.max(1, Math.min(600, limit)))); } });
+        querySorted(req, cat, offset, limit, null, null);
     }
 
     /** queryAsync in another order (sort, see Files.query), only files whose name has the words of q ("" for all). */
     @JavascriptInterface
     public void querySorted(final String req, final String cat, final int offset, final int limit, final String sort, final String q) {
-        a.io().execute(new Runnable() {
+        listing(req, new Listing() {
             @Override
-            public void run() {
-                String words = q == null ? "" : q.length() > 100 ? q.substring(0, 100) : q;
-                a.result(req, Files.query(a, cat, Math.max(0, offset), Math.max(1, Math.min(600, limit)), sort, words));
+            public String run(CancellationSignal c) {
+                String words = q == null ? null : q.length() > 100 ? q.substring(0, 100) : q;
+                return Files.query(a, cat, Math.max(0, offset), Math.max(1, Math.min(600, limit)), sort, words, c);
             }
         });
     }
@@ -260,6 +297,33 @@ final class Bridge {
     @JavascriptInterface
     public String thumbPath(String path, String mtime, String mid, String mt) {
         return Thumbs.base64(a, path, Thumbs.parse(mtime), Thumbs.parse(mid), (int) Thumbs.parse(mt));
+    }
+
+    // thumbnails for a card being lifted, off the page's thread (one being made for the grid is waited for here)
+    private static final ExecutorService LIFT_THUMBS = Transfers.pool("flick-thumb-lift", 1);
+
+    /**
+     * thumbPath / thumb for up to 3 items (a JSON array of {path, mtime, mid, mt} or {id}) without holding up the page:
+     * answered as a "res" event {thumbs: [the base64 JPEG, or "" when there is none, for each]}.
+     */
+    @JavascriptInterface
+    public void thumbsAsync(final String req, final String items) {
+        LIFT_THUMBS.execute(new Runnable() {
+            @Override
+            public void run() {
+                JSONArray out = new JSONArray();
+                try {
+                    JSONArray arr = new JSONArray(items);
+                    for (int i = 0; i < arr.length() && i < 3; i++) {
+                        JSONObject x = arr.optJSONObject(i);
+                        if (x == null) out.put("");
+                        else if (!x.has("path")) out.put(Library.get(a).thumbBase64(x.optString("id", "")));
+                        else out.put(Thumbs.base64(a, x.optString("path"), x.optLong("mtime", 0), x.optLong("mid", 0), x.optInt("mt", 0)));
+                    }
+                } catch (Throwable e) { Bg.warn("thumbnails", e); }
+                a.result(req, "{\"thumbs\":" + out + "}");
+            }
+        });
     }
 
     @JavascriptInterface public void uploadPath(String tid, String path, String url) { a.transfers().uploadPath(tid, path, url); }
@@ -452,11 +516,52 @@ final class Bridge {
     // ======================================================================== protocol 5: features
     // Each returns at once; long work runs on a background thread and answers with an event.
 
-    /** The clipboard (Android lets Flick read it only while it is in front with focus): see Clip.read. */
+    /**
+     * The clipboard (Android lets Flick read it only while it is in front with focus): see Clip.read. It holds up the
+     * page while it waits for the focus (up to 0.6 s) and reads: the page uses clipPeek.
+     */
     @JavascriptInterface
     public String clipRead() {
-        waitForFocus();
+        a.awaitFocus(600);
         return Clip.read(a, false).toString();
+    }
+
+    // clipboard reads, one at a time, off the page's bridge thread: Flick's window may get its focus a moment after it
+    // comes back, and a picture takes a while to read and convert
+    private static final ExecutorService CLIP = Transfers.pool("flick-clip", 1);
+
+    /**
+     * clipRead without holding up the page, answered with a "clip-read" event {req, kind, id, ...} (see Clip.peek).
+     * seen: the id of the clipboard the page dealt with last: when it is that one again, the answer is that (same:true)
+     * and nothing more. adopt: the page takes it as synced whatever it holds, so the content isn't needed (nor for one
+     * from the PC). Otherwise the content comes too, as Clip.read gives it ({text} or {png}), with its SHA-256 (hash).
+     */
+    @JavascriptInterface
+    public void clipPeek(final String req, final String seen, final boolean adopt) {
+        CLIP.execute(new Runnable() {
+            @Override
+            public void run() {
+                JSONObject o = new JSONObject();
+                try {
+                    a.awaitFocus(1500);
+                    ClipData cd = Clip.grab(a);
+                    o = Clip.peek(a, cd, false);
+                    String kind = o.optString("kind"), id = o.optString("id", "");
+                    if (!"none".equals(kind)) {
+                        if (id.length() > 0 && id.equals(seen)) o.put("same", true);
+                        else if (!adopt && !o.optBoolean("fromPc", false)) {
+                            JSONObject full = Clip.describe(a, cd, false);
+                            String body = full.has("png") ? full.optString("png") : full.optString("text", "");
+                            if (body.length() > 0) full.put("hash", Clip.sha256(body));
+                            full.put("id", id);
+                            o = full;
+                        }
+                    }
+                } catch (Throwable e) { Bg.warn("clipboard", e); }
+                try { o.put("t", "clip-read"); o.put("req", req); } catch (Throwable e) { return; }
+                a.emit(o.toString());
+            }
+        });
     }
 
     /** The PC's clipboard ({kind:text,text} / {kind:image,png}) onto the phone's, if "Clipboard from your PC" is on. */
@@ -621,17 +726,17 @@ final class Bridge {
         Actions.sendLatestPhoto(a, "share", true, new Actions.Report() { @Override public void say(String msg) { a.toast(msg); } });
     }
 
-    /** What the "Send clipboard" tile does (the user asked, so a clipboard marked private goes too). */
+    /** What the "Send clipboard" tile does (the user asked, so a clipboard marked private goes too). Returns at once. */
     @JavascriptInterface
     public void sendClipboard() {
-        waitForFocus();
-        Actions.sendClipboard(a, Clip.read(a, true), new Actions.Report() { @Override public void say(String msg) { a.toast(msg); } });
-    }
-
-    // just back in front, the window may not have focus yet (the clipboard reads empty without it): up to 0.6 s
-    private void waitForFocus() {
-        for (int i = 0; i < 12 && !a.hasWindowFocus(); i++) {
-            try { Thread.sleep(50); } catch (InterruptedException e) { return; }
-        }
+        CLIP.execute(new Runnable() {
+            @Override
+            public void run() {
+                a.awaitFocus(1500);
+                Actions.sendClipboard(a, Clip.read(a, true), new Actions.Report() {
+                    @Override public void say(String msg) { a.toast(msg); }
+                });
+            }
+        });
     }
 }

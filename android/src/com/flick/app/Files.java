@@ -8,7 +8,9 @@ import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
+import android.os.CancellationSignal;
 import android.os.Environment;
+import android.os.OperationCanceledException;
 import android.provider.MediaStore;
 import android.webkit.MimeTypeMap;
 
@@ -19,9 +21,11 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -56,9 +60,24 @@ final class Files {
     static boolean allowed(File f) {
         try {
             String p = f.getCanonicalPath();
-            String r = root().getCanonicalPath();
+            String r = rootReal();
             return p.equals(r) || p.startsWith(r + "/") || p.startsWith("/storage/");
         } catch (Throwable e) { return false; }
+    }
+
+    private static volatile String[] rootReal;          // {root(), its real path}
+
+    /**
+     * root()'s real path (after links), worked out once: allowed() runs for every file of a send, thumbnail and
+     * listing, and each real path is a trip to the file system per folder in it.
+     */
+    static String rootReal() throws IOException {
+        File r = root();
+        String[] k = rootReal;
+        if (k != null && k[0].equals(r.getPath())) return k[1];
+        String real = r.getCanonicalPath();
+        rootReal = new String[]{r.getPath(), real};
+        return real;
     }
 
     // ------------------------------------------------------------ JSON helpers
@@ -133,7 +152,10 @@ final class Files {
     }
 
     // ------------------------------------------------------------ folders
-    static String listDir(Context c, String path) {
+    static String listDir(Context c, String path) { return listDir(c, path, null); }
+
+    /** cancel: a newer listing made this one pointless (it then throws OperationCanceledException), or null. */
+    static String listDir(Context c, String path, CancellationSignal cancel) {
         JSONObject out = new JSONObject();
         try {
             File d = path == null || path.length() == 0 ? root() : new File(path);
@@ -141,6 +163,7 @@ final class Files {
             File[] kids = d.listFiles();
             JSONArray items = new JSONArray();
             if (kids != null) {
+                stop(cancel);
                 ArrayList<File> dirs = new ArrayList<File>(), files = new ArrayList<File>();
                 for (File k : kids) {
                     if (k.getName().startsWith(".") || k.getName().endsWith(PART)) continue;   // hidden, or a download still arriving
@@ -151,64 +174,98 @@ final class Files {
                 });
                 final HashMap<File, Long> mt = new HashMap<File, Long>();
                 for (File f : files) mt.put(f, f.lastModified());
+                stop(cancel);
                 Collections.sort(files, new Comparator<File>() {
                     @Override public int compare(File a, File b) { long x = mt.get(a), y = mt.get(b); return x == y ? 0 : (x > y ? -1 : 1); }
                 });
-                Map<String, long[]> media = files.isEmpty() ? new HashMap<String, long[]>() : mediaInDir(c, d);
+                Map<String, long[]> media = files.isEmpty() ? new HashMap<String, long[]>() : mediaInDir(c, d, cancel);
                 for (File k : dirs) items.put(dirJson(k));
+                stop(cancel);
                 for (File f : files) items.put(fileJson(f, media.get(f.getPath()), mt.get(f)));
             }
-            boolean isRoot = d.getCanonicalPath().equals(root().getCanonicalPath());
+            boolean isRoot = d.getCanonicalPath().equals(rootReal());
             out.put("path", d.getPath());
             out.put("name", isRoot ? "Phone storage" : d.getName());
             out.put("parent", isRoot || d.getParentFile() == null || !allowed(d.getParentFile()) ? JSONObject.NULL : d.getParent());
             out.put("items", items);
             out.put("total", items.length());
+        } catch (OperationCanceledException e) {
+            throw e;
         } catch (Throwable e) {
             try { out.put("error", String.valueOf(e.getMessage())); } catch (Throwable x) { /* ignore */ }
         }
         return out.toString();
     }
 
+    /** Throws OperationCanceledException once cancel (if any) was cancelled. */
+    static void stop(CancellationSignal cancel) { if (cancel != null) cancel.throwIfCanceled(); }
+
     /** MediaStore info (id, w, h, orientation, duration) for media files directly inside a folder. */
-    static Map<String, long[]> mediaInDir(Context c, File d) {
+    static Map<String, long[]> mediaInDir(Context c, File d, CancellationSignal cancel) {
         HashMap<String, long[]> m = new HashMap<String, long[]>();
         String prefix = d.getPath() + "/";
         String sel = "_data LIKE ?";
         String[] args = {escapeLike(prefix) + "%"};
-        readMedia(c, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, true, false, sel, args, prefix, m);
-        readMedia(c, MediaStore.Video.Media.EXTERNAL_CONTENT_URI, false, true, sel, args, prefix, m);
+        readMedia(c, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, true, false, sel, args, prefix, m, cancel);
+        readMedia(c, MediaStore.Video.Media.EXTERNAL_CONTENT_URI, false, true, sel, args, prefix, m, cancel);
         return m;
     }
 
     private static String escapeLike(String s) { return s.replace("%", "\\%").replace("_", "\\_"); }
 
-    private static void readMedia(Context c, Uri uri, boolean image, boolean video, String sel, String[] args, String prefix, Map<String, long[]> out) {
+    /** MediaStore's paths (_data) of these items of one type (mt: 1 image, 2 audio, 3 video), by id. */
+    static Map<Long, String> mediaPaths(Context c, int mt, Collection<Long> ids) {
+        HashMap<Long, String> out = new HashMap<Long, String>();
+        Uri base = mt == 1 ? MediaStore.Images.Media.EXTERNAL_CONTENT_URI : mt == 3 ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                : mt == 2 ? MediaStore.Audio.Media.EXTERNAL_CONTENT_URI : null;
+        if (base == null || ids.isEmpty()) return out;
+        StringBuilder in = new StringBuilder();
+        String[] args = new String[ids.size()];
+        int i = 0;
+        for (Long id : ids) { in.append(i == 0 ? "?" : ",?"); args[i++] = String.valueOf(id); }
+        Cursor cur = null;
+        try {
+            cur = c.getContentResolver().query(base, new String[]{"_id", "_data"}, "_id IN (" + in + ")", args, null);
+            while (cur != null && cur.moveToNext()) out.put(cur.getLong(0), cur.getString(1));
+        } catch (Throwable e) { /* none known: the ids aren't used */ } finally { if (cur != null) cur.close(); }
+        return out;
+    }
+
+    private static void readMedia(Context c, Uri uri, boolean image, boolean video, String sel, String[] args, String prefix,
+                                  Map<String, long[]> out, CancellationSignal cancel) {
         ArrayList<String> proj = new ArrayList<String>(Arrays.asList("_id", "_data", "width", "height"));
         if (image || Build.VERSION.SDK_INT >= 29) proj.add("orientation");
         if (video) proj.add("duration");
         Cursor cur = null;
         try {
-            cur = c.getContentResolver().query(uri, proj.toArray(new String[0]), sel + " ESCAPE '\\'", args, null);
+            cur = c.getContentResolver().query(uri, proj.toArray(new String[0]), sel + " ESCAPE '\\'", args, null, cancel);
             if (cur == null) return;
             int iId = cur.getColumnIndex("_id"), iData = cur.getColumnIndex("_data"), iW = cur.getColumnIndex("width"), iH = cur.getColumnIndex("height");
             int iO = cur.getColumnIndex("orientation"), iD = cur.getColumnIndex("duration");
-            while (cur.moveToNext()) {
+            for (int k = 0; cur.moveToNext(); k++) {
+                if ((k & 255) == 0) stop(cancel);
                 String p = cur.getString(iData);
                 if (p == null || !p.startsWith(prefix) || p.indexOf('/', prefix.length()) >= 0) continue;
                 out.put(p, new long[]{cur.getLong(iId), cur.getLong(iW), cur.getLong(iH), iO >= 0 ? cur.getLong(iO) : 0, iD >= 0 ? cur.getLong(iD) : 0, image ? 1 : 3});
             }
+        } catch (OperationCanceledException e) {
+            throw e;
         } catch (Throwable e) { /* ignore */ } finally { if (cur != null) cur.close(); }
     }
 
     // ------------------------------------------------------------ categories (MediaStore)
-    static String query(Context c, String cat, int offset, int limit) { return query(c, cat, offset, limit, null, null); }
+    static String query(Context c, String cat, int offset, int limit) { return query(c, cat, offset, limit, null, null, null); }
+
+    static String query(Context c, String cat, int offset, int limit, String sort, String q) {
+        return query(c, cat, offset, limit, sort, q, null);
+    }
 
     /**
      * A page of a category. sort: "date-desc" (newest first, the default), "date-asc", "name-asc", "name-desc",
      * "size-asc", "size-desc", "type-asc" or "type-desc"; q: only files whose name contains each of its words.
+     * cancel: a newer listing made this one pointless (it then throws OperationCanceledException), or null.
      */
-    static String query(Context c, String cat, int offset, int limit, String sort, String q) {
+    static String query(Context c, String cat, int offset, int limit, String sort, String q, CancellationSignal cancel) {
         JSONObject out = new JSONObject();
         Cursor cur = null;
         try {
@@ -252,19 +309,35 @@ final class Files {
             if (video || audio || Build.VERSION.SDK_INT >= 29) proj.add("duration");
             if (files) proj.add("media_type");
             String[] cols = proj.toArray(new String[0]);
-            try { cur = c.getContentResolver().query(uri, cols, sel, args, orderBy(sort, true)); }
-            catch (IllegalArgumentException e) { cur = c.getContentResolver().query(uri, cols, sel, args, orderBy(sort, false)); }   // (a provider that refuses COLLATE)
+            ContentResolver cr = c.getContentResolver();
+            // Android 11 and newer: MediaStore returns just the page (LIMIT/OFFSET); before, every match comes back
+            // and the page is read out of them (each page walked the whole result again)
+            int from = Build.VERSION.SDK_INT >= 30 ? offset : -1;
+            String order = orderBy(sort, true);
+            try { cur = run(cr, uri, cols, sel, args, order, from, limit, cancel); }
+            catch (IllegalArgumentException e) {   // (a provider that refuses COLLATE)
+                order = orderBy(sort, false);
+                cur = run(cr, uri, cols, sel, args, order, from, limit, cancel);
+            }
+            boolean paged = false;
+            if (from >= 0 && cur != null) {
+                int how = applied(cur, limit);
+                if (how == 1 && offset > 0) { cur.close(); cur = null; cur = run(cr, uri, cols, sel, args, order, -1, limit, cancel); }
+                paged = how == 2 || (how == 1 && offset == 0);
+            }
             JSONArray items = new JSONArray();
             int total = 0;
             if (cur != null) {
-                total = cur.getCount();
+                int rows = cur.getCount();
+                total = rows;
                 int iId = cur.getColumnIndex("_id"), iData = cur.getColumnIndex("_data"), iName = cur.getColumnIndex("_display_name");
                 int iSize = cur.getColumnIndex("_size"), iDate = cur.getColumnIndex("date_modified"), iMime = cur.getColumnIndex("mime_type");
                 int iW = cur.getColumnIndex("width"), iH = cur.getColumnIndex("height"), iO = cur.getColumnIndex("orientation");
                 int iDur = cur.getColumnIndex("duration"), iMt = cur.getColumnIndex("media_type");
-                if (offset > 0 && !cur.moveToPosition(offset - 1)) { /* past the end */ }
+                if (!paged && offset > 0 && !cur.moveToPosition(offset - 1)) { /* past the end */ }
                 int n = 0;
                 while (n < limit && cur.moveToNext()) {
+                    if ((n & 63) == 0) stop(cancel);
                     String p = cur.getString(iData);
                     if (p == null) continue;
                     String name = iName >= 0 && cur.getString(iName) != null ? cur.getString(iName) : new File(p).getName();
@@ -293,14 +366,69 @@ final class Files {
                     items.put(o);
                     n++;
                 }
+                if (paged) total = totalOf(cr, uri, sel, args, cur, offset, rows, limit, cancel);
             }
             out.put("items", items);
             out.put("total", total);
             out.put("more", offset + items.length() < total);
+        } catch (OperationCanceledException e) {
+            throw e;
         } catch (Throwable e) {
             try { out.put("error", String.valueOf(e.getMessage())); out.put("items", new JSONArray()); } catch (Throwable x) { /* ignore */ }
         } finally { if (cur != null) cur.close(); }
         return out.toString();
+    }
+
+    /** The query; offset >= 0 asks for the page as LIMIT/OFFSET (a provider that takes them returns just those rows). */
+    private static Cursor run(ContentResolver cr, Uri uri, String[] cols, String sel, String[] args, String order, int offset,
+                              int limit, CancellationSignal cancel) {
+        if (offset < 0) return cr.query(uri, cols, sel, args, order, cancel);
+        android.os.Bundle b = new android.os.Bundle();
+        b.putString(ContentResolver.QUERY_ARG_SQL_SELECTION, sel);
+        if (args != null) b.putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, args);
+        b.putString(ContentResolver.QUERY_ARG_SQL_SORT_ORDER, order);
+        b.putInt(ContentResolver.QUERY_ARG_LIMIT, limit);
+        b.putInt(ContentResolver.QUERY_ARG_OFFSET, offset);
+        return cr.query(uri, cols, b, cancel);
+    }
+
+    /**
+     * What a cursor run() asked a page of holds: 2 just the page, 1 the first rows (only the LIMIT was applied), 0 every
+     * match. The provider says which arguments it applied (MediaStore on Android 11+ takes both); more rows than the
+     * page means none.
+     */
+    private static int applied(Cursor cur, int limit) {
+        if (cur.getCount() > limit) return 0;
+        android.os.Bundle x = cur.getExtras();
+        String[] did = x == null ? null : x.getStringArray(ContentResolver.EXTRA_HONORED_ARGS);
+        if (did == null) return 2;
+        List<String> l = Arrays.asList(did);
+        return !l.contains(ContentResolver.QUERY_ARG_LIMIT) ? 0 : l.contains(ContentResolver.QUERY_ARG_OFFSET) ? 2 : 1;
+    }
+
+    private static final Object COUNTED = new Object();
+    private static String countedKey;                    // the query last counted, and how many matched (COUNTED)
+    private static int counted;
+
+    /**
+     * How many match, for a paged query: known from the page itself when it is the last one; else counted, once per
+     * query (later pages use that count while it still says there is more).
+     */
+    private static int totalOf(ContentResolver cr, Uri uri, String sel, String[] args, Cursor page, int offset, int rows,
+                               int limit, CancellationSignal cancel) {
+        if (rows < limit) return offset + rows;
+        android.os.Bundle x = page.getExtras();
+        int said = x == null ? -1 : x.getInt(ContentResolver.EXTRA_TOTAL_COUNT, -1);   // (a provider may say)
+        if (said >= 0) return Math.max(offset + rows, said);
+        String key = uri + "\n" + sel + "\n" + (args == null ? "" : Arrays.toString(args));
+        synchronized (COUNTED) { if (offset > 0 && key.equals(countedKey) && counted > offset + rows) return counted; }
+        Cursor k = null;
+        try {
+            k = cr.query(uri, new String[]{"_id"}, sel, args, null, cancel);
+            int n = Math.max(offset + rows, k == null ? 0 : k.getCount());
+            synchronized (COUNTED) { countedKey = key; counted = n; }
+            return n;
+        } finally { if (k != null) k.close(); }
     }
 
     /** The ORDER BY for a query() sort (only these fixed clauses; nocase: names A to Z whatever their case). */

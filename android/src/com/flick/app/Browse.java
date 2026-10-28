@@ -17,7 +17,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -189,13 +191,19 @@ final class Browse {
         if (a == null) { answer(c, pcId, error(id, "bad")); return; }
         JSONObject batch = new JSONObject();
         int n = Math.min(a.length(), THUMBS_MAX), inBatch = 0;
+        Map<Long, String>[] media = mediaOf(c, a, n);
         for (int i = 0; i < n; i++) {
             if (thumbGen.get() != gen || !Features.browse(c)) return;      // a newer page was asked for, or browsing went off
             JSONObject x = a.optJSONObject(i);
             if (x == null) continue;
             String path = x.optString("path", "");
             if (!readable(new File(path), false)) continue;
-            String url = small(c, path, x.optLong("mtime", 0), x.optLong("mid", 0), x.optInt("mt", 0));
+            // the MediaStore id comes from the PC: used only when it is that file's (else it could be any photo's,
+            // hidden ones too); the file's own date keys the cache, not the PC's
+            long mid = x.optLong("mid", 0);
+            int mt = x.optInt("mt", 0);
+            if (mid > 0 && (mt < 1 || mt > 3 || !path.equals(media[mt].get(mid)))) mid = 0;
+            String url = small(c, path, 0, mid, mt);
             if (url == null) continue;
             batch.put(path, url);
             if (++inBatch == 8 && i < n - 1) {
@@ -212,6 +220,21 @@ final class Browse {
         b.put("thumbs", batch);
         b.put("last", true);
         answer(c, pcId, b);
+    }
+
+    /** MediaStore's paths of the ids the PC listed (one lookup per type), by type (1 image, 2 audio, 3 video) and id. */
+    @SuppressWarnings("unchecked")
+    private static Map<Long, String>[] mediaOf(Context c, JSONArray a, int n) {
+        Map<Long, String>[] out = new Map[4];
+        for (int mt = 1; mt <= 3; mt++) {
+            HashSet<Long> ids = new HashSet<Long>();
+            for (int i = 0; i < n; i++) {
+                JSONObject x = a.optJSONObject(i);
+                if (x != null && x.optInt("mt", 0) == mt && x.optLong("mid", 0) > 0) ids.add(x.optLong("mid", 0));
+            }
+            out[mt] = Files.mediaPaths(c, mt, ids);
+        }
+        return out;
     }
 
     /** A small JPEG (THUMB_PX at most) of the file's cached thumbnail, as a data: URL, or null. */

@@ -107,7 +107,7 @@ final class ClipHistory {
     /** Sends an entry to the PC the app uses (POST /api/clip); r says how it went. */
     static void send(Context ctx, final String id, final Actions.Report r) {
         final Context c = ctx.getApplicationContext();
-        Bg.run("send from clipboard history", new Runnable() {
+        Bg.send("send from clipboard history", new Runnable() {
             @Override
             public void run() {
                 PcClient.Target t = null;

@@ -81,17 +81,71 @@ final class Clip {
                     }
                 }
             }
-            CharSequence t = it.getText();
-            if (t == null && it.getHtmlText() != null) { try { t = it.coerceToText(c); } catch (Throwable e) { /* none */ } }
-            if (t == null && u != null && mimeOf(c, u, d).startsWith("text/")) { try { t = it.coerceToText(c); } catch (Throwable e) { /* none */ } }
-            if (t == null || t.length() == 0) return o;
+            String t = textOf(c, it, u, d);
+            if (t == null) return o;
             o.put("kind", "text");
-            o.put("text", cut(t.toString(), MAX_TEXT));
+            o.put("text", t);
             if (fromPc) o.put("fromPc", true);
         } catch (Throwable e) {
             Bg.warn("clipboard read", e);
         }
         return o;
+    }
+
+    /** The item's text (at most MAX_TEXT), or null. */
+    private static String textOf(Context c, ClipData.Item it, Uri u, ClipDescription d) {
+        CharSequence t = it.getText();
+        if (t == null && it.getHtmlText() != null) { try { t = it.coerceToText(c); } catch (Throwable e) { /* none */ } }
+        if (t == null && u != null && mimeOf(c, u, d).startsWith("text/")) { try { t = it.coerceToText(c); } catch (Throwable e) { /* none */ } }
+        return t == null || t.length() == 0 ? null : cut(t.toString(), MAX_TEXT);
+    }
+
+    /**
+     * What grab() got, cheaply (no picture is read or converted): {kind: "text" | "image" | "none", id, hash (text
+     * only), fromPc, sensitive} as describe() would say, without the content. id names this clipboard: text by its
+     * SHA-256 (hash, as sha256() makes it), a picture by when it was copied and its address ("" when Android doesn't
+     * say when: then it can't be told apart from the last one).
+     */
+    static JSONObject peek(Context c, ClipData cd, boolean allowSensitive) {
+        JSONObject o = new JSONObject();
+        try {
+            o.put("kind", "none");
+            if (cd == null || cd.getItemCount() == 0) return o;
+            ClipDescription d = cd.getDescription();
+            PersistableBundle x = d == null ? null : d.getExtras();
+            if (x != null && x.getBoolean(SENSITIVE, false)) {
+                o.put("sensitive", true);
+                if (!allowSensitive) return o;
+            }
+            if (x != null && x.getBoolean(FROM_PC, false)) o.put("fromPc", true);
+            ClipData.Item it = cd.getItemAt(0);
+            Uri u = it.getUri();
+            if (u != null && ((d != null && d.hasMimeType("image/*")) || mimeOf(c, u, d).startsWith("image/"))) {
+                long at = d == null ? 0 : d.getTimestamp();
+                o.put("kind", "image");
+                o.put("id", at > 0 ? "i:" + at + ":" + u : "");
+                return o;
+            }
+            String t = textOf(c, it, u, d);
+            if (t == null) return o;
+            String h = sha256(t);
+            o.put("kind", "text");
+            o.put("hash", h);
+            o.put("id", "t:" + h);
+        } catch (Throwable e) {
+            Bg.warn("clipboard read", e);
+        }
+        return o;
+    }
+
+    /** Hex SHA-256 of s's UTF-8, the way Bridge.sha256 (the page's hash) makes it. */
+    static String sha256(String s) {
+        try {
+            byte[] h = java.security.MessageDigest.getInstance("SHA-256").digest(s.getBytes("UTF-8"));
+            StringBuilder b = new StringBuilder(64);
+            for (byte x : h) b.append(String.format("%02x", x));
+            return b.toString();
+        } catch (Throwable e) { return ""; }
     }
 
     /** Puts the PC's clipboard ({kind:text,text} / {kind:image,png}) on the phone's. Returns the kind, or null. */
@@ -156,6 +210,12 @@ final class Clip {
     /** The image at u as base64 PNG of at most MAX_PNG bytes (made smaller if needed), or null. */
     static String png(ContentResolver cr, Uri u, String mime) {
         try {
+            // a file:// address on the clipboard would be read with Flick's own rights: only from shared storage
+            if (ContentResolver.SCHEME_FILE.equals(u.getScheme())) {
+                File f = Library.sharedFile(u);
+                if (f == null) return null;
+                u = Uri.fromFile(f);
+            }
             if ("image/png".equals(mime)) {
                 byte[] raw = read(cr, u, MAX_PNG + 1);
                 if (raw != null && raw.length <= MAX_PNG && isPng(raw)) return Base64.encodeToString(raw, Base64.NO_WRAP);
