@@ -39,6 +39,21 @@
   }
   A.now = () => (ctx ? ctx.currentTime : 0);
 
+  // Once nothing has played for a moment (and no hum is held) the context is suspended: left running it renders
+  // silence all the time, an audio thread busy for nothing and the sound device kept awake. The next sound resumes it.
+  let playsUntil = 0, drones = 0, idleT = null;
+  function playing(end) {
+    playsUntil = Math.max(playsUntil, end);
+    clearTimeout(idleT);
+    idleT = setTimeout(rest, Math.max(0, playsUntil - ctx.currentTime) * 1000 + 1600);   // (+ the room's echo)
+  }
+  function rest() {
+    idleT = null;
+    if (!ctx || drones > 0 || ctx.state !== 'running') return;
+    if (ctx.currentTime < playsUntil + 1.5) { playing(playsUntil); return; }
+    ctx.suspend().catch(() => {});
+  }
+
   function route(node, pan, verb) {
     let n = node;
     if (pan && ctx.createStereoPanner) { const p = ctx.createStereoPanner(); p.pan.value = Math.max(-1, Math.min(1, pan)); n.connect(p); n = p; }
@@ -65,6 +80,7 @@
     src.connect(f).connect(g);
     route(g, o.pan, o.verb);
     src.start(t, Math.random() * 1.5); src.stop(t + (o.dur || 0.3) + 0.1);
+    playing(t + (o.dur || 0.3) + 0.1);
   };
   // oscillator with pitch sweep
   A.tone = function (o) {
@@ -80,6 +96,7 @@
     if (o.lp) { const f = c.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = o.lp; n = g.connect(f); }
     route(n, o.pan, o.verb);
     osc.start(t); osc.stop(t + (o.dur || 0.3) + 0.1);
+    playing(t + (o.dur || 0.3) + 0.1);
   };
   // a held voice whose level/pitch are driven every frame (approach hums)
   A.drone = function (o) {
@@ -91,6 +108,7 @@
     f.connect(g);
     route(g, 0, o.verb);
     let alive = true;
+    drones++;
     return {
       set(level, pitch) {
         if (!alive) return;
@@ -103,6 +121,8 @@
         const t = c.currentTime;
         g.gain.setTargetAtTime(0.0001, t, 0.06);
         for (const s of oscs) s.stop(t + 0.4);
+        drones--;
+        playing(t + 0.4);
       },
     };
   };
