@@ -431,13 +431,8 @@ final class Wire {
 
     /** A request with a small body (or none), answered in full. */
     static Answer call(Link l, String method, String target, byte[] body, String type, int readMs) throws IOException {
-        return call(l, method, target, body, type, readMs, false);
-    }
-
-    /** fresh: over a new connection, for an answer the PC may take long to begin (see Have). */
-    static Answer call(Link l, String method, String target, byte[] body, String type, int readMs, boolean fresh) throws IOException {
         for (int attempt = 0; ; attempt++) {
-            Call c = Call.open(l, method, target, body == null ? NO_BODY : body.length, type, readMs, null, fresh || attempt > 0);
+            Call c = Call.open(l, method, target, body == null ? NO_BODY : body.length, type, readMs, null, attempt > 0);
             // a kept connection to a PC that vanished meanwhile would stay silent until the read timeout: given a few
             // seconds only, then the request goes once more over a new one (which fails at once if the PC is gone)
             if (c.reused) c.firstMs = Math.min(readMs, FIRST_MS);
@@ -457,11 +452,7 @@ final class Wire {
     static Answer get(Link l, String target, int readMs) throws IOException { return call(l, "GET", target, null, null, readMs); }
 
     static Answer postJson(Link l, String target, String json, int readMs) throws IOException {
-        return postJson(l, target, json, readMs, false);
-    }
-
-    static Answer postJson(Link l, String target, String json, int readMs, boolean fresh) throws IOException {
-        return call(l, "POST", target, json.getBytes(UTF8), "application/json; charset=utf-8", readMs, fresh);
+        return call(l, "POST", target, json.getBytes(UTF8), "application/json; charset=utf-8", readMs);
     }
 
     // ------------------------------------------------------------ reading
