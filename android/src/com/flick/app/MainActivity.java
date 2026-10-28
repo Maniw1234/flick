@@ -18,6 +18,8 @@ import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.provider.Settings;
 import android.util.Log;
+import android.util.TypedValue;
+import android.view.Gravity;
 import android.view.RoundedCorner;
 import android.view.View;
 import android.view.Window;
@@ -34,6 +36,7 @@ import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.TextView;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -73,7 +76,16 @@ public class MainActivity extends Activity {
         lock = new AppLock(this);
         setupWindow();
 
-        web = new WebView(this);
+        try {
+            web = new WebView(this);
+        } catch (Throwable e) {
+            // Android's WebView is missing, turned off or being updated this very moment: said so, instead of Flick
+            // closing at once (and again after "Open Flick" on the crash report)
+            Log.w(TAG, "no WebView: " + e);
+            lock = null;
+            noWebView();
+            return;
+        }
         web.setBackgroundColor(Color.BLACK);
         web.setOverScrollMode(View.OVER_SCROLL_NEVER);
         web.setVerticalScrollBarEnabled(false);
@@ -166,6 +178,20 @@ public class MainActivity extends Activity {
             }
         });
         Thumbs.trimSoon(this);                       // the thumbnail cache stays a reasonable size
+    }
+
+    /** What shows when there's no WebView to show the page with; a tap tries again. */
+    private void noWebView() {
+        TextView t = new TextView(this);
+        t.setText("Flick shows its screen with Android System WebView, and that isn't available right now: it may be "
+                + "updating, or turned off.\n\nTap to try again, or turn it on in Settings › Apps › Android System WebView.");
+        t.setTextColor(Color.WHITE);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        t.setGravity(Gravity.CENTER);
+        int pad = Math.round(32 * getResources().getDisplayMetrics().density);
+        t.setPadding(pad, pad, pad, pad);
+        t.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { recreate(); } });
+        setContentView(t);
     }
 
     @Override
@@ -292,6 +318,11 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 30) {
             int[] tb = Api30.insets(in);
             top = tb[0]; bottom = tb[1];
+            // Drawn edge to edge, Flick gets no adjustResize: the keyboard covered the page and the field being typed
+            // in. The page is made shorter by the keyboard instead (the field then scrolls into view, as adjustResize
+            // did), and the bars' inset under the keyboard no longer counts.
+            keyboard(tb[2]);
+            bottom = Math.max(0, bottom - tb[2]);
         } else {
             top = in.getSystemWindowInsetTop();
             bottom = in.getSystemWindowInsetBottom();
@@ -312,6 +343,12 @@ public class MainActivity extends Activity {
         } catch (Throwable e) { /* ignore */ }
     }
 
+    /** The keyboard's height over the bottom of the window (px): the page's view (with the lock's cover) ends above it. */
+    private void keyboard(int px) {
+        View box = web == null || !(web.getParent() instanceof View) ? null : (View) web.getParent();
+        if (box != null && box.getPaddingBottom() != px) box.setPadding(0, 0, 0, px);
+    }
+
     @TargetApi(30)
     static final class Api30 {
         static void edgeToEdge(Window w) {
@@ -321,9 +358,10 @@ public class MainActivity extends Activity {
             WindowInsetsController c = w.getInsetsController();
             if (c != null) c.setSystemBarsAppearance(0, WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
         }
+        /** {top, bottom} of the bars and the cutout, and how far the keyboard reaches up from the bottom (0: none). */
         static int[] insets(WindowInsets in) {
             Insets i = in.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
-            return new int[]{i.top, i.bottom};
+            return new int[]{i.top, i.bottom, in.getInsets(WindowInsets.Type.ime()).bottom};
         }
     }
 
@@ -344,6 +382,9 @@ public class MainActivity extends Activity {
                 ArrayList<String> q;
                 synchronized (queue) { q = new ArrayList<String>(queue); queue.clear(); }
                 for (String s : q) evalScript(s);
+                // ringing since before this page was there (opened from the ringing notification, say): its event went
+                // to no page, and the page shows Stop only when told
+                if (Ringer.ringing()) evalScript(script("{\"t\":\"ring\",\"on\":true}"));
             }
         });
     }
@@ -649,21 +690,46 @@ public class MainActivity extends Activity {
     private void importNow(ArrayList<Uri> uris, String[] text) {
         JSONArray added = new JSONArray();
         Library lib = Library.get(this);
-        if (uris != null) for (Uri u : uris) {
-            try { added.put(lib.importUri(u)); } catch (Throwable e) { Log.w(TAG, "import failed " + e); }
+        final int n = (uris == null ? 0 : uris.size()) + (text != null ? 1 : 0);
+        // a big video takes a while to copy in: said when it does, so the share doesn't look lost
+        Runnable slow = new Runnable() {
+            @Override public void run() { toast(n == 1 ? "Adding to Flick…" : "Adding " + n + " files to Flick…"); }
+        };
+        ui.postDelayed(slow, 1500);
+        int failed = 0;
+        boolean full = false;
+        try {
+            if (uris != null) for (Uri u : uris) {
+                try { added.put(lib.importUri(u)); }
+                catch (Throwable e) { failed++; full |= noSpace(e); Log.w(TAG, "import failed " + e); }
+            }
+            if (text != null) {
+                try {
+                    String title = text[1] != null && text[1].trim().length() > 0 ? text[1].trim() : "Shared text";
+                    added.put(lib.importText(text[0], title.length() > 60 ? title.substring(0, 60) : title));
+                } catch (Throwable e) { failed++; full |= noSpace(e); Log.w(TAG, "import failed " + e); }
+            }
+        } finally {
+            ui.removeCallbacks(slow);
         }
-        if (text != null) {
+        if (added.length() > 0) {
             try {
-                String title = text[1] != null && text[1].trim().length() > 0 ? text[1].trim() : "Shared text";
-                added.put(lib.importText(text[0], title.length() > 60 ? title.substring(0, 60) : title));
+                JSONObject o = new JSONObject();
+                o.put("t", "added");
+                o.put("items", added);
+                emit(o.toString());
             } catch (Throwable e) { /* ignore */ }
         }
-        if (added.length() == 0) return;
-        try {
-            JSONObject o = new JSONObject();
-            o.put("t", "added");
-            o.put("items", added);
-            emit(o.toString());
-        } catch (Throwable e) { /* ignore */ }
+        // what couldn't be taken in (the sharing app didn't let Flick read it, no room): said, not just logged
+        if (failed > 0) {
+            toast(full ? "Not enough space on this phone to add " + (failed == 1 ? "it" : failed + " files") + " to Flick"
+                    : failed < n ? "Couldn't add " + failed + " of the files to Flick"
+                    : n == 1 ? "Couldn't add that to Flick" : "Couldn't add those files to Flick");
+        }
+    }
+
+    private static boolean noSpace(Throwable e) {
+        String m = String.valueOf(e.getMessage());
+        return m.contains("ENOSPC") || m.contains("No space left");
     }
 }

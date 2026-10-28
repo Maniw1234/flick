@@ -95,7 +95,7 @@ final class CrashReport {
         String v = "?";
         try {
             PackageInfo pi = c.getPackageManager().getPackageInfo(c.getPackageName(), 0);
-            v = pi.versionName + " (" + (Build.VERSION.SDK_INT >= 28 ? pi.getLongVersionCode() : pi.versionCode) + ")";
+            v = pi.versionName + " (" + pi.getLongVersionCode() + ")";       // (Flick needs Android 9: API 28 has it)
         } catch (Throwable e) { /* ignore */ }
         return "Flick " + v + " on " + Build.MANUFACTURER + " " + Build.MODEL + ", Android " + Build.VERSION.RELEASE + " (SDK "
                 + Build.VERSION.SDK_INT + "), " + new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date());

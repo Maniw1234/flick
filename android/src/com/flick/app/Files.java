@@ -204,8 +204,10 @@ final class Files {
     static Map<String, long[]> mediaInDir(Context c, File d, CancellationSignal cancel) {
         HashMap<String, long[]> m = new HashMap<String, long[]>();
         String prefix = d.getPath() + "/";
-        String sel = "_data LIKE ?";
-        String[] args = {escapeLike(prefix) + "%"};
+        // only what is directly in it: "under it" was every photo and video on the phone for Phone storage, each row
+        // copied over from MediaStore and read, to keep the few in the folder itself
+        String sel = "_data LIKE ? ESCAPE '\\' AND _data NOT LIKE ? ESCAPE '\\'";
+        String[] args = {escapeLike(prefix) + "%", escapeLike(prefix) + "%/%"};
         readMedia(c, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, true, false, sel, args, prefix, m, cancel);
         readMedia(c, MediaStore.Video.Media.EXTERNAL_CONTENT_URI, false, true, sel, args, prefix, m, cancel);
         return m;
@@ -238,7 +240,7 @@ final class Files {
         if (video) proj.add("duration");
         Cursor cur = null;
         try {
-            cur = c.getContentResolver().query(uri, proj.toArray(new String[0]), sel + " ESCAPE '\\'", args, null, cancel);
+            cur = c.getContentResolver().query(uri, proj.toArray(new String[0]), sel, args, null, cancel);
             if (cur == null) return;
             int iId = cur.getColumnIndex("_id"), iData = cur.getColumnIndex("_data"), iW = cur.getColumnIndex("width"), iH = cur.getColumnIndex("height");
             int iO = cur.getColumnIndex("orientation"), iD = cur.getColumnIndex("duration");

@@ -16,6 +16,7 @@ import org.json.JSONObject;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
+import java.net.Proxy;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.List;
@@ -173,7 +174,8 @@ final class BtLink implements Runnable {
     private static JSONObject hello(int port, BluetoothDevice d) {
         HttpURLConnection c = null;
         try {
-            c = (HttpURLConnection) new URL("http://127.0.0.1:" + port + "/api/hello").openConnection();
+            // straight to the link's local port, never through a proxy the network has (see UpdateFetch.open)
+            c = (HttpURLConnection) new URL("http://127.0.0.1:" + port + "/api/hello").openConnection(Proxy.NO_PROXY);
             c.setConnectTimeout(8000);
             c.setReadTimeout(12000);
             if (c.getResponseCode() != 200) return null;

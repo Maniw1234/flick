@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
+import java.net.Proxy;
 import java.net.URL;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -29,7 +30,7 @@ final class UpdateFetch {
         File part = new File(dest.getPath() + ".part");
         HttpURLConnection c = null;
         try {
-            c = (HttpURLConnection) new URL(url).openConnection();
+            c = open(new URL(url));
             c.setConnectTimeout(5000);
             c.setReadTimeout(30000);
             c.setUseCaches(false);
@@ -68,6 +69,22 @@ final class UpdateFetch {
         }
     }
 
+    /**
+     * A connection to url. The PC's address on this phone (the local port of the encrypted link or of the Bluetooth
+     * link) is reached directly: Android gives an app its network's proxy for 127.0.0.1 too, and that proxy would get
+     * the request with the pairing token in it (and can't reach this phone's ports anyway). Anything else (GitHub) goes
+     * the way the network says.
+     */
+    static HttpURLConnection open(URL u) throws IOException {
+        return (HttpURLConnection) (local(u.getHost()) ? u.openConnection(Proxy.NO_PROXY) : u.openConnection());
+    }
+
+    /** host is this phone itself (127.x.x.x, localhost, ::1). */
+    static boolean local(String host) {
+        String h = host == null ? "" : host.toLowerCase(java.util.Locale.US);
+        return h.startsWith("127.") || h.equals("localhost") || h.equals("::1") || h.equals("[::1]");
+    }
+
     /** A small text resource (GitHub's "latest release" JSON). */
     static String getText(String url, int max) throws IOException { return getText(url, max, "application/vnd.github+json"); }
 
@@ -75,7 +92,7 @@ final class UpdateFetch {
     static String getText(String url, int max, String accept) throws IOException {
         HttpURLConnection c = null;
         try {
-            c = (HttpURLConnection) new URL(url).openConnection();
+            c = open(new URL(url));
             c.setConnectTimeout(10000);
             c.setReadTimeout(20000);
             c.setUseCaches(false);
