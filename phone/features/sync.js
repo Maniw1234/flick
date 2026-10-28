@@ -19,11 +19,13 @@
     if (s < 86400) { const n = Math.round(s / 3600); return n + (n === 1 ? ' hour ago' : ' hours ago'); }
     return A.fmtWhen(ms);
   }
+  // each folder's name on its own (isolated), so Hebrew or Arabic names next to each other keep their order
+  const iso = (s) => '\u2068' + s + '\u2069';
   function where(path) {
     const root = trim(A.stg.root);
     path = trim(path);
-    if (root && path.indexOf(root + '/') === 0) return ['Phone storage'].concat(path.slice(root.length + 1).split('/').filter(Boolean)).join(' › ');
-    return path;
+    if (root && path.indexOf(root + '/') === 0) return ['Phone storage'].concat(path.slice(root.length + 1).split('/').filter(Boolean)).map(iso).join(' › ');
+    return path.split('/').map((s) => (s ? iso(s) : s)).join('/');
   }
   function whyText(why) {
     why = String(why || '');

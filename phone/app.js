@@ -1139,8 +1139,9 @@
     let sub = '';
     if (V.loading && !V.items.length) sub = '<span class="spin"></span>Loading…';
     else if (inDir && V.path && STG.root && V.path.indexOf(STG.root) === 0 && V.path !== STG.root) {
-      // breadcrumb, e.g. "Phone storage › DCIM › Camera"
-      sub = esc(['Phone storage'].concat(V.path.slice(STG.root.length).split('/').filter(Boolean)).join('  ›  '));
+      // breadcrumb, e.g. "Phone storage › DCIM › Camera": each name on its own, so Hebrew or Arabic folder names next
+      // to each other keep their order (they read as one right-to-left run: the deepest folder first)
+      sub = ['Phone storage'].concat(V.path.slice(STG.root.length).split('/').filter(Boolean)).map((s) => '<bdi>' + esc(s) + '</bdi>').join('  ›  ');
     }
     $('hsub').innerHTML = sub;
     if (SEL.on) renderSelection();
