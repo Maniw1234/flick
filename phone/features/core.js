@@ -9,6 +9,9 @@
     if (text != null) e.textContent = text;
     return e;
   };
+  // the same for a name (a file's, a folder's, what was copied): it takes the direction of its own text, so a Hebrew or
+  // Arabic name reads right to left, its digits and extension in place, and a long one is cut at its end
+  X.nm = function (tag, cls, text) { const e = h(tag, cls, text); e.dir = 'auto'; return e; };
 
   // icons in the style of app.js's ICONS (24 px grid, 1.8 strokes); sheets use them by name
   Object.assign(A.icons, {

@@ -65,7 +65,7 @@
     const ic = h('span', 'fic folder');
     ic.appendChild(A.svgEl(X.SVG.folder));
     const tx = h('span', 'ftx');
-    tx.appendChild(h('b', '', p.name || trim(p.path).split('/').pop()));
+    tx.appendChild(X.nm('b', '', p.name || trim(p.path).split('/').pop()));
     tx.appendChild(h('small', '', 'With ' + (p.pcName || 'your PC') + (p.state !== 'adding' && p.files >= 0 ? ' · ' + files(p.files) : '')));
     const lv = live.get(p.id);
     let state, bad = false;

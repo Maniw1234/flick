@@ -28,7 +28,7 @@
   const xBtn = h('button', 'pvx');
   xBtn.setAttribute('aria-label', 'Close');
   xBtn.appendChild(A.svgEl(X.SVG.close));
-  const tName = h('b'), tSub = h('small');
+  const tName = X.nm('b'), tSub = h('small');
   const tBox = h('div', 'pvt');
   tBox.append(tName, tSub);
   top.append(xBtn, tBox);
@@ -117,7 +117,7 @@
         img.src = th;
         pic.appendChild(img);
       }
-      card.append(pic, h('b', '', it.name));
+      card.append(pic, X.nm('b', '', it.name));
       z.appendChild(card);
     }
   }

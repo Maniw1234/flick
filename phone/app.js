@@ -202,10 +202,19 @@
     const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
     return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0');
   }
+  // cut by what shows as one character (an emoji, a letter with its accent), not by UTF-16 unit: an emoji cut in
+  // half showed as "�"
+  let graph = null;
+  function chars(s) {
+    if (graph === null) { try { graph = new Intl.Segmenter(undefined, { granularity: 'grapheme' }); } catch (e) { graph = false; } }
+    return graph ? Array.from(graph.segment(s), (g) => g.segment) : Array.from(s);
+  }
   function midName(n) {
     n = String(n || '');
     if (n.length <= 18) return n;
-    return n.slice(0, 7) + '...' + n.slice(-8);
+    const c = chars(n);
+    if (c.length <= 18) return n;
+    return c.slice(0, 7).join('') + '...' + c.slice(-8).join('');
   }
   function extOf(n) { const m = /\.([^.]+)$/.exec(n || ''); return m ? m[1].toLowerCase() : ''; }
   function badgeOf(it) {
@@ -1342,6 +1351,7 @@
     const meta = document.createElement('div');
     meta.className = 'meta';
     const n = document.createElement('div'); n.className = 'name'; n.textContent = VIEW.list ? it.name : midName(it.name);
+    n.dir = 'auto';                          // a Hebrew or Arabic name reads right to left (and is cut at its end)
     const i = document.createElement('div'); i.className = 'info';
     i.textContent = it.dir ? (it.count === 1 ? '1 item' : (it.count || 0) + ' items') : it.incoming ? 'Receiving…' : fmtSize(it.size) + ' · ' + fmtWhen(it.mtime || it.added);
     if (VIEW.list) i.textContent = rowInfo(it);       // list rows: size, date and type
@@ -3134,7 +3144,7 @@
       b.className = 'chip pin';
       b.dataset.v = pinCat(p.path);
       b.appendChild(svgEl(HIC.folder));
-      b.appendChild(Object.assign(document.createElement('span'), { textContent: p.name }));
+      b.appendChild(Object.assign(document.createElement('span'), { textContent: p.name, dir: 'auto' }));
       b.classList.toggle('on', V.cat === 'dir' && V.rootCat === b.dataset.v);
       b.onclick = () => { if (b._held) { b._held = false; return; } haptic('soft'); openCat(b.dataset.v); };
       onHold(b, () => pinMenu(p));
