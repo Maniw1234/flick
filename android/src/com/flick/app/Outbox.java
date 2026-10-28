@@ -260,6 +260,7 @@ final class Outbox {
     // ------------------------------------------------------------ tuning (tests shorten some)
     static final int MAX_RUNNING = 2;                     // jobs moving bytes at once (each over several connections)
     static final long PARALLEL_MIN = 8L * 1024 * 1024;    // smaller files go as one part
+    static final int MANY_FILES = 64;                     // this many files go over several streams, however small
     static final int MAX_RESTARTS = 4;
     static final int MAX_REFUSALS = 6;                    // (about a minute of tries, see BACKOFF_MS)
     static volatile long GIVE_UP_MS = 6 * 3600 * 1000L;    // as long as the PC keeps what arrived
@@ -914,7 +915,10 @@ final class Outbox {
             if (j.att == null || (j.sig != null && !j.sig.equals(sig))) { newAttempt(j); j.restarts = Math.max(0, j.restarts - 1); }
             j.sig = sig;
             j.total = b.bytes;
-            if (j.ways == 0) j.ways = !split(j) || b.files < 2 || b.bytes < PARALLEL_MIN ? 1 : Math.min(4, b.files);
+            // several streams for many files, however small they are: each file costs the PC a few disk calls in turn
+            // (opened, written, dated, closed), and streams side by side do them at once (8,000 tiny files: about twice
+            // as fast on the PC)
+            if (j.ways == 0) j.ways = !split(j) || b.files < 2 || (b.bytes < PARALLEL_MIN && b.files < MANY_FILES) ? 1 : Math.min(4, b.files);
         }
         save(j);
         final List<Bundle> streams = b.split(j.ways);
