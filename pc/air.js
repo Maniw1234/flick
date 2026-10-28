@@ -36,6 +36,9 @@ const HAND_MORE_MS = 4000;   // a hand in view while the camera waits for the gr
 const BACK_MS = 700;         // a hand opening in front of the PC puts the files back after this, unless the phone
                              // catches them first (a phone the PC's camera sees too, under the hand)
 const MIN_RUN_MS = 3000;     // less camera time than this left: it rests (a blink of its light helps no one)
+const SEL_LINGER_MS = 60000; // the selection watching goes on this long after the last phone ready to catch went: one
+                             // back meanwhile (after a look at another app) doesn't start it again (on Windows, a
+                             // PowerShell that compiles its helper each time it starts)
 const FACE_WAIT_MS = 120;    // the picked-up card shows at once with its picture if that's ready this soon; else with its
                              // file type, and its picture follows (within THUMB_WAIT_MS)
 const THUMB_WAIT_MS = 1500;
@@ -85,12 +88,17 @@ function attach(o) {
 
   // PC to phone: the phones ready to catch, what's selected, and what a fist picked up
   const phones = new Set();    // devices with Air grab on and Flick open
-  const G = { sel: [], armedAt: 0, armedUntil: 0, armT: null, open: false, held: null, n: 0 };
+  const G = { sel: [], armedAt: 0, armedUntil: 0, armT: null, open: false, held: null, n: 0, selStopT: null };
   const sel = o.selwatch || new SelWatch({ log: o.log });
   sel.on('change', (s) => onSelection(s));
   function watchSelection() {
-    if (phones.size && camOn()) { sel.start(); warm(); }
-    else { sel.stop(); disarm(); closeLater(); }
+    clearTimeout(G.selStopT);
+    if (phones.size && camOn()) { sel.start(); warm(); return; }
+    disarm();
+    closeLater();
+    // (selections made meanwhile turn nothing on: no phone is ready to catch)
+    if (!camOn()) sel.stop();
+    else { G.selStopT = setTimeout(() => { if (!(phones.size && camOn())) sel.stop(); }, SEL_LINGER_MS); if (G.selStopT.unref) G.selStopT.unref(); }
   }
   // a phone ready to grab: the camera window and its hand tracker get ready now (the camera itself stays off), so a
   // grab doesn't wait for them to load
@@ -568,6 +576,7 @@ function attach(o) {
     },
 
     stop() {
+      clearTimeout(G.selStopT);
       sel.stop();
       for (const tid of [...lifted.keys()]) this.cancel(tid);
       if (G.held) drop(G.held, 'Flick closed');
