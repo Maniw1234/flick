@@ -741,6 +741,8 @@ function answerQs(id, accept, why) {
   qs.answer(id, accept, why);
 }
 ipcMain.on('panel:qs-answer', (e, m) => { if (fromPanel(e) && m) answerQs(m.id, !!m.accept); });
+// what a share of only a link or some text is called on its card
+const qsTextName = (texts) => (texts.length === 1 ? (texts[0].type === 2 ? 'Link' : 'Text') : texts.length + ' items');
 function onQsAccepted(m) {
   const tid = 'qs-' + m.id;
   qsTransfers.set(m.id, tid);
@@ -748,7 +750,7 @@ function onQsAccepted(m) {
   const offer = qsOffers.get(m.id);
   qsOffers.delete(m.id);
   const files = (offer && offer.files) || [];
-  t.name = m.files === 1 && files[0] ? files[0].name : m.files + (m.files === 1 ? ' file' : ' files');
+  t.name = m.files === 1 && files[0] ? files[0].name : m.files ? m.files + ' files' : qsTextName((offer && offer.texts) || []);
   log('quick share accepted:', t.name, Math.round(m.total / 1024) + ' KB');
   t.state = 'dropped'; t.upload = 'uploading'; t.seen = Date.now(); t.qs = true;
   // fly in from the phone's side of the screen, like a throw
@@ -772,16 +774,32 @@ async function onQsDone(m) {
   const tid = qsTransfers.get(m.id);
   qsTransfers.delete(m.id);
   const t = tid && transfers.get(tid);
-  const dir = await saveDirNow();
-  fs.mkdirSync(dir, { recursive: true });
-  const placed = [];
+  const who = m.from || 'Quick Share';
+  let dir = null;
+  try { dir = await saveDirNow(); await fs.promises.mkdir(dir, { recursive: true }); }
+  catch (e) { log('quick share: no folder to save in', e.message); dir = null; }
+  // The phone shows the share as sent once it's all here: a file that can't be saved where it belongs is kept in
+  // "Not saved" (see keepUnsaved), never left in the temp folder to be swept away, and the others still go
+  const placed = [], kept = [];
   for (const f of m.files) {
-    const dest = uniquePath(dir, sanitizeName(f.name));
-    try { await placeItem(f.tmpPath, dest); } finally { release(dest); }
+    let dest = null;
+    try {
+      if (!dir) throw new Error('no folder to save in');
+      dest = uniquePath(dir, sanitizeName(f.name));
+      await placeItem(f.tmpPath, dest);
+    } catch (e) {
+      release(dest);
+      log('could not save', f.name, e.message);
+      const k = await keepUnsaved(f.tmpPath, f.name, true);
+      kept.push(k);
+      hist({ dir: 'in', name: f.name, size: 0, ok: false, how: 'quickshare', why: 'save', path: k, deviceName: who });
+      continue;
+    }
+    release(dest);
     const now = new Date(); fs.utimes(dest, now, now, () => {});
     markOfWeb(dest);
     placed.push(dest);
-    hist({ dir: 'in', path: dest, deviceName: m.from || 'Quick Share', how: 'quickshare' });
+    hist({ dir: 'in', path: dest, deviceName: who, how: 'quickshare' });
   }
   for (const x of m.texts) {
     if (!x.value) continue;
@@ -793,12 +811,16 @@ async function onQsDone(m) {
     } catch (e) { log('clipboard write failed', e.message); }
     if (panel) panelSend('panel:note', { text: (m.from || 'Your phone') + ' sent ' + (x.type === 2 ? 'a link' : 'some text') + ', now on your clipboard: ' + x.value.slice(0, 200) });
   }
-  log('quick share saved', placed.length, 'file(s) from', m.from);
-  if (store.openAfter && placed.length === 1) setTimeout(() => openAfterArrival(placed[0]), 900);
+  // (after the note about a link: this one matters more)
+  if (kept.length) toldUnsaved(kept.length === 1 ? path.basename(kept[0]) : kept.length + ' files', kept[kept.length - 1], kept.length > 1);
+  log('quick share saved', placed.length, 'file(s) from', m.from, kept.length ? '(' + kept.length + ' could not be saved)' : '');
+  if (store.openAfter && placed.length === 1 && !kept.length) setTimeout(() => openAfterArrival(placed[0]), 900);
   if (t) {
     t.done = true;
-    const name = placed.length === 1 ? path.basename(placed[0]) : placed.length ? placed.length + ' items' : 'Link copied';
-    fx('saved', { tid, name, where: placed.length ? saveDirLabel() : 'Clipboard' });
+    const texts = m.texts.filter((x) => x.value);
+    if (placed.length) fx('saved', { tid, name: placed.length === 1 ? path.basename(placed[0]) : placed.length + ' items', where: saveDirLabel() });
+    else if (!kept.length && texts.length) fx('saved', { tid, name: qsTextName(texts), note: 'On your clipboard' });
+    else fx('failed', { tid });
     setTimeout(() => transfers.delete(tid), 5000);
   }
 }
@@ -1361,9 +1383,10 @@ async function placeItem(src, dest) {
 
 // A received file (or what's left of a received folder) that couldn't be saved where it belongs. Its phone was told it
 // arrived and won't send it again, so it's never deleted: it goes under its own name into "Not saved" beside where it
-// was staged (the same drive: a rename) and the user is told where. If even that fails it stays where it is.
+// was staged (the same drive: a rename) and the user is told where (quiet: the caller tells, once for several). If
+// even that fails it stays where it is.
 const KEPT_DIR = 'Not saved';
-async function keepUnsaved(src, name) {
+async function keepUnsaved(src, name, quiet) {
   let dest = src;
   try {
     const dir = path.join(path.dirname(src), KEPT_DIR);
@@ -1372,12 +1395,16 @@ async function keepUnsaved(src, name) {
     try { await fs.promises.rename(src, d); dest = d; } finally { release(d); }
   } catch (e) { /* it stays where it is */ }
   log('could not save', name, '- kept in', dest);
+  if (!quiet) toldUnsaved(name, dest);
+  return dest;
+}
+// what couldn't be saved (a name, or "3 files") and where it is now (dest: the last of them)
+function toldUnsaved(what, dest, several) {
   const where = path.dirname(dest);
-  const text = 'Couldn’t save ' + name + ' in ' + saveDirLabel() + '. It’s kept in ' + where + '.';
+  const text = 'Couldn’t save ' + what + ' in ' + saveDirLabel() + '. ' + (several ? 'They’re' : 'It’s') + ' kept in ' + where + '.';
   panelSend('panel:note', { text });
   const show = () => shell.showItemInFolder(dest);
-  if (feats) feats.toast({ title: 'Couldn’t save ' + name, body: 'It’s kept in ' + where, click: show });
-  return dest;
+  if (feats) feats.toast({ title: 'Couldn’t save ' + what, body: (several ? 'They’re' : 'It’s') + ' kept in ' + where, click: show });
 }
 
 async function finalizeBundle(t, dir) {
