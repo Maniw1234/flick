@@ -2612,7 +2612,7 @@
     const it = V.items.find((x) => x.id === card.dataset.id);
     if (!it || it.incoming) return;
     const t = e.touches[0];
-    T = { id: t.identifier, item: it, x0: t.clientX, y0: t.clientY, t0: now(), moved: false };
+    T = { id: t.identifier, item: it, x0: t.clientX, y0: t.clientY, t0: now(), ts: e.timeStamp, moved: false };
     T.lp = setTimeout(() => { if (T && !T.moved) startDrag(null, 'press'); }, 230);
   }, { passive: true });
 
@@ -2648,7 +2648,10 @@
     }
     if (T) {
       clearTimeout(T.lp);
-      const quick = now() - T.t0 < 300 && !T.moved;
+      // how long the finger was down, by the touches' own times: a tap that came while the page was busy for a moment
+      // (a big folder opening, files arriving) is still a tap (timed by when it was handled, it did nothing)
+      const held = e.timeStamp > 0 && T.ts > 0 ? e.timeStamp - T.ts : now() - T.t0;
+      const quick = held < 300 && !T.moved;
       const it = T.item;
       T = null;
       if (quick && it && !it.incoming) {
