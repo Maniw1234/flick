@@ -152,9 +152,13 @@ function checkCustomDir() {
   const d = store.saveDir;
   if (!d || d === 'desktop' || d === 'downloads') return;
   if (customDir.dir !== d) customDir = { dir: d, ok: null };
-  fs.stat(d, (e, st) => { if (customDir.dir === d) { const ok = !e && st.isDirectory(); if (ok !== customDir.ok) { customDir.ok = ok; pushPanelState(); } } });
+  fs.stat(d, (e, st) => {
+    if (customDir.dir !== d) return;
+    const ok = !e && st.isDirectory();
+    if (ok !== customDir.ok) { customDir.ok = ok; pushPanelState(); updateStage(); }
+  });
 }
-setInterval(checkCustomDir, 30000).unref();
+setInterval(() => { checkCustomDir(); updateStage(); }, 30000).unref();
 function saveDirPath() {
   if (store.saveDir === 'desktop') return app.getPath('desktop');
   if (store.saveDir === 'downloads') return app.getPath('downloads');
@@ -178,6 +182,41 @@ function saveDirLabel() {
   if (store.saveDir === 'desktop') return 'Desktop';
   if (store.saveDir === 'downloads') return 'Downloads';
   return path.basename(saveDirPath()) || 'folder';
+}
+
+// Where incoming files are staged until they're complete. Putting a file in place is a rename on the same drive, but
+// from the system's temp folder to a save folder on another drive (D:, a network drive) it would copy every file a
+// second time, with nothing on screen meanwhile. So for a save folder on another drive, files are staged on that drive,
+// in a hidden ".flick-incoming" inside it (made when needed, removed when Flick is done with it); the free-space check
+// before a transfer (server.js _roomFor) then looks at that drive too.
+const TEMP_STAGE = path.join(app.getPath('temp'), 'flick-incoming');
+const QS_STAGE = path.join(app.getPath('temp'), 'flick-quickshare');
+let stage = { save: null, dir: TEMP_STAGE }, stageQ = Promise.resolve();
+const qsStage = () => (stage.dir === TEMP_STAGE ? QS_STAGE : stage.dir);
+function updateStage() {
+  stageQ = stageQ.then(stageFor).catch((e) => log('staging', e.message));
+  return stageQ;
+}
+async function stageFor() {
+  const save = saveDirPath();
+  let dir = TEMP_STAGE;
+  try {
+    const [a, b] = await Promise.all([fs.promises.stat(save), fs.promises.stat(app.getPath('temp'))]);
+    if (a.dev !== b.dev) dir = path.join(save, '.flick-incoming');
+  } catch (e) { /* the save folder can't be reached now: the temp folder it is */ }
+  try {
+    const made = await fs.promises.mkdir(dir, { recursive: true });     // (again, if someone deleted it)
+    if (made && dir !== TEMP_STAGE && IS_WIN) execFile('attrib', ['+h', dir], { windowsHide: true }, () => {});
+  } catch (e) { dir = TEMP_STAGE; }
+  const old = stage.dir;
+  stage = { save, dir };
+  if (server) server.tmpDir = dir;
+  if (qs) qs.tmpDir = qsStage();
+  if (old === dir) return;
+  log('incoming files are staged in', dir);
+  if (old !== TEMP_STAGE) fs.rmdir(old, () => {});                       // only once nothing is left in it
+  // leftovers of transfers that never finished go as they do in temp (in Flick's first minute: what's from before)
+  if (dir !== TEMP_STAGE) sweepDir(dir, !!startedAt && Date.now() - startedAt > 60000);
 }
 
 // ------------------------------------------------------------ windows
@@ -631,7 +670,7 @@ function applyQuickShare() {
   if (store.quickShare) {
     if (!qs) {
       const { QuickShare } = require('./quickshare');
-      qs = new QuickShare({ name: (server && server.name) || store.name || 'Flick PC', tmpDir: path.join(app.getPath('temp'), 'flick-quickshare'), log });
+      qs = new QuickShare({ name: (server && server.name) || store.name || 'Flick PC', tmpDir: qsStage(), log });
       qs.on('state', (st) => { qsState = st; pushPanelState(); });
       qs.on('request', onQsRequest);
       qs.on('accepted', onQsAccepted);
@@ -879,7 +918,7 @@ ipcMain.on('panel:set', (e, m) => {
     case 'sound': store.sound = !!value; break;
     case 'edgeSend': store.edgeSend = !!value; break;
     case 'displayId': store.displayId = value || null; break;
-    case 'saveDir': if (value === 'desktop' || value === 'downloads') store.saveDir = value; break;
+    case 'saveDir': if (value === 'desktop' || value === 'downloads') { store.saveDir = value; updateStage(); } break;
     case 'theme': if (THEMES.includes(value)) { store.theme = value; setTimeout(() => fx('demo', {}), 120); } break;
     case 'startup': store.startup = !!value; applyStartup(); break;
     case 'openAfter': store.openAfter = !!value; break;
@@ -912,7 +951,11 @@ ipcMain.on('panel:action', async (e, m) => {
     case 'openFolder': shell.openPath(saveDirPath()); break;
     case 'chooseFolder': {
       const r = await dialog.showOpenDialog(panel, { properties: ['openDirectory', 'createDirectory'], defaultPath: saveDirPath() });
-      if (!r.canceled && r.filePaths[0]) { store.saveDir = r.filePaths[0]; saveStore(); pushPanelState(); }
+      if (!r.canceled && r.filePaths[0]) {
+        store.saveDir = r.filePaths[0];
+        checkCustomDir();                         // (staging follows once it's known to be there: updateStage)
+        saveStore(); pushPanelState();
+      }
       break;
     }
     case 'forget': if (server) server.forget(arg); break;
@@ -1576,6 +1619,7 @@ function wireServer() {
   server.on('upload-failed', ({ tid, why }) => {
     const t = transfers.get(tid);
     log('upload failed', tid, why);
+    if (/ENOENT/.test(String(why))) updateStage();      // the staging folder was deleted: made again for the retry
     if (!t) return;
     t.upload = 'failed';
     // the phone retries once by itself (same transfer); only give up if no new attempt starts soon
@@ -1825,6 +1869,7 @@ app.on('before-quit', () => {
   try { hotspot.stop(); } catch (e) { /* ignore */ }                // the PC's own Wi-Fi network, if Flick started it
   try { if (fb) fb.stop(); } catch (e) { /* ignore */ }
   try { server && server.stop(); } catch (e) { /* ignore */ }
+  try { if (stage.dir !== TEMP_STAGE) fs.rmdirSync(stage.dir); } catch (e) { /* not empty: kept for next time */ }
 });
 
 // Leftovers from a crash or power cut (half-received files, staging folders) in Flick's own temp folders.
@@ -1832,17 +1877,21 @@ app.on('before-quit', () => {
 // Leftovers of transfers that never finished: at start, anything older than 10 minutes; while Flick runs (every 30
 // minutes), files untouched for six hours (a file still arriving is written to all the time; folders are left to the
 // transfers that own them)
-function sweepTemp(running) {
+function sweepDir(dir, running) {
   const now = Date.now(), age = running ? 6 * 3600000 : 10 * 60000;
-  for (const dir of [path.join(app.getPath('temp'), 'flick-incoming'), path.join(app.getPath('temp'), 'flick-quickshare')]) {
-    fs.readdir(dir, (e, names) => {
-      if (e) return;
-      for (const n of names) {
-        const full = path.join(dir, n);
-        fs.stat(full, (er, st) => { if (!er && now - st.mtimeMs > age && (!running || st.isFile())) fs.rm(full, { recursive: true, force: true }, () => {}); });
-      }
-    });
-  }
+  fs.readdir(dir, (e, names) => {
+    if (e) return;
+    for (const n of names) {
+      const full = path.join(dir, n);
+      fs.stat(full, (er, st) => {
+        const old = !er && now - st.mtimeMs > age && (!running || st.isFile());
+        if (old) fs.rm(full, { recursive: true, force: true }, () => {});
+      });
+    }
+  });
+}
+function sweepTemp(running) {
+  for (const dir of new Set([TEMP_STAGE, QS_STAGE, stage.dir])) sweepDir(dir, running);
   if (running) return;
   fs.readdir(app.getPath('userData'), (e, names) => {
     if (!e) for (const n of names) if (/^flick-fw-.*\.cmd$/.test(n)) fs.unlink(path.join(app.getPath('userData'), n), () => {});
@@ -1861,13 +1910,14 @@ app.whenReady().then(async () => {
     // test runs can move the ports (several copies under test on one machine); real installs always use the defaults
     id: store.id, name: store.name, port: (TEST_MODE && +process.env.FLICK_PORT) || 47860,
     discoveryPort: (TEST_MODE && +process.env.FLICK_DISCOVERY_PORT) || 47870, version: VERSION,
-    tmpDir: path.join(app.getPath('temp'), 'flick-incoming'), devices: store.devices,
+    tmpDir: TEMP_STAGE, devices: store.devices,
     settings: { side: store.side, anchor: store.anchor, theme: themeName() },
     allowOrigin: TEST_MODE ? /^http:\/\/127\.0\.0\.1:\d+$/ : null,   // test harnesses serve the phone page over http
     tls: tlsId,
     haveFiles: (items) => received.lookup(items),
   });
   wireServer();
+  updateStage();                                // staged on the save folder's drive when it's another one
   try { const port = await server.start(); log('listening', port, lanAddresses().map((a) => a.address).join(',')); }
   catch (e) { log('server failed', e.message); dialog.showErrorBox('Flick', 'Flick could not start its connection service.\n\n' + e.message); }
   startWeb();
