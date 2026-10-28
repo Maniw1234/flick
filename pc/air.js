@@ -88,7 +88,8 @@ function attach(o) {
 
   // PC to phone: the phones ready to catch, what's selected, and what a fist picked up
   const phones = new Set();    // devices with Air grab on and Flick open
-  const G = { sel: [], armedAt: 0, armedUntil: 0, armT: null, open: false, held: null, n: 0, selStopT: null };
+  // (selDenied: macOS doesn't let Flick ask Finder what's selected)
+  const G = { sel: [], armedAt: 0, armedUntil: 0, armT: null, open: false, held: null, n: 0, selDenied: false, selStopT: null };
   const sel = o.selwatch || new SelWatch({ log: o.log });
   sel.on('change', (s) => onSelection(s));
   function watchSelection() {
@@ -337,6 +338,7 @@ function attach(o) {
   // ---- PC to phone: selecting files, picking them up, and the phone catching them
   function onSelection(s) {
     G.sel = (s && s.paths) || [];
+    G.selDenied = !!s && s.kind === 'denied';
     if (!G.sel.length || !phones.size) { disarm(); return; }
     // what was selected already when the watching started isn't a selection just made: the next one turns it on
     if (s.first) return;
@@ -527,8 +529,8 @@ function attach(o) {
       const h = G.held;
       if (!h) {
         // nothing picked up: the phone says how (select files, or copy them on Linux), or why it can't be done here
-        // (the camera off, or none Flick can use)
-        const why = o.store.airCam === false ? 'camoff' : !HAND || /denied|nocamera|error/.test(camSays()) ? 'nocamera' : 'nothing';
+        // (the camera off, none Flick can use, or macOS not letting Flick ask Finder what's selected)
+        const why = o.store.airCam === false ? 'camoff' : !HAND || /denied|nocamera|error/.test(camSays()) ? 'nocamera' : G.selDenied ? 'finder' : 'nothing';
         if (o.server) o.server.pushToPhone({ t: 'air-none', why, how: (o.platform || process.platform) === 'linux' ? 'copy' : 'select' }, device);
         log('catch: nothing picked up' + (why === 'nothing' ? '' : ' (' + why + ')'));
         return 0;

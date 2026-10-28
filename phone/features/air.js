@@ -335,7 +335,8 @@
       const pc = X.pcName();
       A.toast(m.why === 'camoff' ? 'Air grab is off in Flick’s window on ' + pc + ': turn it on to grab files there'
         : m.why === 'nocamera' ? pc + ' has no camera Flick can use, so files there can’t be grabbed by hand'
-          : (m.how === 'copy' ? 'Copy files on ' : 'Select files on ') + pc + ', grab them with a fist in front of the screen, then open it here', 3200);
+          : m.why === 'finder' ? pc + ' doesn’t let Flick see what’s selected in Finder: allow it in System Settings › Privacy & Security › Automation'
+            : (m.how === 'copy' ? 'Copy files on ' : 'Select files on ') + pc + ', grab them with a fist in front of the screen, then open it here', 3200);
     } else if (m.t === 'air-held') {
       // a fist picked files up in front of the PC: they come here when it opens over the phone
       M.pcHeldAt = +m.n > 0 ? Date.now() : 0;
