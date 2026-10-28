@@ -16,6 +16,7 @@
   const BASE = 'https://flick.local/hand/';              // served by the app: a file:// page can't fetch files
   const FILES = ['hand-simd.wasm', 'hand.wasm', 'palm.fhm', 'landmark.fhm'];
   const AIR_PROTO = 8;                                    // PCs that know Air grab
+  const pcKnows = () => (A.st.pcProto || 1) >= AIR_PROTO;
   const camOk = () => A.nc('cameraState') === 'granted';
 
   let on = A.pref.get('air', '') === '1';
@@ -418,9 +419,12 @@
     if (stream) stream.reset();
   }
 
-  // (locked: Lock Flick's cover hides the page; a hand mustn't pick files up behind it)
-  const wanted = () => on && !paused && !locked && !document.hidden && A.st.connected && camOk();
+  // (locked: Lock Flick's cover hides the page; a hand mustn't pick files up behind it. A PC whose Flick doesn't know
+  // Air grab can do nothing with a hand: the camera stays off, and that's said once)
+  const wanted = () => on && !paused && !locked && !document.hidden && A.st.connected && pcKnows() && camOk();
+  let oldSaid = false;
   async function update() {
+    if (on && A.st.connected && !pcKnows() && !oldSaid && !paused && !document.hidden) { oldSaid = true; A.toast('Update Flick on ' + X.pcName() + ' to use Air grab with it', 3200); }
     if (wanted()) {
       try { await build(); } catch (e) { console.log('air: ' + e); return; }
       if (wanted() && camState !== 'on' && camState !== 'starting' && !/denied|nocamera/.test(camState)) cam.start();
@@ -477,7 +481,11 @@
     l.append(i, h('span'));
     row.appendChild(l);
     card.appendChild(row);
-    if (on && camState === 'on' && A.st.connected) {
+    if (on && A.st.connected && !pcKnows()) {
+      const n = h('div', 'srow fsnote airtip');
+      n.appendChild(h('span', '', 'Update Flick on ' + X.pcName() + ' to use Air grab with it.'));
+      card.appendChild(n);
+    } else if (on && camState === 'on' && A.st.connected) {
       const n = h('div', 'srow fsnote airtip');
       n.appendChild(h('span', '', 'Pinch over a file to select it, and keep pinching across more. To bring files here, select them on ' + X.pcName() + ', make a fist in front of its screen, then open it over the phone.'));
       card.appendChild(n);
