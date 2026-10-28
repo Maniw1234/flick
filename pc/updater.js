@@ -115,11 +115,14 @@ class Updater {
     } catch (e) {
       return (this.state = { state: 'error', version: ver, why: 'download ' + e.message });
     }
-    if (core.sha256(buf) !== sum || (bundle.size && buf.length !== bundle.size)) return (this.state = { state: 'error', version: ver, why: 'checksum' });
+    // hashed, unpacked once and written in the background: Flick may be busy with files while an update gets ready
+    if ((bundle.size && buf.length !== bundle.size) || (await core.sha256Async(buf)) !== sum) {
+      return (this.state = { state: 'error', version: ver, why: 'checksum' });
+    }
 
-    let meta;
+    let meta, files;
     try {
-      const files = core.unzipAll(buf);
+      files = await core.unzipAllAsync(buf);
       const pkg = files.find((f) => f.name === 'package.json');
       meta = pkg ? JSON.parse(pkg.data.toString('utf8')) : {};
     } catch (e) {
@@ -130,7 +133,7 @@ class Updater {
     if (need && this.electron && need.split('.')[0] !== this.electron.split('.')[0]) return (this.state = { state: 'installer', version: ver, page });
 
     try {
-      const r = core.installBundle(this.root, ver, buf);
+      const r = await core.installFiles(this.root, ver, files);
       // the signed SHA256SUMS stays with this version: it lets phones trust the phone app inside (see main.js)
       core.writeProof(require('path').join(this.root, r.dir), proof);
       core.writeCurrent(this.root, { version: ver, dir: r.dir, tries: 0, sha256: sum });
