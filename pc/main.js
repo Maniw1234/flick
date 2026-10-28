@@ -315,15 +315,17 @@ function createOverlay() {
   });
 }
 
-// the GPU was reset: reload the overlay page so its effects work again
-let lostAt = 0;
+// The GPU was reset: reload the overlay page so its effects work again. At most once per 10 s, in case the GPU keeps
+// failing, but a loss in that time (a second reset right after the first: docking, a driver update) is put off, never
+// dropped: the page it happened to draws nothing until it's loaded again.
+let lostAt = 0, lostT = null;
 ipcMain.on('fx:lost', () => {
-  if (!overlay || Date.now() - lostAt < 10000) return;      // at most once per 10 s, in case the GPU keeps failing
-  lostAt = Date.now();
-  log('overlay graphics reset: reloading it');
+  if (!overlay || lostT) return;
+  const wait = Math.max(500, lostAt + 10000 - Date.now());
+  log('overlay graphics reset: reloading it' + (wait > 500 ? ' in ' + Math.round(wait / 1000) + ' s' : ''));
   overlayReady = false;
   if (overlayShown) { overlay.hide(); overlayShown = false; }
-  setTimeout(() => { if (overlay) overlay.webContents.reload(); }, 500);
+  lostT = setTimeout(() => { lostT = null; lostAt = Date.now(); if (overlay) overlay.webContents.reload(); }, wait);
 });
 
 function placeOverlay() {
