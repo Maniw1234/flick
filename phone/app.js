@@ -318,7 +318,15 @@
   // faster links first: USB cable, Ethernet, a hotspot or direct link, Wi-Fi, then Bluetooth
   const LINK_RANK = { usb: 5, ethernet: 4, hotspot: 3, direct: 3, wifi: 2, bluetooth: 1 };
   const rankOf = (p) => LINK_RANK[(p && p.via) || 'wifi'] || 2;
-  const busyMoving = () => [...st.pending.values()].some((p) => p.phase === 'sent' && !p.uploaded) || (st.incoming && st.incoming.size > 0) || V.items.some((x) => x.incoming);
+  // files moving now. A send the app carries on with (a job) counts only while it runs or is about to, not while it
+  // waits for the PC (that can go on for hours) or is paused: those carry on wherever this page connects.
+  function sendMoving(tid, p) {
+    if (p.phase !== 'sent' || p.uploaded) return false;
+    const j = p.job && st.jobs.get(tid);
+    return !j || j.state === 'running' || j.state === 'queued';
+  }
+  const busyMoving = () => [...st.pending].some(([tid, p]) => sendMoving(tid, p)) || (st.incoming && st.incoming.size > 0) ||
+    V.items.some((x) => x.incoming);
   function onPcs() {
     // Bluetooth reports the PC it reached through the same list
     st.pcs = (st.lanList || []).filter((p) => p && p.ip && p.port).concat(st.btPc ? [st.btPc] : []);
@@ -442,6 +450,7 @@
     st.ws = null; st.wsOpen = false; st.connected = false; st.trusted = false; st.awaitingApproval = false; st.connecting = false;
     st.pcProved = false;
     updateConn();
+    linkEnded(false);
   }
 
   // The way to the PC. Over Bluetooth: the local port the app's Bluetooth link gives (Bluetooth encrypts that link
@@ -496,6 +505,14 @@
     clearTimeout(reconnectT);
     if (st.ws) { try { st.ws.close(); } catch (e) { /* ignore */ } }
     st.ws = null; st.wsOpen = false; st.connecting = true;
+    // A live session moves to a new link (a faster one, or the phone's new name): not connected until the PC says so
+    // again, so nothing is sent into the gap (a drop sent there was lost, and the PC threw the file away), and every
+    // try asks the PC to pick the session back up (else a retry left the phone "connected" and the PC not).
+    if (st.connected) {
+      st.connected = false; st.wantResume = true; st.relinkAt = Date.now();
+      updateConn();
+      linkEnded(true);
+    }
     prepareLink(st.pc).then((lk) => {
       if (gen !== wsGen) return;
       if (!lk) { st.connecting = false; scheduleReconnect(st.linkBlocked ? 20000 : 0); return; }
@@ -537,11 +554,7 @@
     st.wsOpen = false; st.connected = false; st.connecting = false; st.pcProved = false;
     clearInterval(pingT);
     updateConn();
-    for (const [tid, p] of st.pending) {
-      if (p.phase === 'lifted') { st.pending.delete(tid); if (p.job) nc('sendCancel', tid); }
-      // the file already reached the PC; the "saved" note just can't arrive now
-      else if (p.phase === 'sent' && p.uploaded) { st.pending.delete(tid); for (const it of itemsOf(p)) if (it.path || st.keep) restoreItem(it); }
-    }
+    linkEnded(false);
     st.pairAsked = false; st.awaitingApproval = false;
     // a pairing the PC already allowed can still be confirmed here (see 'paired'); one it hadn't is over
     if (!st.pairWait) st.pairOk = false;
@@ -549,6 +562,27 @@
     if (st.replaced) { st.wantResume = false; return; }
     if (was) { st.wantResume = true; if (!document.hidden) toast('Reconnecting to ' + st.pc.name + '…', 1800); }
     scheduleReconnect();
+  }
+
+  // What a link that ended (lost, closed here, or replaced by a new one: relink) leaves behind. A send still being
+  // dragged or held goes nowhere now (after a relink the session comes back, and the drag with it). One the PC has
+  // every byte of is settled: its 'saved' can't arrive now. One still on its way carries on in the app and settles
+  // by its up-done, as its 'saved' may be lost meanwhile. The PC's hover glow goes out.
+  function linkEnded(relink) {
+    for (const [tid, p] of st.pending) {
+      if (p.phase === 'lifted') {
+        if (relink) continue;
+        st.pending.delete(tid);
+        if (p.job) nc('sendCancel', tid); else nc('abort', tid);
+        // the card still under the finger isn't being sent any more: let go over the PC once connected again, it goes
+        // as a new send (the old one's id is canceled on the PC)
+        if (D && D.tid === tid && D.phase === 'drag') { D.sending = false; D.tid = rid(); } else unlift(itemsOf(p));
+      } else if (p.phase === 'sent') {
+        p.relinked = true;
+        if (p.uploaded) { if (relink) settleSoon(tid, p); else settleSent(tid, p); }
+      }
+    }
+    edgeOff();
   }
 
   let lostSince = 0;
@@ -740,7 +774,7 @@
           G.hold = 1;
           pairHint('');
           flashScreen(() => { showScreen('main'); G.hold = 0; staggerIn(); });
-        } else if (st.wantResume) {
+        } else if (st.wantResume && Date.now() - (st.relinkAt || 0) > 5000) {   // (moved to a new link: quietly)
           toast('Connected to ' + st.pc.name, 1400);
         }
         st.wantResume = false;
@@ -763,6 +797,10 @@
         toast('Another phone is using ' + (st.pc ? st.pc.name : 'your PC') + ' now. Hold Connect to switch back.', 3200);
         break;
       case 'saved': if (linkTrusted()) onSaved(m); break;
+      case 'asking':                            // the PC asks its user first ("Ask each time"): see settleSent
+        if (linkTrusted() && st.pending.has(m.tid)) st.pending.get(m.tid).asking = true;
+        runHooks('ws', m);
+        break;
       case 'failed': if (linkTrusted()) onFailed(m); break;
       case 'incoming': if (linkTrusted()) onIncoming(m); break;
       case 'edge': if (linkTrusted()) onEdge(m); break;
@@ -1810,6 +1848,9 @@
     if (typeof m.y === 'number') EG.y = clamp(m.y, 0, innerHeight);
     egKick();
   }
+  // the glow goes out: a card that left without flying off (Teleport), or the PC's hover on a link that's gone (its
+  // "off" can't come now); a lit target kept the glow on and its frame loop running for good
+  function edgeOff() { if (EG.target || EG.hover) { EG.hover = false; EG.target = 0; egKick(); } }
 
   // ------------------------------------------------------------------ release effects (canvas): vapor, ripples, particles
   const fxc = $('fx');
@@ -2258,7 +2299,7 @@
       }
       if (hid) setTimeout(() => layout(true), 120);
       if (SEL.on) setSelecting(false);
-      if (gone) { D.f.remove(); D = null; }
+      if (gone) { D.f.remove(); D = null; edgeOff(); }
     } else {
       if (st.pending.has(D.tid)) {
         wsSend({ t: 'cancel', tid: D.tid });
@@ -2402,16 +2443,21 @@
     toggleSel(it);
   }
 
-  // a sent file that stays on the phone comes back into the grid once its departure has finished playing
-  function restoreItem(item) {
-    const wait = Math.max(D && D.it === item ? 120 : 0, (item._sentAt || 0) + 750 - now());
-    if (wait > 0) { setTimeout(() => restoreItem(item), wait); return; }
-    const wasHidden = st.hidden.delete(item.id);
-    const el = cards.get(item.id);
-    if (el) { el.classList.remove('lifted'); el.classList.add('pop'); setTimeout(() => el.classList.remove('pop'), 600); }
-    else item._popIn = true;
-    if (wasHidden) layout(true);
-    updateCount();
+  // sent files that stay on the phone come back into the grid once their departure has finished playing; all of a
+  // send at once, with one layout (a big multi-send restored file by file counted the whole view for each)
+  function restoreItems(items) {
+    if (!items.length) return;
+    let wait = 0;
+    for (const it of items) wait = Math.max(wait, D && D.it === it ? 120 : 0, (it._sentAt || 0) + 750 - now());
+    if (wait > 0) { setTimeout(() => restoreItems(items), wait); return; }
+    let hid = false;
+    for (const it of items) {
+      if (st.hidden.delete(it.id)) hid = true;
+      const el = cards.get(it.id);
+      if (el) { el.classList.remove('lifted'); el.classList.add('pop'); setTimeout(() => el.classList.remove('pop'), 600); }
+      else it._popIn = true;
+    }
+    if (hid) layout(true); else updateCount();
   }
 
   function onSaved(m) {
@@ -2420,13 +2466,30 @@
     runHooks('sent', itemsOf(p));            // the history notes what reached the PC
     st.pending.delete(m.tid);
     // real phone files always stay; Flick-list items follow the "keep" setting
-    const gone = [];
+    const back = [], gone = [];
     for (const it of itemsOf(p)) {
-      if (it.path || st.keep) restoreItem(it);
+      if (it.path || st.keep) back.push(it);
       else gone.push(it.id);
     }
+    restoreItems(back);
     dropItems(gone, true);
     updateCount();
+  }
+  // A send the PC has every byte of, settled without its 'saved' (lost with the link): as if it had come. When the PC
+  // asked its user first ("Ask each time"), the answer isn't known: its Flick-list files stay in the list.
+  function settleSent(tid, p) {
+    if (!p.asking) { onSaved({ tid }); return; }
+    st.pending.delete(tid);
+    restoreItems(itemsOf(p));
+  }
+  // The PC has every byte of a send that was let go of: its 'saved' follows at once, unless the PC sent it while the
+  // link was down (it isn't sent again). So the send settles by itself: soon when the link went down meanwhile, after
+  // a minute otherwise (a big folder can take a while to move into place on the PC), and after the PC's minute to
+  // ask its user when it asked.
+  function settleSoon(tid, p) {
+    clearTimeout(p.settleT);
+    const ms = p.asking ? 75000 : p.relinked ? 5000 : 60000;
+    p.settleT = setTimeout(() => { if (st.pending.get(tid) === p) settleSent(tid, p); }, ms);
   }
 
   function onFailed(m) {
@@ -2487,12 +2550,12 @@
     if (!p) return;
     if (e.ok) {
       p.uploaded = true;
-      if (p.phase === 'sent' && !st.wsOpen) { st.pending.delete(e.tid); for (const it of itemsOf(p)) if (it.path || st.keep) restoreItem(it); }
+      if (p.phase === 'sent') { if (st.wsOpen) settleSoon(e.tid, p); else settleSent(e.tid, p); }
       updateCount();
       return;
     }
     // the app's send engine already tried (and waited) as long as it made sense; canceled from the transfer list: quietly
-    if (e.final && e.canceled) { st.pending.delete(e.tid); for (const it of itemsOf(p)) st.hidden.delete(it.id); for (const it of itemsOf(p)) restoreItem(it); layout(true); updateCount(); return; }
+    if (e.final && e.canceled) { st.pending.delete(e.tid); for (const it of itemsOf(p)) st.hidden.delete(it.id); restoreItems(itemsOf(p)); layout(true); return; }
     p.tries = (p.tries || 0) + 1;
     if (!e.final && p.tries < 2 && st.connected && st.pc) { startSend(e.tid, itemsOf(p), p.phase === 'sent'); return; } // one quick retry
     if (p.phase === 'sent') { wsSend({ t: 'cancel', tid: e.tid, failed: true }); onFailed({ tid: e.tid }); }
@@ -2562,77 +2625,139 @@
   document.addEventListener('contextmenu', (e) => e.preventDefault());
 
   // ------------------------------------------------------------------ incoming (PC -> phone)
-  function onIncoming(m) { setTimeout(() => incomingNow(m), m.delay || 0); }
-  function incomingNow(m) {
-    if (st.screen !== 'main') showScreen('main');
-    const aspect = clamp(m.aspect || 1.33, 0.5, 2);
-    const it = {
-      id: 'in-' + m.fid, fid: m.fid, name: m.name, size: m.size, mime: m.mime, kind: m.kind === 'image' || m.kind === 'video' ? m.kind : (m.ext === 'pdf' ? 'pdf' : 'doc'),
-      // the PC's thumbnail is only ever a small inline picture; anything else (a URL) would make the phone fetch it
-      ext: m.ext, added: Date.now(), mtime: Date.now(), thumb: typeof m.thumb === 'string' && /^data:image\/(jpeg|png|webp|gif);base64,/.test(m.thumb) ? m.thumb : null,
-      w: m.kind === 'image' || m.kind === 'video' ? Math.round(aspect * 1000) : 0, h: 1000, incoming: true,
-    };
+  // A file downloads as soon as the PC offers it; its card comes in when the PC's card reaches the phone (m.delay).
+  // Cards due together (a big batch: the PC staggers only the first dozen) are laid out once a frame and only a few
+  // of them fly in; a file that arrives before its card has landed shows once it has.
+  const IN = { q: [], raf: 0, t: 0, fly: [], flyRaf: 0, wait: new Set(), got: new Map(), done: [], doneRaf: 0, doneT: 0,
+    tickAt: 0 };
+  function onIncoming(m) {
     (st.incoming = st.incoming || new Map()).set(m.fid, String(m.name || 'file'));
-    V.items.unshift(it);
-    V.total++;
-    if (scroller.scrollTop > 40) scroller.scrollTo({ top: 0, behavior: 'smooth' });
-    layout(true);
-    // fetched first: scrolled far down, its card isn't drawn yet (it shows once the view is back at the top)
+    IN.wait.add(m.fid);
     const tok = pref.get(tokenKey(st.pc.id), '');
     const url = linkBase() + m.url + '?device=' + encodeURIComponent(DEVICE) + '&token=' + encodeURIComponent(tok) + parallelArg();
     nc('download', m.fid, url, m.name, String(m.size || 0), m.mime || '');
-    const el = cards.get(it.id);
-    if (!el) return;
+    setTimeout(() => {
+      IN.q.push(m);
+      // with the next frame; a timer stands in when no frame comes (Flick in the background)
+      if (!IN.raf) { IN.raf = requestAnimationFrame(incomingNow); IN.t = setTimeout(incomingNow, 100); }
+    }, m.delay || 0);
+  }
+  function incomingNow() {
+    cancelAnimationFrame(IN.raf); clearTimeout(IN.t); IN.raf = 0;
+    const batch = IN.q.splice(0);
+    if (!batch.length) return;
+    if (st.screen !== 'main') showScreen('main');
+    const its = batch.map((m) => {
+      const aspect = clamp(m.aspect || 1.33, 0.5, 2);
+      return {
+        id: 'in-' + m.fid, fid: m.fid, name: m.name, size: m.size, mime: m.mime, kind: m.kind === 'image' || m.kind === 'video' ? m.kind : (m.ext === 'pdf' ? 'pdf' : 'doc'),
+        // the PC's thumbnail is only ever a small inline picture; anything else (a URL) would make the phone fetch it
+        ext: m.ext, added: Date.now(), mtime: Date.now(), thumb: typeof m.thumb === 'string' && /^data:image\/(jpeg|png|webp|gif);base64,/.test(m.thumb) ? m.thumb : null,
+        w: m.kind === 'image' || m.kind === 'video' ? Math.round(aspect * 1000) : 0, h: 1000, incoming: true,
+      };
+    });
+    for (const it of its) V.items.unshift(it);
+    V.total += its.length;
+    if (scroller.scrollTop > 40) scroller.scrollTo({ top: 0, behavior: 'smooth' });
+    layout(true);
+    let flew = 0;
+    its.forEach((it, i) => {
+      setCardProgress(it.id, 0);
+      // (scrolled far down, its card isn't drawn yet: it shows once the view is back at the top)
+      const el = cards.get(it.id);
+      if (!el || document.hidden || flew >= 2 || IN.fly.length >= 8) { landed(it.fid); return; }
+      flyIn(it, batch[i], el);
+      flew++;
+    });
+    if (flew) haptic('tick');
+  }
+  function flyIn(it, m, el) {
     el.classList.add('ghost');
     const target = el.querySelector('.thumb');
     const w = VIEW.list ? LR.th : it._w, h = it._th;   // (a list row's thumbnail is small and square)
-    const f = makeFloat(it, { width: w, height: h }, target);
     const y0 = clamp((typeof m.y === 'number' ? m.y : innerHeight / 2) - h / 2, 20, innerHeight - h - 20);
-    const sx = st.side === 'right' ? -w - 8 : innerWidth + 8;
-    const mx = st.side === 'right' ? 26 : innerWidth - w - 26;
+    const g = { fid: it.fid, el, target, f: makeFloat(it, { width: w, height: h }, target), y0, t0: now(),
+      sx: st.side === 'right' ? -w - 8 : innerWidth + 8, mx: st.side === 'right' ? 26 : innerWidth - w - 26 };
+    flyAt(g, g.t0, null);
     egFlash(y0 + h / 2);
-    haptic('tick');
-    const t0 = now();
-    (function anim(t) {
-      const u1 = clamp((t - t0) / 210, 0, 1);
-      const u2 = clamp((t - t0 - 170) / 380, 0, 1);
-      const rr = target.getBoundingClientRect();
-      let x, y, s, r;
-      if (u2 <= 0) { const e = easeOut(u1); x = lerp(sx, mx, e); y = y0; s = 1.07; r = (st.side === 'right' ? 6 : -6) * (1 - e); }
-      else { const e = easeInOut(u2); x = lerp(mx, rr.left, e); y = lerp(y0, rr.top, e); s = lerp(1.07, 1, e); r = 0; }
-      f.style.transform = 'translate3d(' + x + 'px,' + y + 'px,0) rotate(' + r + 'deg) scale(' + s + ')';
-      if (u2 < 1) requestAnimationFrame(anim);
-      else { el.classList.remove('ghost'); f.remove(); haptic('soft'); }
-    })(t0);
-    setCardProgress(it.id, 0);
+    IN.fly.push(g);
+    if (!IN.flyRaf) IN.flyRaf = requestAnimationFrame(flyFrame);
+  }
+  // in from the edge, then onto its card (rr: where the card is now)
+  function flyAt(g, t, rr) {
+    const u1 = clamp((t - g.t0) / 210, 0, 1);
+    const u2 = clamp((t - g.t0 - 170) / 380, 0, 1);
+    let x, y, s, r;
+    if (u2 <= 0 || !rr) { const e = easeOut(u1); x = lerp(g.sx, g.mx, e); y = g.y0; s = 1.07; r = (st.side === 'right' ? 6 : -6) * (1 - e); }
+    else { const e = easeInOut(u2); x = lerp(g.mx, rr.left, e); y = lerp(g.y0, rr.top, e); s = lerp(1.07, 1, e); r = 0; }
+    g.f.style.transform = 'translate3d(' + x + 'px,' + y + 'px,0) rotate(' + r + 'deg) scale(' + s + ')';
+  }
+  // every card flying in moves on: their places are read first, then they all move (one layout a frame, not one each)
+  function flyFrame(t) {
+    IN.flyRaf = 0;
+    const rects = IN.fly.map((g) => (g.target.isConnected ? g.target.getBoundingClientRect() : null));
+    IN.fly = IN.fly.filter((g, i) => {
+      if (rects[i] && t - g.t0 < 550) { flyAt(g, t, rects[i]); return true; }
+      // landed, or its card left the grid (pushed out of the drawn part by more files): it has no place to fly to
+      g.el.classList.remove('ghost');
+      g.f.remove();
+      if (rects[i]) haptic('soft');
+      landed(g.fid);
+      return false;
+    });
+    if (IN.fly.length) IN.flyRaf = requestAnimationFrame(flyFrame);
+  }
+  // its card is in the grid now: a download that finished meanwhile shows
+  function landed(fid) {
+    IN.wait.delete(fid);
+    const e = IN.got.get(fid);
+    if (e) { IN.got.delete(fid); onDownDone(e); }
   }
 
   function onDown(e) {
     const it = V.items.find((x) => x.fid === e.fid);
     if (it && e.total) setCardProgress(it.id, e.got / e.total);
   }
+  // downloads that finished show together, once a frame (a batch finishing laid the grid out again for each file)
   function onDownDone(e) {
-    const idx = V.items.findIndex((x) => x.fid === e.fid);
-    const name = (st.incoming && st.incoming.get(e.fid)) || (idx >= 0 ? V.items[idx].name : 'a file');
-    if (st.incoming) st.incoming.delete(e.fid);
-    if (!e.ok || !e.item) {
-      if (idx >= 0) { V.items.splice(idx, 1); V.total--; layout(true); }
-      toast('Couldn’t receive ' + midName(name), 2600);          // even when the user has moved to another view
-      haptic('reject');
-      return;
+    if (IN.wait.has(e.fid)) { IN.got.set(e.fid, e); return; }    // its card hasn't landed yet (see landed)
+    IN.done.push(e);
+    if (!IN.doneRaf) { IN.doneRaf = requestAnimationFrame(downDone); IN.doneT = setTimeout(downDone, 100); }
+  }
+  function downDone() {
+    cancelAnimationFrame(IN.doneRaf); clearTimeout(IN.doneT); IN.doneRaf = 0;
+    const shown = [];
+    let gone = false, bad = false, saved = false, ids = null;
+    for (const e of IN.done.splice(0)) {
+      const idx = V.items.findIndex((x) => x.fid === e.fid);
+      const name = (st.incoming && st.incoming.get(e.fid)) || (idx >= 0 ? V.items[idx].name : 'a file');
+      if (st.incoming) st.incoming.delete(e.fid);
+      if (!e.ok || !e.item) {
+        if (idx >= 0) { V.items.splice(idx, 1); V.total--; gone = true; }
+        toast('Couldn’t receive ' + midName(name), 2600);          // even when the user has moved to another view
+        bad = true;
+        continue;
+      }
+      wsSend({ t: 'incoming-done', fid: e.fid });
+      if (idx < 0) continue;
+      const real = e.item;
+      const el = cards.get(V.items[idx].id);
+      cards.delete(V.items[idx].id);
+      if (el) el.remove();
+      ids = ids || new Set(V.items.map((x) => x.id));             // (the view may show the file already)
+      if (ids.has(real.id)) V.items.splice(idx, 1); else { V.items[idx] = real; ids.add(real.id); }
+      shown.push(real);
+      if (real.path && /\/Download\/Flick\//.test(real.path)) saved = true;
     }
-    if (idx < 0) { wsSend({ t: 'incoming-done', fid: e.fid }); return; }
-    const real = e.item;
-    const el = cards.get(V.items[idx].id);
-    cards.delete(V.items[idx].id);
-    if (el) el.remove();
-    if (V.items.find((x) => x.id === real.id)) V.items.splice(idx, 1); else V.items[idx] = real;
-    layout(false);
-    const nel = cards.get(real.id);
-    if (nel) nel.animate([{ filter: 'brightness(1.6)' }, { filter: 'brightness(1)' }], { duration: 420, easing: 'ease-out' });
-    wsSend({ t: 'incoming-done', fid: e.fid });
-    if (real.path && /\/Download\/Flick\//.test(real.path)) toast('Saved to Downloads › Flick', 1600);
-    haptic('tick');
+    if (gone || shown.length) layout(gone);
+    for (const real of shown) {
+      const nel = cards.get(real.id);
+      if (nel) nel.animate([{ filter: 'brightness(1.6)' }, { filter: 'brightness(1)' }], { duration: 420, easing: 'ease-out' });
+    }
+    if (saved) toast('Saved to Downloads › Flick', 1600);
+    // one buzz, not one per file
+    if (bad) haptic('reject');
+    else if (shown.length && now() - IN.tickAt > 300) { IN.tickAt = now(); haptic('tick'); }
   }
 
   // ------------------------------------------------------------------ native events

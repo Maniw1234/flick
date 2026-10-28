@@ -27,21 +27,30 @@
   // time left and "tries again in" count down between events
   setInterval(() => { if (page.isOpen() && jobs().some((j) => j.state === 'running' || j.state === 'waiting')) render(); }, 1000);
 
+  // While something moves the page is drawn every few hundred ms. Its rows stay the same elements and only their
+  // figures change: a row rebuilt under a finger lost the tap, and its press timer opened the menu by itself. The
+  // page is built anew only when the list itself changes (a send starts, ends, pauses, waits).
+  const rows = new Map();                           // tid -> its row
+  let shape = null;
   function render() {
     const body = page.body;
     const list = jobs();
     page.act.disabled = !list.some((j) => ENDED.includes(j.state));
+    const now = list.filter((j) => !ENDED.includes(j.state)), done = list.filter((j) => ENDED.includes(j.state));
+    const wait = now.find((j) => j.state === 'waiting');
+    const note = wait ? 'Waiting sends carry on by themselves as soon as ' + (wait.pcName || 'your PC') + ' can be reached again, even with Flick closed.' : '';
+    const key = list.map((j) => j.tid + ' ' + j.state).join('|') + '|' + note;
+    if (key === shape) { for (const j of list) { const r = rows.get(j.tid); if (r) update(r, j); } return; }
+    shape = key;
+    rows.clear();
     body.innerHTML = '';
     if (!list.length) {
       body.appendChild(X.empty(ICON.up, 'Nothing sending', 'Files you send to your PC show up here while they travel, and keep going if you close Flick.'));
       return;
     }
-    const now = list.filter((j) => !ENDED.includes(j.state)), done = list.filter((j) => ENDED.includes(j.state));
     if (now.length) body.appendChild(group('Now', now));
     if (done.length) body.appendChild(group('Finished', done));
-    if (now.some((j) => j.state === 'waiting')) {
-      body.appendChild(h('div', 'fnote', 'Waiting sends carry on by themselves as soon as ' + (now.find((j) => j.state === 'waiting').pcName || 'your PC') + ' can be reached again, even with Flick closed.'));
-    }
+    if (note) body.appendChild(h('div', 'fnote', note));
   }
 
   function group(title, list) {
@@ -86,20 +95,21 @@
     ic.appendChild(A.svgEl(bad ? ICON.bad : j.state === 'done' || j.state === 'skipped' ? ICON.ok : j.state === 'waiting' ? ICON.wait : ICON.up));
     const tx = h('span', 'ftx');
     const top = h('span', 'ftop');
-    top.append(h('b', '', j.name || 'File'), h('span', 'ftime', when(j)));
+    r._time = h('span', 'ftime');
+    top.append(h('b', '', j.name || 'File'), r._time);
     tx.appendChild(top);
-    const sm = h('small', bad ? 'fwrap fbad' : 'fwrap');
-    line(j).forEach((b, i) => { if (i) sm.appendChild(document.createTextNode(' · ')); sm.appendChild(h('span', 'fbit', b)); });
-    tx.appendChild(sm);
+    r._sm = h('small', bad ? 'fwrap fbad' : 'fwrap');
+    tx.appendChild(r._sm);
     if (j.state === 'running' || j.state === 'paused' || j.state === 'waiting') {
       const bar = h('span', 'fxbar');
-      const fill = h('i');
-      fill.style.transform = 'scaleX(' + (pct(j) / 100) + ')';
-      bar.appendChild(fill);
+      r._fill = h('i');
+      bar.appendChild(r._fill);
       tx.appendChild(bar);
     }
+    update(r, j);
+    rows.set(j.tid, r);
     main.append(ic, tx);
-    X.press(main, () => menu(j), () => menu(j));
+    X.press(main, () => menu(r._j), () => menu(r._j));     // (the transfer as it is now)
     r.appendChild(main);
     // the one thing most often wanted, right there
     const quick = j.state === 'running' || j.state === 'queued' ? ['pause', 'Pause', () => act('sendPause', j)]
@@ -114,6 +124,23 @@
       r.appendChild(b);
     }
     return r;
+  }
+
+  // a row's figures: how far, how fast, the time
+  function update(r, j) {
+    r._j = j;
+    const t = when(j);
+    if (r._time.textContent !== t) r._time.textContent = t;
+    const bits = line(j), text = bits.join(' · ');
+    if (r._text !== text) {
+      r._text = text;
+      r._sm.textContent = '';
+      bits.forEach((b, i) => {
+        if (i) r._sm.appendChild(document.createTextNode(' · '));
+        r._sm.appendChild(h('span', 'fbit', b));
+      });
+    }
+    if (r._fill) r._fill.style.transform = 'scaleX(' + (pct(j) / 100) + ')';
   }
 
   function when(j) {

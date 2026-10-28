@@ -124,7 +124,8 @@ img { -webkit-user-drag: none; user-select: none; pointer-events: none; }
 .doclines { position: absolute; left: 13%; right: 13%; top: 11%; bottom: 26%;
   background: repeating-linear-gradient(180deg, rgba(60,60,67,0.20) 0 2px, transparent 2px 9px); }
 .badge { position: absolute; left: 8px; bottom: 8px; padding: 2px 6px; border-radius: 6px; background: rgba(28,28,30,0.88); color: #fff; font-size: 10.5px; font-weight: 750; letter-spacing: .03em; }
-.playb { position: absolute; left: 50%; top: 50%; width: 40px; height: 40px; margin: -20px 0 0 -20px; border-radius: 50%; background: rgba(0,0,0,0.42); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+/* (no backdrop blur: one per video card, redone every frame while the grid scrolls) */
+.playb { position: absolute; left: 50%; top: 50%; width: 40px; height: 40px; margin: -20px 0 0 -20px; border-radius: 50%; background: rgba(0,0,0,0.5); }
 .playb::after { content: ''; position: absolute; left: 15px; top: 11px; border-left: 14px solid #fff; border-top: 9px solid transparent; border-bottom: 9px solid transparent; }
 .dur { position: absolute; right: 7px; bottom: 7px; font-size: 11px; font-weight: 650; text-shadow: 0 1px 3px rgba(0,0,0,.8); }
 .card .meta { position: relative; padding: 7px 26px 0 2px; height: 46px; transition: opacity .2s; }
