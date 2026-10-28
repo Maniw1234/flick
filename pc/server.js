@@ -41,6 +41,8 @@ function markSparse(file) {
 const PROTO = 8;
 // how long a resumable transfer that stopped (the phone left, its app was closed) waits for the phone to come back
 const RESUME_KEEP_MS = 6 * 3600 * 1000;
+// a file offered to the phone stays fetchable this long after the phone last asked for it (see offerFile)
+const OFFER_IDLE_MS = 30 * 60 * 1000;
 // open connections allowed at once from one address, and in all (see _onSocket)
 const SOCKS_PER_ADDR = 64, SOCKS_TOTAL = 512;
 // phone app version code from which 'connect' says whether the user asked for it (user: true)
@@ -49,6 +51,9 @@ const USER_FLAG_CODE = 10800;
 const MAX_PHONES = 4;
 
 function rid(n = 12) { return crypto.randomBytes(n).toString('hex'); }
+// a write that failed because the drive is full: the phone hears 507 ("not enough space") and stops, instead of a 500
+// it takes for a hiccup and answers by sending the same bytes again every second
+const diskFull = (e) => !!(e && (e.code === 'ENOSPC' || e.code === 'EDQUOT'));
 const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
 const hmac = (key, s) => crypto.createHmac('sha256', String(key)).update(s).digest('hex');
 function sameHex(a, b) {
@@ -256,6 +261,7 @@ class FlickServer extends EventEmitter {
 
   stop() {
     clearInterval(this.sweepT); this.sweepT = null;
+    clearInterval(this.offerT); this.offerT = null;
     for (const b of [...this.bundleAsm.values()]) this._dropBundleAsm(b, true);
     for (const a of [...this.assemblies.values()]) this._dropAssembly(a, true);
     if (this.mdns) { try { this.mdns.stop(); } catch (e) { /* ignore */ } this.mdns = null; }
@@ -808,7 +814,9 @@ class FlickServer extends EventEmitter {
     }
     if (req.method === 'GET' && u.pathname.startsWith('/api/file/')) {
       if (!this._trustedReq(req, q.get('device'), q.get('token'))) return this._json(res, 403, { ok: false, error: 'not paired' });
-      return this._handleDownload(req, res, decodeURIComponent(u.pathname.slice('/api/file/'.length)));
+      let fid;
+      try { fid = decodeURIComponent(u.pathname.slice('/api/file/'.length)); } catch (e) { return this._json(res, 404, { ok: false }); }   // (not one)
+      return this._handleDownload(req, res, fid);
     }
     if (req.method === 'GET' && u.pathname === '/api/app.apk') {
       if (!this._trustedReq(req, q.get('device'), q.get('token'))) return this._json(res, 403, { ok: false, error: 'not paired' });
@@ -948,7 +956,7 @@ class FlickServer extends EventEmitter {
     note('upload-start', { tid, name, total });
 
     const removeTmp = () => { if (out.closed) fs.unlink(tmpPath, () => {}); else out.once('close', () => fs.unlink(tmpPath, () => {})); };
-    const fail = (why) => {
+    const fail = (why, code) => {
       if (finished) return;
       finished = true;
       this._release(tid, entry);
@@ -956,7 +964,7 @@ class FlickServer extends EventEmitter {
       out.destroy();
       removeTmp();
       if (!entry.superseded) note('upload-failed', { tid, why });
-      if (!res.headersSent) { try { this._json(res, why === 'short' ? 400 : 500, { ok: false, error: why }); } catch (e) { /* ignore */ } }
+      if (!res.headersSent) { try { this._json(res, code || (why === 'short' ? 400 : 500), { ok: false, error: code === 507 ? 'no space' : why }); } catch (e) { /* ignore */ } }
       try { req.destroy(); } catch (e) { /* ignore */ }
     };
     const onData = (chunk) => {
@@ -966,7 +974,7 @@ class FlickServer extends EventEmitter {
       const now = Date.now();
       if (now - lastEmit > 40) { lastEmit = now; note('upload-progress', { tid, received, total }); }
     };
-    out.on('error', (e) => fail('disk ' + (e.code || e.message)));
+    out.on('error', (e) => fail('disk ' + (e.code || e.message), diskFull(e) ? 507 : 500));
     req.on('data', onData);
     req.on('aborted', () => fail('aborted'));
     req.on('error', () => fail('error'));
@@ -1026,7 +1034,7 @@ class FlickServer extends EventEmitter {
       if (pa) this._dropAssembly(pa, true);
       const root = path.join(this.tmpDir, 'b-' + tid + '-' + att + '-' + rid(3));
       try { fs.mkdirSync(root, { recursive: true }); } catch (e) { req.resume(); return this._json(res, 500, { ok: false, error: 'staging' }); }
-      A = { tid, att, K, root, shared: { taken: new Map(), tops: [], assigned: new Map() }, got: new Array(K).fill(0), done: new Array(K).fill(false),
+      A = { tid, att, K, root, shared: { taken: new Map(), tops: [], topSet: new Set(), assigned: new Map() }, got: new Array(K).fill(0), done: new Array(K).fill(false),
         reqs: new Set(), manifest: null, total: +q.get('bytes') || 0, finished: false, superseded: false, t0: Date.now(), lastEmit: 0, active: Date.now(),
         // resumable: each stream's delivered entries, the file it was writing when cut off, and the request sending it
         resumable: resume, ents: Array.from({ length: K }, () => []), part: new Array(K).fill(null), cur: new Array(K).fill(null),
@@ -1106,9 +1114,11 @@ class FlickServer extends EventEmitter {
       A.finished = true;
       this.bundleAsm.delete(tid);
       this._remember(tid, att, 'done', A.resumable);
-      // the items in the order the phone listed them, whichever stream carried them
-      const roots = (A.manifest && Array.isArray(A.manifest.roots)) ? A.manifest.roots.map(String) : [];
-      const order = (x) => { const i = roots.indexOf(x); return i < 0 ? 1e9 : i; };
+      // the items in the order the phone listed them, whichever stream carried them (looked up in a map: a search of
+      // the list for each comparison froze the PC for seconds with thousands of picked files)
+      const rank = new Map();
+      if (A.manifest && Array.isArray(A.manifest.roots)) A.manifest.roots.forEach((x, i) => { x = String(x); if (!rank.has(x)) rank.set(x, i); });
+      const order = (x) => (rank.has(x) ? rank.get(x) : 1e9);
       const tops = A.shared.tops.slice().sort((a, b) => order(a) - order(b));
       const received = A.got.reduce((x, y) => x + y, 0);
       this.emit('upload-progress', { tid, received, total: A.total || received });
@@ -1133,12 +1143,15 @@ class FlickServer extends EventEmitter {
           }
           queued -= chunk.length;
           await rx.push(chunk);
+          A.nospace = 0;
           if (req.isPaused() && queued < 2 << 20 && !ended) req.resume();
         }
       } catch (e) {
         busy = false;
-        // the disk (full, a file held by another program): 500, and the phone carries on from where it got; a body that
+        // the drive is full: 507, the phone stops and says so (and /api/status says so too while it stays full); the
+        // disk otherwise (a file held by another program): 500, and the phone carries on from where it got; a body that
         // isn't a proper bundle: 400, and it starts over
+        if (diskFull(e)) { A.nospace = Date.now(); return fail('no space', 507); }
         return fail(e.message || 'bad bundle', e && typeof e.code === 'string' && /^E[A-Z]+$/.test(e.code) ? 500 : 400);
       }
       busy = false;
@@ -1203,7 +1216,7 @@ class FlickServer extends EventEmitter {
       busy = true;
       try {
         while (queue.length && !finished) await rx.push(queue.shift());
-      } catch (e) { fail(e.message || 'bad bundle', 400); return; }
+      } catch (e) { if (diskFull(e)) fail('no space', 507); else fail(e.message || 'bad bundle', 400); return; }
       busy = false;
       if (finished) return;
       if (ended) return complete();
@@ -1333,14 +1346,14 @@ class FlickServer extends EventEmitter {
     // unless a newer request for the part takes over meanwhile; then the part is let go
     let draining = false;
     const letGo = () => { draining = false; if (A.cur[index] === req) { A.cur[index] = null; A.got[index] = A.saved[index]; } };
-    const partFail = (why) => {
+    const partFail = (why, code) => {
       if (over) return;
       over = true;
       A.reqs.delete(req); A.live.delete(req); A.active = Date.now();
       // resumable: what's on disk stays and counts; otherwise the part starts over
       if (A.resumable && mine() && queue.length && !A.superseded) { draining = true; if (!writing) pump(); }
       else if (mine()) { A.got[index] = A.resumable ? A.saved[index] : 0; if (A.resumable) A.cur[index] = null; }
-      if (!res.headersSent) { try { this._json(res, 500, { ok: false, error: why }); } catch (e) { /* ignore */ } }
+      if (!res.headersSent) { try { this._json(res, code || 500, { ok: false, error: why }); } catch (e) { /* ignore */ } }
       try { req.destroy(); } catch (e) { /* ignore */ }
     };
     const partDone = async () => {
@@ -1392,9 +1405,16 @@ class FlickServer extends EventEmitter {
             const ph = A.ph[index];
             if (ph.h && ph.at === at) { for (const b of wrote) ph.h.update(b); ph.at += n; } else ph.h = null;
           }
+          A.nospace = 0;
           if (req.isPaused() && queued < 4 * 1024 * 1024) req.resume();
         }
-      } catch (e) { writing = false; if (draining) return letGo(); return partFail('disk ' + (e.code || e.message)); }
+      } catch (e) {
+        writing = false;
+        // the drive is full: 507 (the phone stops and says so; /api/status says so too while it stays full)
+        if (diskFull(e)) A.nospace = Date.now();
+        if (draining) return letGo();
+        return diskFull(e) ? partFail('no space', 507) : partFail('disk ' + (e.code || e.message));
+      }
       writing = false;
       if (draining) return letGo();
       if (A.superseded && !over) return partFail('replaced');
@@ -1437,25 +1457,35 @@ class FlickServer extends EventEmitter {
     if (!A.complete || !A.done.every(Boolean) || A.reqs.size) return this._json(res, 409, { ok: false, error: 'incomplete' });
     if (sums && (!A.resumable || sums.length !== A.parts)) return this._json(res, 400, { ok: false, error: 'bad commit' });
     if (A.check && A.want !== want) return this._json(res, 409, { ok: false, error: 'checking' });
-    if (!A.check) { A.want = want; A.check = sums ? this._checkParts(A, sums) : this._checkAssembly(A, want); }
-    A.check.then(async (why) => {
-      const answer = (code, o) => { if (!res.headersSent && !res.destroyed) { try { this._json(res, code, o); } catch (e) { /* ignore */ } } };
-      if (A.dropped) return answer(410, this._aborted(A.why));
-      if (why) {
-        this._remember(tid, att, 'aborted', A.resumable);
-        this._dropAssembly(A, true);           // dropped quietly: the phone sends the file again (or gives up and says so)
-        this.emit('log', 'upload ' + tid + ' refused: ' + why);
-        return answer(why === 'checksum' ? 422 : 500, { ok: false, error: why });
-      }
-      A.finished = true;
-      this.assemblies.delete(tid);
-      // (done only once the file is safely closed; otherwise the phone sends it again)
-      try { await (await A.fdP).close(); } catch (e) { fs.unlink(A.path, () => {}); this.emit('upload-failed', { tid, why: 'disk' }); return answer(500, { ok: false, error: 'disk' }); }
-      this._remember(tid, att, 'done', A.resumable);
-      this.emit('upload-progress', { tid, received: A.total, total: A.total });
-      this.emit('upload-done', { tid, tmpPath: A.path, name: A.name, size: A.total, ms: Date.now() - A.t0, parts: A.parts });
-      answer(200, { ok: true, done: true });
-    });
+    // the outcome is worked out once, however many times the phone asks: a commit sent again while the check runs (the
+    // first one's connection broke during a long read-back) used to finish the transfer a second time
+    if (!A.check) {
+      A.want = want;
+      A.check = (sums ? this._checkParts(A, sums) : this._checkAssembly(A, want)).then((why) => this._checked(A, why)).catch(() => [500, { ok: false, error: 'check' }]);
+    }
+    A.check.then(([code, o]) => { if (!res.headersSent && !res.destroyed) { try { this._json(res, code, o); } catch (e) { /* ignore */ } } });
+  }
+
+  // what a commit answers once its check is over ([status, body]); a passed check makes the transfer done
+  async _checked(A, why) {
+    const { tid, att } = A;
+    if (A.dropped) return [410, this._aborted(A.why)];
+    if (why) {
+      this._remember(tid, att, 'aborted', A.resumable);
+      this._dropAssembly(A, true);           // dropped quietly: the phone sends the file again (or gives up and says so)
+      this.emit('log', 'upload ' + tid + ' refused: ' + why);
+      // 422 for any check that failed (a wrong checksum, a file that can't be read back whole): the phone starts over.
+      // (A 500 made it ask again, hear "aborted" and show the send as canceled on the PC.)
+      return [422, { ok: false, error: why }];
+    }
+    A.finished = true;
+    this.assemblies.delete(tid);
+    // (done only once the file is safely closed; otherwise the phone sends it again)
+    try { await (await A.fdP).close(); } catch (e) { fs.unlink(A.path, () => {}); this.emit('upload-failed', { tid, why: 'disk' }); return [500, { ok: false, error: 'disk' }]; }
+    this._remember(tid, att, 'done', A.resumable);
+    this.emit('upload-progress', { tid, received: A.total, total: A.total });
+    this.emit('upload-done', { tid, tmpPath: A.path, name: A.name, size: A.total, ms: Date.now() - A.t0, parts: A.parts });
+    return [200, { ok: true, done: true }];
   }
 
   // null when the assembled file's SHA-256 is want, otherwise why not
@@ -1528,13 +1558,18 @@ class FlickServer extends EventEmitter {
     if (!tid || (owner && owner !== q.get('device'))) return this._json(res, 404, { ok: false, error: 'gone' });
     const seen = this.partsSeen.get(tid + ':' + att);
     if (seen && seen.until > Date.now()) return seen.what === 'done' ? this._json(res, 200, { ok: true, done: true }) : this._json(res, 410, this._aborted(seen.why));
+    // (a transfer whose writes ran into a full drive, which still has no room for the rest: 507, and the phone stops
+    // and says so, even when it didn't hear the answer to the write that failed)
+    const full = (X, got) => X.nospace && !this._roomFor(X.total - got);
     const A = this.assemblies.get(tid);
     if (A && A.att === att && !A.finished && A.resumable) {
+      if (full(A, A.saved.reduce((x, y) => x + y, 0))) return this._json(res, 507, { ok: false, error: 'no space' });
       return this._json(res, 200, { ok: true, kind: 'parts', total: A.total, parts: A.parts, start: A.start, plen: A.plen, saved: A.saved, done: A.done,
         complete: A.complete, checking: !!A.check, verify: A.verify });
     }
     const B = this.bundleAsm.get(tid);
     if (B && B.att === att && !B.finished && B.resumable) {
+      if (full(B, B.got.reduce((x, y) => x + y, 0))) return this._json(res, 507, { ok: false, error: 'no space' });
       const at = B.ents.map((e, si) => this._streamAt(B, si));
       return this._json(res, 200, { ok: true, kind: 'bundle', streams: B.K, next: at.map((x) => x.next), part: at.map((x) => x.part),
         done: B.done, bytes: B.got.reduce((x, y) => x + y, 0) });
@@ -1604,8 +1639,18 @@ class FlickServer extends EventEmitter {
       const items = list.map((x) => ({ k: String((x && x.k) || '').slice(0, 64), name: String((x && x.name) || '').slice(0, 300), size: Math.floor(Number(x && x.size)) || 0 }))
         .filter((x) => x.k && x.size > 0);
       if (!this.haveFiles) return this._json(res, 200, { ok: true, have: {} });
-      try { this._json(res, 200, { ok: true, have: (await this.haveFiles(items)) || {} }); }
-      catch (e) { this._json(res, 200, { ok: true, have: {} }); }
+      // The lookup can take a while (a large re-send on a slow disk: each likely copy here is read). Until it's ready a
+      // space goes out every 2 s, the answer's head with the first (JSON may start with spaces): the phone neither gives
+      // up on its connection after a few silent seconds and asks again (the lookup ran twice), nor after 30 s (and sent
+      // everything the PC has).
+      this._cors(res);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.on('error', () => {});
+      const alive = setInterval(() => { if (!res.destroyed && !res.writableEnded) res.write(' '); }, 2000);
+      let have = {};
+      try { have = (await this.haveFiles(items)) || {}; } catch (e) { have = {}; }
+      clearInterval(alive);
+      if (!res.destroyed && !res.writableEnded) res.end(JSON.stringify({ ok: true, have }));
     });
   }
 
@@ -1628,12 +1673,25 @@ class FlickServer extends EventEmitter {
     return false;
   }
 
+  // An offer lasts as long as the phone may still fetch it: until 30 minutes after it last asked for it (never while it's
+  // being sent), and hours for one it hasn't asked for yet. The phone fetches a large batch a few files at a time, so
+  // the last files of it can start long after they were all offered (they used to be gone after 30 minutes: 404).
   offerFile(filePath, mime, device) {
     const st = fs.statSync(filePath);
     const fid = rid(8);
     // device: the phone it's offered to (the one named, else the one in use), for the history once it has fetched it
-    this.outgoing.set(fid, { path: filePath, name: path.basename(filePath), size: st.size, mime: mime || 'application/octet-stream', at: Date.now(), device: device || (this.session ? this.session.device : null) });
-    setTimeout(() => this.outgoing.delete(fid), 30 * 60 * 1000);
+    this.outgoing.set(fid, { path: filePath, name: path.basename(filePath), size: st.size, mime: mime || 'application/octet-stream', at: Date.now(),
+      used: 0, sending: 0, device: device || (this.session ? this.session.device : null) });
+    if (!this.offerT) {
+      this.offerT = setInterval(() => {
+        const now = Date.now();
+        for (const [k, f] of this.outgoing) {
+          if (!f.sending && (f.used ? now - f.used > OFFER_IDLE_MS : now - f.at > RESUME_KEEP_MS)) this.outgoing.delete(k);
+        }
+        if (!this.outgoing.size) { clearInterval(this.offerT); this.offerT = null; }
+      }, 60000);
+      if (this.offerT.unref) this.offerT.unref();
+    }
     return { fid, name: path.basename(filePath), size: st.size };
   }
 
@@ -1641,6 +1699,7 @@ class FlickServer extends EventEmitter {
   _handleDownload(req, res, fid) {
     const f = this.outgoing.get(fid);
     if (!f) return this._json(res, 404, { ok: false });
+    f.used = Date.now();
     let st;
     try { st = fs.statSync(f.path); } catch (e) { return this._json(res, 404, { ok: false }); }
     let start = 0, end = st.size - 1, partial = false;
@@ -1662,7 +1721,8 @@ class FlickServer extends EventEmitter {
     if (!st.size) { res.end(); this.emit('download-done', { fid, total: 0 }); return; }
     const rs = fs.createReadStream(f.path, { highWaterMark: 1024 * 1024, start, end });
     this.streaming = (this.streaming || 0) + 1;
-    res.on('close', () => { rs.destroy(); this.streaming = Math.max(0, (this.streaming || 0) - 1); });
+    f.sending = (f.sending || 0) + 1;
+    res.on('close', () => { rs.destroy(); this.streaming = Math.max(0, (this.streaming || 0) - 1); f.sending--; f.used = Date.now(); });
     f.sent = f.sent || 0;
     let last = 0;
     rs.on('data', (c) => {

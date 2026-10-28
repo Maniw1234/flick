@@ -22,7 +22,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
-import java.net.URL;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
@@ -49,6 +48,7 @@ final class Transfers {
         this.ctx = ctx.getApplicationContext();
         this.lib = lib;
         this.em = em;
+        Sends.Nets.install(this.ctx);               // sockets to the PC go over its network (see Wire.Binder)
     }
 
     /** Up to n threads; idle ones end, so a pool costs nothing between transfers. */
@@ -184,7 +184,7 @@ final class Transfers {
                         code = 200;
                         ok = true;
                     } else {
-                    c = (HttpURLConnection) new URL(withoutParallel(url)).openConnection();
+                    c = Parallel.open(withoutParallel(url));          // (never through a network's proxy: see Parallel.open)
                     g = Watchdog.guard(abort, c);
                     c.setConnectTimeout(5000);
                     c.setReadTimeout(60000);
@@ -271,7 +271,7 @@ final class Transfers {
                         code = 200;
                         ok = true;
                     } else {
-                    c = (HttpURLConnection) new URL(withoutParallel(url) + "&files=" + b.files + "&bytes=" + b.bytes).openConnection();
+                    c = Parallel.open(withoutParallel(url) + "&files=" + b.files + "&bytes=" + b.bytes);
                     g = Watchdog.guard(abort, c);
                     c.setConnectTimeout(5000);
                     c.setReadTimeout(120000);
@@ -331,7 +331,12 @@ final class Transfers {
                     long hint = 0;
                     try { hint = Long.parseLong(sizeHint); } catch (Throwable e) { /* unknown */ }
                     int ways = parallelOf(rawUrl);
-                    if (ways > 1 && hint >= PARALLEL_MIN && Files.granted(ctx)) {
+                    // straight to the PC when the page's URL is an encrypted link's (or Bluetooth's) local port
+                    Object[] direct = Wire.direct(url);
+                    // a large file in byte ranges, which carry on from where a cut left them: several at once when the page
+                    // asks for that, else one (over Bluetooth, or with "parallel" off), where reading the file straight
+                    // through failed on any cut
+                    if (hint >= PARALLEL_MIN && Files.granted(ctx) && (ways > 1 || direct != null)) {
                         Files.Incoming dest = Files.reserve(Files.inbox(), name);
                         final long[] last = {0};
                         final long tot = hint;
@@ -343,9 +348,7 @@ final class Transfers {
                                     synchronized (last) { if (now - last[0] > 120 || done == tot) { last[0] = now; event("down", "fid", fid, done, tot, null); } }
                                 }
                             };
-                            // straight to the PC when the page's URL is an encrypted link's local port (no proxy hop)
-                            Object[] direct = Wire.direct(url);
-                            if (direct != null) Parallel.downloadDirect((Wire.Link) direct[0], (String) direct[1], dest.part, hint, Math.max(ways, 4), prog);
+                            if (direct != null) Parallel.downloadDirect((Wire.Link) direct[0], (String) direct[1], dest.part, hint, ways > 1 ? Math.max(ways, 4) : 1, prog);
                             else Parallel.download(url, dest.part, hint, ways, prog);
                         }
                         catch (Throwable e) { dest.cancel(); throw e; }
@@ -356,20 +359,18 @@ final class Transfers {
                     } else {
                     final long total;
                     InputStream in;
-                    Object[] direct = Wire.direct(url);
                     if (direct != null) {
                         // straight to the PC (no hop through the page's local proxy), over a connection kept from the
-                        // request before when there is one
-                        wc = Wire.Call.open((Wire.Link) direct[0], "GET", (String) direct[1], Wire.NO_BODY, null, 60000);
-                        g = Watchdog.guard(null, wc);            // no abort for downloads; it still ends one that stalls
+                        // request before when there is one (a new one when that one went silent)
                         int[] code = new int[1];
                         long[] len = new long[1];
-                        wc.respond(code, len);
+                        wc = Wire.Call.fetch((Wire.Link) direct[0], (String) direct[1], null, 60000, code, len, null);
+                        g = Watchdog.guard(null, wc);            // no abort for downloads; it still ends one that stalls
                         if (code[0] != 200) throw new IOException("http " + code[0]);
                         total = len[0];
                         in = g.watch(wc.body(total));
                     } else {
-                        c = (HttpURLConnection) new URL(url).openConnection();
+                        c = Parallel.open(url);
                         g = Watchdog.guard(null, c);             // no abort for downloads; it still ends one that stalls
                         c.setConnectTimeout(5000);
                         c.setReadTimeout(60000);

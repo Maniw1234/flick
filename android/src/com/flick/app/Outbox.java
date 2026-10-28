@@ -11,14 +11,18 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
+import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -81,6 +85,15 @@ final class Outbox {
         private static final long serialVersionUID = 1L;
         Restart(String why) { super(why); }
     }
+    /**
+     * The PC answered with an error of its own (500: it couldn't write a file, say). Tried again a few times, as it may
+     * pass (a file another program holds); one that keeps coming ends the send (MAX_REFUSALS). Bytes moving in between
+     * don't count as getting anywhere: each try sends some before the PC answers.
+     */
+    static final class Refusal extends IOException {
+        private static final long serialVersionUID = 1L;
+        Refusal(String why) { super(why); }
+    }
 
     static final class Item {
         final String path, id, name;
@@ -99,12 +112,19 @@ final class Outbox {
         boolean committed, checked, retried;
         boolean again;                                // tried again by the user: the PC takes it even if it was dropped there
         boolean begun;                                // this attempt sent the PC data: ask how far it got before more
+        boolean retake;                               // paused and resumed before the pause took effect (see failed)
         String state = QUEUED, why, want, sig, refused;
         volatile String att;                          // written under this, read by the part threads
         int ways, restarts, fails;
+        int refusals;                                 // tries the PC answered with an error in a row (see Refusal)
         long total, ended, waitingSince, wakeAt;
         final Set<Integer> had = new HashSet<Integer>();
         AtomicBoolean stop = new AtomicBoolean(false);
+        final Object disk = new Object();             // its record is written by one thread at a time (see save)
+        String[] psums;                               // each part's checksum once the PC has it whole (this attempt)
+        // each part's checksum so far at a few points it passed (this attempt, this process): carrying on after a cut
+        // starts from the last point the PC has, instead of reading everything the PC has again (see sendPart)
+        final Map<Integer, TreeMap<Long, MessageDigest>> marks = new HashMap<Integer, TreeMap<Long, MessageDigest>>();
         // progress (any thread)
         final AtomicLong sent = new AtomicLong();
         private double rate;
@@ -208,6 +228,11 @@ final class Outbox {
             JSONArray h = new JSONArray();
             for (Integer i : had) h.put(i.intValue());
             o.put("had", h);
+            if (psums != null) {
+                JSONArray ps = new JSONArray();
+                for (String x : psums) ps.put(x == null ? "" : x);
+                o.put("psums", ps);
+            }
             return o;
         }
 
@@ -243,6 +268,11 @@ final class Outbox {
             j.waitingSince = o.optLong("waitingSince", 0);
             JSONArray h = o.optJSONArray("had");
             for (int i = 0; h != null && i < h.length(); i++) j.had.add(h.optInt(i));
+            JSONArray ps = o.optJSONArray("psums");
+            if (ps != null) {
+                j.psums = new String[ps.length()];
+                for (int i = 0; i < ps.length(); i++) { String x = ps.optString(i, ""); j.psums[i] = x.length() == 64 ? x : null; }
+            }
             return j;
         }
     }
@@ -250,7 +280,9 @@ final class Outbox {
     // ------------------------------------------------------------ tuning (tests shorten some)
     static final int MAX_RUNNING = 2;                     // jobs moving bytes at once (each over several connections)
     static final long PARALLEL_MIN = 8L * 1024 * 1024;    // smaller files go as one part
+    static final int MANY_FILES = 64;                     // this many files go over several streams, however small
     static final int MAX_RESTARTS = 4;
+    static final int MAX_REFUSALS = 6;                    // (about a minute of tries, see BACKOFF_MS)
     static volatile long GIVE_UP_MS = 6 * 3600 * 1000L;    // as long as the PC keeps what arrived
     static volatile long KEEP_ENDED_MS = 24 * 3600 * 1000L; // finished ones stay in the list this long
     static final int KEEP_ENDED = 30;
@@ -333,9 +365,9 @@ final class Outbox {
         Job j = get(tid);
         if (j == null) return;
         synchronized (j) {
-            if (PAUSED.equals(j.state)) { j.state = QUEUED; j.why = null; j.fails = 0; j.waitingSince = 0; }
+            if (PAUSED.equals(j.state)) { j.state = QUEUED; j.why = null; j.fails = 0; j.refusals = 0; j.waitingSince = 0; }
             else if (WAITING.equals(j.state)) j.wakeAt = 0;
-            else if (RUNNING.equals(j.state) && PAUSED.equals(j.want)) j.want = null;
+            else if (RUNNING.equals(j.state) && PAUSED.equals(j.want)) { j.want = null; j.retake = true; }
             else return;
         }
         save(j);
@@ -366,7 +398,7 @@ final class Outbox {
             else {
                 // a canceled one was dropped on the PC too, and so was one turned down there: it starts over
                 if (CANCELED.equals(j.state) || j.refused != null) newAttempt(j);
-                j.state = QUEUED; j.why = null; j.ended = 0; j.fails = 0; j.waitingSince = 0; j.restarts = 0; j.committed = true; j.retried = true;
+                j.state = QUEUED; j.why = null; j.ended = 0; j.fails = 0; j.refusals = 0; j.waitingSince = 0; j.restarts = 0; j.committed = true; j.retried = true;
                 j.again = true; j.refused = null;
             }
         }
@@ -455,6 +487,7 @@ final class Outbox {
                     if (!due || running >= MAX_RUNNING) continue;
                     j.state = RUNNING;
                     j.want = null;
+                    j.retake = false;
                     j.stop = new AtomicBoolean(false);
                     running++;
                     start.add(j);
@@ -520,6 +553,11 @@ final class Outbox {
             env.changed(j);
             return;                                                  // runJob's kick() starts it again
         }
+        // paused and resumed again before the pause took effect: this try was cut for the pause, and carries on at once
+        // (it used to wait as for a PC that can't be reached, showing "Waiting for" it meanwhile)
+        boolean retake;
+        synchronized (j) { retake = j.retake; j.retake = false; if (retake) j.state = QUEUED; }
+        if (retake) { save(j); env.changed(j); return; }             // runJob's kick() starts it again
         if (!(e instanceof IOException)) env.log("send " + j.tid + ": " + e);
         long delay;
         String late;                                                 // paused or canceled while this was failing
@@ -530,12 +568,14 @@ final class Outbox {
             else if (!j.committed && now() - j.created > DRAG_MS) { delay = -1; }   // a drag that was never finished
             else {
                 j.fails++;
+                if (e instanceof Refusal) j.refusals++;
                 long now = now();
                 if (j.waitingSince == 0) j.waitingSince = now;
                 if (now - j.waitingSince > GIVE_UP_MS) delay = -2;
+                else if (j.refusals >= MAX_REFUSALS) delay = -3;
                 else {
                     long[] b = BACKOFF_MS;
-                    delay = b[Math.min(j.fails - 1, b.length - 1)];
+                    delay = b[Math.min(Math.max(j.fails, j.refusals) - 1, b.length - 1)];
                     j.state = WAITING;
                     j.why = "Waiting for " + j.pcName;
                     j.wakeAt = now + delay;
@@ -545,6 +585,7 @@ final class Outbox {
         if (lateWish(j, late)) return;
         if (delay == -1) { settle(j, CANCELED, null); return; }
         if (delay == -2) { settle(j, FAILED, "Couldn't reach " + j.pcName); return; }
+        if (delay == -3) { env.log("send " + j.tid + " gives up: " + e.getMessage()); settle(j, FAILED, "Couldn't save it on " + j.pcName); return; }
         env.log("send " + j.tid + " waits " + delay + " ms: " + e.getMessage());
         save(j);
         env.changed(j);
@@ -584,6 +625,8 @@ final class Outbox {
         j.sent.set(0);
         j.ways = 0;
         j.begun = false;
+        j.psums = null;
+        synchronized (j.marks) { j.marks.clear(); }
     }
 
     // what the PC answered to a part, a stream or a commit
@@ -596,8 +639,12 @@ final class Outbox {
         if (a.code == 422) throw new Restart("arrived damaged");
         if (a.code == 409 && "gone".equals(err)) throw new Restart("the PC doesn't have it any more");
         if (a.code == 400) throw new Restart("refused: " + err);
+        if (a.code >= 500) throw new Refusal("http " + a.code + " " + err);
         throw new IOException("http " + a.code + " " + err);
     }
+
+    /** The PC took a part or a stream: it isn't refusing this send. */
+    private static void accepted(Job j) { synchronized (j) { j.refusals = 0; } }
 
     private void progress(Job j, long n) {
         long s = j.sent.addAndGet(n);
@@ -649,7 +696,7 @@ final class Outbox {
             if (j.att == null || (j.sig != null && !j.sig.equals(sig))) { newAttempt(j); j.restarts = Math.max(0, j.restarts - 1); }
             j.sig = sig;
             j.total = total;
-            if (j.ways == 0) j.ways = !j.parallel || total < PARALLEL_MIN ? 1 : total < (256L << 20) ? 4 : 6;
+            if (j.ways == 0) j.ways = !split(j) || total < PARALLEL_MIN ? 1 : total < (256L << 20) ? 4 : 6;
             check = j.skipDup && !j.checked;
         }
         save(j);
@@ -696,16 +743,20 @@ final class Outbox {
         final AtomicBoolean stop;
         synchronized (j) { stop = j.stop; }
         markBegun(j);
-        // each part's checksum (the PC checks what it got against them): worked out from the bytes as they go; a part the
-        // PC has whole already is read for it
+        // each part's checksum (the PC checks what it got against them): worked out from the bytes as they go, and kept
+        // (written down) once the PC has the part whole; a part the PC has whole whose checksum isn't known here is read
+        // for it (reading the parts again after a cut at the end, the whole file, was most of carrying on)
         final String[] sums = new String[n];
+        final String[] known;
+        synchronized (j) { if (j.psums == null || j.psums.length != n) j.psums = new String[n]; known = j.psums.clone(); }
         List<Future<?>> parts = new ArrayList<Future<?>>();
         for (int i = 0; i < n; i++) {
             final int index = i;
             final long off = i * size, len = Math.max(0, Math.min(size, total - off));
+            if (done[i] && known[i] != null) { sums[i] = known[i]; continue; }
             if (done[i]) {
                 parts.add(pool.submit(new Callable<Void>() {
-                    @Override public Void call() throws Exception { sums[index] = rangeSum(f, off, len, stop); return null; }
+                    @Override public Void call() throws Exception { sums[index] = rangeSum(f, off, len, stop); keepSum(j, n, index, sums[index]); return null; }
                 }));
                 continue;
             }
@@ -713,7 +764,7 @@ final class Outbox {
                 @Override public Void call() throws Exception {
                     // one part failing stops the others at once (even one waiting for its answer): all of them
                     // carry on together from where the PC stands
-                    try { sums[index] = sendPart(j, l, auth, f, it.name, index, n, size, total, from[index], stop); return null; }
+                    try { sums[index] = sendPart(j, l, auth, f, it.name, index, n, size, total, from[index], stop); keepSum(j, n, index, sums[index]); return null; }
                     catch (Exception e) { Watchdog.abort(stop); throw e; }
                 }
             }));
@@ -723,6 +774,19 @@ final class Outbox {
         for (int i = 0; i < n; i++) { if (i > 0) sha.append(','); sha.append(sums[i]); }
         commit(j, l, auth, sha.toString(), total, stop);
         return DONE;
+    }
+
+    /**
+     * Several connections at once (the user's "parallel" setting), except over Bluetooth: one link carries them all
+     * there, so they only take turns, each one slower than the stall limit allows on a weak link (and the page sends
+     * over Bluetooth on one connection too). Called under j's lock.
+     */
+    private static boolean split(Job j) { return j.parallel && !"bluetooth".equals(j.via); }
+
+    /** Part index's checksum, now that the PC has the part whole: a later try (in a new process too) needn't read it. */
+    private void keepSum(Job j, int n, int index, String sum) {
+        synchronized (j) { if (j.psums == null || j.psums.length != n) return; j.psums[index] = sum; }
+        save(j);
     }
 
     /** This attempt is about to send the PC data: from now on a retry asks how far it got first. */
@@ -737,12 +801,15 @@ final class Outbox {
         long off = index * size, len = Math.max(0, Math.min(size, total - off));
         String target = "/api/part?" + q(j, auth) + "&parts=" + n + "&total=" + total + "&index=" + index + "&offset=" + off +
                 "&resume=1&from=" + from + "&verify=1&name=" + Wire.enc(name) + (j.committed() ? "&committed=1" : "");
-        java.security.MessageDigest md = sha256();
+        // a part carried on from the middle: its checksum starts with the bytes the PC has already, from the last point
+        // this part's checksum passed before them (or from its start)
+        long[] at = {0};
+        MessageDigest md = mark(j, index, from, at);
+        if (md == null) md = sha256();
         RandomAccessFile raf = new RandomAccessFile(f, "r");
         byte[] buf = new byte[BUF];
         try {
-            // a part carried on from the middle: its checksum starts with the bytes the PC has already
-            if (from > 0) { raf.seek(off); hashFrom(raf, md, from, buf, stop); }
+            if (from > at[0]) { raf.seek(off + at[0]); hashFrom(raf, md, from - at[0], buf, stop); }
         } catch (IOException e) {
             try { raf.close(); } catch (IOException x) { /* ignore */ }
             throw e;
@@ -755,12 +822,14 @@ final class Outbox {
         try {
             OutputStream out = g.watch(c.body());
             raf.seek(off + from);
-            long left = len - from;
+            long left = len - from, pos = from, next = (from / MARK + 1) * MARK;
             while (left > 0) {
                 if (stop.get()) throw new IOException("stopped");
                 int r = raf.read(buf, 0, (int) Math.min(buf.length, left));
                 if (r < 0) throw new Restart("the file changed");
                 md.update(buf, 0, r);
+                pos += r;
+                if (pos >= next) { mark(j, index, pos, md); next = (pos / MARK + 1) * MARK; }
                 out.write(buf, 0, r);
                 left -= r;
                 progress(j, r);
@@ -768,6 +837,7 @@ final class Outbox {
             g.idle();
             through = true;
             check(j, c.answer(64 * 1024));
+            accepted(j);
             return hex(md.digest());
         } catch (Fatal e) {
             throw e;
@@ -794,6 +864,30 @@ final class Outbox {
         if (g.ended() != null || stop.get()) return;
         Wire.Answer a = c.answerAfterCut(64 * 1024);
         if (a != null && a.code != 200) check(j, a);
+    }
+
+    static final long MARK = 16L << 20;                    // a part's checksum so far is kept every this many bytes
+
+    /** Part index's checksum so far (bytes [0, pos) of it): kept, the last few. */
+    private static void mark(Job j, int index, long pos, MessageDigest md) {
+        MessageDigest copy;
+        try { copy = (MessageDigest) md.clone(); } catch (CloneNotSupportedException e) { return; }
+        synchronized (j.marks) {
+            TreeMap<Long, MessageDigest> m = j.marks.get(index);
+            if (m == null) j.marks.put(index, m = new TreeMap<Long, MessageDigest>());
+            m.put(pos, copy);
+            while (m.size() > 4) m.pollFirstEntry();
+        }
+    }
+
+    /** Part index's checksum at the last kept point at or before from (that point in at[0]), or null (from its start). */
+    private static MessageDigest mark(Job j, int index, long from, long[] at) {
+        synchronized (j.marks) {
+            TreeMap<Long, MessageDigest> m = j.marks.get(index);
+            Map.Entry<Long, MessageDigest> e = m == null ? null : m.floorEntry(from);
+            if (e == null) return null;
+            try { at[0] = e.getKey(); return (MessageDigest) e.getValue().clone(); } catch (CloneNotSupportedException x) { return null; }
+        }
     }
 
     private static java.security.MessageDigest sha256() throws IOException {
@@ -888,7 +982,10 @@ final class Outbox {
             if (j.att == null || (j.sig != null && !j.sig.equals(sig))) { newAttempt(j); j.restarts = Math.max(0, j.restarts - 1); }
             j.sig = sig;
             j.total = b.bytes;
-            if (j.ways == 0) j.ways = !j.parallel || b.files < 2 || b.bytes < PARALLEL_MIN ? 1 : Math.min(4, b.files);
+            // several streams for many files, however small they are: each file costs the PC a few disk calls in turn
+            // (opened, written, dated, closed), and streams side by side do them at once (8,000 tiny files: about twice
+            // as fast on the PC)
+            if (j.ways == 0) j.ways = !split(j) || b.files < 2 || (b.bytes < PARALLEL_MIN && b.files < MANY_FILES) ? 1 : Math.min(4, b.files);
         }
         save(j);
         final List<Bundle> streams = b.split(j.ways);
@@ -954,6 +1051,7 @@ final class Outbox {
             g.idle();
             through = true;
             check(j, c.answer(64 * 1024));
+            accepted(j);
             return;
         } catch (Bundle.ResumeLost e) {
             // the file it was to carry on with can't be read now: that entry goes again from its start (or is left out)
@@ -997,9 +1095,10 @@ final class Outbox {
     }
 
     private static int rank(IOException e) {
-        if (e instanceof Fatal) return 4;
-        if (e instanceof Aborted) return 3;
-        if (e instanceof Restart) return 2;
+        if (e instanceof Fatal) return 5;
+        if (e instanceof Aborted) return 4;
+        if (e instanceof Restart) return 3;
+        if (e instanceof Refusal) return 2;
         String m = e.getMessage();
         return m != null && (m.startsWith("aborted") || m.startsWith("stopped")) ? 0 : 1;
     }
@@ -1032,14 +1131,18 @@ final class Outbox {
     // ------------------------------------------------------------ written down
     private void save(Job j) {
         if (dead) return;
-        try {
-            byte[] b = j.save().toString().getBytes("UTF-8");
-            File tmp = new File(dir, j.tid + ".json.tmp"), f = new File(dir, j.tid + ".json");
-            OutputStream o = new FileOutputStream(tmp);
-            try { o.write(b); } finally { o.close(); }
-            if (!tmp.renameTo(f)) { f.delete(); tmp.renameTo(f); }
-        } catch (Throwable e) {
-            env.log("outbox: can't save " + j.tid + ": " + e);
+        // one thread at a time: two at once (the send itself, and the page moving it to the PC's new address, say) wrote
+        // over each other's half-made file, and could leave a damaged record or none (the send lost on the next start)
+        synchronized (j.disk) {
+            try {
+                byte[] b = j.save().toString().getBytes("UTF-8");
+                File tmp = new File(dir, j.tid + ".json.tmp"), f = new File(dir, j.tid + ".json");
+                OutputStream o = new FileOutputStream(tmp);
+                try { o.write(b); } finally { o.close(); }
+                if (!tmp.renameTo(f)) { f.delete(); tmp.renameTo(f); }
+            } catch (Throwable e) {
+                env.log("outbox: can't save " + j.tid + ": " + e);
+            }
         }
     }
 

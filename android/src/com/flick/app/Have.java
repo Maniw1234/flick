@@ -79,7 +79,12 @@ final class Have {
             if (list.length() == 0 && bytes <= 0) return have;
             JSONObject body = new JSONObject();
             body.put("files", list);
-            Wire.Answer a = Wire.postJson(l, "/api/have?" + auth + (bytes > 0 ? "&bytes=" + bytes : ""), body.toString(), 30000);
+            // a PC reads each likely copy it has, which takes a while for a large re-send on a slow disk: more time the more
+            // files the list names (a PC from 1.1.0 says nothing until it's done, so a kept connection is given up after a
+            // few silent seconds and the list asked about once more; later ones begin the answer within 2 s)
+            int n = list.length();
+            Wire.Answer a = Wire.postJson(l, "/api/have?" + auth + (bytes > 0 ? "&bytes=" + bytes : ""), body.toString(),
+                    (int) Math.min(600000L, 30000L + 100L * n));
             if (a.code == 507 && full != null) full[0] = true;
             if (a.code != 200) return have;
             JSONObject got = a.json().optJSONObject("have");

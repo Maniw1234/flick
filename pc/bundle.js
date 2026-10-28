@@ -14,14 +14,29 @@ const path = require('path');
 
 const MAGIC = Buffer.from('FLKB1\n', 'latin1');
 const MAX_JSON = 256 * 1024;
+// the manifest names every picked item ("roots"): thousands of photos picked one by one go past 256 KB (phones up to
+// 1.1.0 send them all)
+const MAX_MANIFEST = 8 * 1024 * 1024;
 const MAX_ENTRIES = 200000;
 const MAX_DEPTH = 64;
 
+// A name's length: at most 150 characters, and where names are limited in bytes (Linux, macOS: 255) 230 bytes, with room
+// for a " (2)" (140 Hebrew letters are 280 bytes: the whole folder failed there)
+const tooLong = (s) => s.length > 150 || (process.platform !== 'win32' && Buffer.byteLength(s) > 230);
+
 function safeSegment(n) {
-  let s = String(n || '').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').replace(/[. ]+$/, '').trim();
+  // (and the invisible direction marks: "photo<right-to-left>gnp.exe" shows in Explorer as "photoexe.png")
+  let s = String(n || '').replace(/[<>:"/\\|?*\u0000-\u001f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '_').replace(/[. ]+$/, '').trim();
   if (!s || s === '.' || s === '..') s = '_';
-  if (/^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i.test(s)) s = '_' + s;
-  if (s.length > 150) { const e = path.extname(s).slice(0, 20); s = s.slice(0, 150 - e.length) + e; }
+  // Windows device names, with or without an extension (as pc/main.js and pc/sync.js have them)
+  if (/^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$)( *\..*)?$/i.test(s)) s = '_' + s;
+  if (tooLong(s)) {
+    // shortened by whole characters (never half of one written in two), keeping the extension
+    const e = Array.from(path.extname(s)).slice(0, 20).join('');
+    const base = Array.from(s.slice(0, s.length - path.extname(s).length));
+    while (base.length && tooLong(base.join('') + e)) base.pop();
+    s = (base.join('') + e).replace(/[. ]+$/, '') || '_';
+  }
   return s;
 }
 
@@ -47,7 +62,8 @@ class BundleReceiver {
     this.root = path.resolve(root);
     this.hooks = hooks || {};
     this.stage = 'magic';
-    this.pend = Buffer.alloc(0);      // bytes of a fixed-size field split across chunks
+    this.pend = [];                   // pieces of a fixed-size field split across chunks (joined once it's whole)
+    this.have = 0;                    // their bytes
     this.need = MAGIC.length;
     this.manifest = null;
     this.entries = 0;
@@ -55,6 +71,8 @@ class BundleReceiver {
     this.total = 0;
     this.fd = null; this.left = 0; this.cur = null;
     this.tops = shared ? shared.tops : [];          // top-level names, in arrival order
+    // the same names as a set: a lookup per entry (an array search was quadratic with thousands of picked files)
+    this.topSet = shared ? (shared.topSet || (shared.topSet = new Set(shared.tops))) : new Set();
     this.taken = shared ? shared.taken : new Map(); // lower-cased staged file paths
     this.assigned = shared ? shared.assigned : null; // requested path -> staged path: a stream sent again rewrites its own files
     this.done = false;
@@ -72,7 +90,7 @@ class BundleReceiver {
     this.dirs.add(d);
   }
 
-  _top(seg0) { if (!this.tops.includes(seg0)) this.tops.push(seg0); }
+  _top(seg0) { if (!this.topSet.has(seg0)) { this.topSet.add(seg0); this.tops.push(seg0); } }
 
   _resolve(segs) {
     const full = path.resolve(this.root, ...segs);
@@ -166,12 +184,15 @@ class BundleReceiver {
         if (this.left === 0) await this._closeFile();
         continue;
       }
-      // fixed-size fields: magic, lengths, JSON blocks
-      const take = Math.min(this.need - this.pend.length, chunk.length - off);
-      this.pend = this.pend.length ? Buffer.concat([this.pend, chunk.subarray(off, off + take)]) : Buffer.from(chunk.subarray(off, off + take));
+      // fixed-size fields: magic, lengths, JSON blocks (one that spans chunks is joined once it's all here: joining at
+      // every chunk copied a large manifest over and over)
+      const take = Math.min(this.need - this.have, chunk.length - off);
+      this.pend.push(chunk.subarray(off, off + take));
+      this.have += take;
       off += take;
-      if (this.pend.length < this.need) break;
-      const field = this.pend; this.pend = Buffer.alloc(0);
+      if (this.have < this.need) break;
+      const field = this.pend.length === 1 ? this.pend[0] : Buffer.concat(this.pend, this.have);
+      this.pend = []; this.have = 0;
       await this._field(field);
     }
   }
@@ -183,7 +204,7 @@ class BundleReceiver {
         this.stage = 'mlen'; this.need = 4; return;
       case 'mlen': {
         const n = b.readUInt32BE(0);
-        if (n < 2 || n > MAX_JSON) throw new Error('bad manifest');
+        if (n < 2 || n > MAX_MANIFEST) throw new Error('bad manifest');
         this.stage = 'manifest'; this.need = n; return;
       }
       case 'manifest': {
