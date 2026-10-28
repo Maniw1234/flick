@@ -29,7 +29,7 @@
 .fic.folder { background: none; border-radius: 0; width: 40px; }
 .fic.folder svg { width: 40px; height: 33px; }
 .ftx { flex: 1; min-width: 0; }
-.ftx b { display: block; font-size: 16px; font-weight: 600; line-height: 1.25; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ftx b { display: block; font-size: 16px; font-weight: 600; line-height: 1.25; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
 .ftx small { display: block; margin-top: 3px; font-size: 13px; line-height: 1.3; color: #8e8e93; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ftx .ftop { display: flex; align-items: baseline; gap: 10px; }
 .ftx .ftop b { flex: 1; min-width: 0; }
@@ -144,7 +144,7 @@ body.fpicking #scroller { padding-bottom: calc(var(--bottom) + 130px); }
 .fcic svg { width: 20px; height: 20px; }
 .fcic img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .fctx { flex: 1; min-width: 0; }
-.fctx b { display: block; font-size: 15px; font-weight: 600; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fctx b { display: block; font-size: 15px; font-weight: 600; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
 .fctx b.two { white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .fctx small { display: block; margin-top: 3px; font-size: 12.5px; line-height: 1.3; color: #8e8e93; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fcsend { flex: none; width: 46px; height: 46px; margin-right: 4px; border-radius: 23px; display: grid; place-items: center; color: #d1d1d6; }
@@ -215,7 +215,7 @@ textarea.fbin { min-height: 148px; }
 .pvx:active { background: rgba(255,255,255,.14); }
 .pvx svg { width: 24px; height: 24px; }
 .pvt { flex: 1; min-width: 0; }
-.pvt b { display: block; font-size: 16px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pvt b { display: block; font-size: 16px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
 .pvt small { display: block; min-height: 15px; margin-top: 1px; font-size: 12.5px; font-weight: 550; color: #a1a1a6; font-variant-numeric: tabular-nums; }
 .pvbot { position: absolute; left: 0; right: 0; bottom: 0; padding: 34px 14px calc(var(--bottom) + 14px); touch-action: manipulation;
   background: linear-gradient(0deg, rgba(0,0,0,.78), rgba(0,0,0,0)); transition: opacity .2s; }
@@ -242,7 +242,8 @@ textarea.fbin { min-height: 148px; }
 .fpv.nochrome .pvtop, .fpv.nochrome .pvbot { opacity: 0; pointer-events: none; }
 .pvhint { position: absolute; left: 50%; top: calc(var(--top) + 70px); transform: translateX(-50%); display: flex; align-items: center; gap: 6px; padding: 9px 16px 9px 12px;
   border-radius: 20px; background: rgba(44,44,48,0.92); border: 0.5px solid rgba(255,255,255,0.1); font-size: 14px; font-weight: 650; white-space: nowrap;
-  opacity: 0; pointer-events: none; transition: background .15s, color .15s; }
+  max-width: calc(100vw - 32px); opacity: 0; pointer-events: none; transition: background .15s, color .15s; }
+.pvhint span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }   /* (a long PC name went off both sides) */
 .pvhint svg { width: 18px; height: 18px; flex: none; }
 .pvhint.go { background: #fff; color: #000; }
 

@@ -144,7 +144,12 @@
   const FOLDER_SVG = '<svg viewBox="0 0 64 52"><defs><linearGradient id="fg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8fb4ff"/><stop offset="1" stop-color="#4c7dff"/></linearGradient></defs><path d="M4 9a5 5 0 0 1 5-5h14l6 6h26a5 5 0 0 1 5 5v28a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5z" fill="#3a5fcc"/><path d="M4 18a5 5 0 0 1 5-5h46a5 5 0 0 1 5 5v25a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5z" fill="url(#fg)"/></svg>';
 
   let sheetOpen = false, sheetAt = 0;
-  let sheetHideT = 0;
+  let sheetHideT = 0, sheetFrom = null, sheetFocused = false;
+  // when a keyboard or a screen reader (a click no finger or mouse made: TalkBack's double tap) was used last
+  let pressedAt = 0, assistAt = 0;
+  document.addEventListener('pointerdown', () => { pressedAt = now(); }, { capture: true, passive: true });
+  document.addEventListener('keydown', () => { assistAt = now(); }, { capture: true, passive: true });
+  document.addEventListener('click', () => { if (now() - pressedAt > 1000) assistAt = now(); }, { capture: true, passive: true });
   function openSheet(title, actions) {
     clearTimeout(sheetHideT);          // a sheet opened from another sheet must not be hidden by its close timer
     sheetAt = now();
@@ -164,9 +169,20 @@
       b.onclick = () => { if (now() - sheetAt < 350) return; closeSheet(); setTimeout(a.run, 60); };
       box.appendChild(b);
     }
+    const from = document.activeElement;
+    if ((sh.hidden || sh.classList.contains('closing')) && !sh.contains(from)) { sheetFrom = from; sheetFocused = false; }
     sh.hidden = false; sh.classList.remove('closing');
     sheetOpen = true;
     haptic('soft');
+    // A screen reader (or a keyboard) is taken to the menu: it comes last on the page, after every card, so TalkBack
+    // reached it only past all of them. (Not for a finger: its menu would show a focus ring. Nor away from a text
+    // field being typed in: its keyboard would go.)
+    setTimeout(() => {
+      const a = document.activeElement;
+      if (!sheetOpen || assistAt < pressedAt || now() - assistAt > 1000 || (a && /^(INPUT|TEXTAREA)$/.test(a.tagName) && !sh.contains(a))) return;
+      const f = box.querySelector('button:not([disabled]), input, [tabindex]');
+      if (f) { f.focus({ preventScroll: true }); sheetFocused = true; }
+    }, 0);
   }
   function closeSheet() {
     const sh = $('sheet');
@@ -176,6 +192,12 @@
     for (const v of sh.querySelectorAll('video')) v.pause();
     clearTimeout(sheetHideT);
     sheetHideT = setTimeout(() => { sh.hidden = true; sh.classList.remove('closing'); }, 200);
+    // and back where it was opened from (when it took the focus)
+    const from = sheetFrom;
+    sheetFrom = null;
+    if (sheetFocused && from && from.isConnected && sh.contains(document.activeElement) && typeof from.focus === 'function') {
+      try { from.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
+    }
   }
   $('sheet').querySelector('.backdrop').onclick = () => { if (now() - sheetAt > 350) closeSheet(); };
 
@@ -202,10 +224,19 @@
     const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
     return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0');
   }
+  // cut by what shows as one character (an emoji, a letter with its accent), not by UTF-16 unit: an emoji cut in
+  // half showed as "�"
+  let graph = null;
+  function chars(s) {
+    if (graph === null) { try { graph = new Intl.Segmenter(undefined, { granularity: 'grapheme' }); } catch (e) { graph = false; } }
+    return graph ? Array.from(graph.segment(s), (g) => g.segment) : Array.from(s);
+  }
   function midName(n) {
     n = String(n || '');
     if (n.length <= 18) return n;
-    return n.slice(0, 7) + '...' + n.slice(-8);
+    const c = chars(n);
+    if (c.length <= 18) return n;
+    return c.slice(0, 7).join('') + '...' + c.slice(-8).join('');
   }
   function extOf(n) { const m = /\.([^.]+)$/.exec(n || ''); return m ? m[1].toLowerCase() : ''; }
   function badgeOf(it) {
@@ -404,6 +435,8 @@
     const v = $('askInput').value;
     if (askDone && await askDone(v)) $('ask').hidden = true;
   };
+  // the keyboard's Enter (Go, Done) does what the button does: it did nothing, the keyboard stayed up
+  $('askInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('askOk').click(); } });
   async function connectManual(rawIn) {
     const raw = String(rawIn || '').trim();
     if (!raw) return false;
@@ -486,7 +519,11 @@
       if (b) b.onclick = (e) => { e.preventDefault(); repair(); };
     } else if (st.problemShown !== kind) {
       st.problemShown = kind;
-      toast(msg.replace(/<[^>]+>/g, '').replace(/ If you reinstalled.*$/, ''), 4200);
+      // as text: the tags left out and the name as it is (stripping the tags left "Mani&#39;s PC", the PC's default
+      // name escaped)
+      const t = document.createElement('template');
+      t.innerHTML = msg;
+      toast(t.content.textContent.replace(/ If you reinstalled.*$/, ''), 4200);
       if (kind !== 'old') { closeLink(); showScreen('pair'); linkProblem(kind); }
     }
   }
@@ -549,6 +586,19 @@
     ws.onerror = () => { /* onclose follows */ };
   }
 
+  // Flick back in front: a link that went quiet meanwhile (the PC asleep, another network) is found out at once. It
+  // showed "connected" until the pings noticed (up to half a minute), and a file flicked then went nowhere.
+  function checkLink() {
+    const gen = wsGen, at = Date.now();
+    if (!wsSend({ t: 'ping', ts: at })) return;
+    setTimeout(() => {
+      if (gen !== wsGen || !st.wsOpen || (st.lastRx || 0) >= at) return;
+      wsGen++;
+      try { st.ws.close(); } catch (x) { /* ignore */ }
+      linkLost();
+    }, 4000);
+  }
+
   function linkLost() {
     const was = st.connected;
     st.wsOpen = false; st.connected = false; st.connecting = false; st.pcProved = false;
@@ -600,6 +650,9 @@
     $('cdot').classList.toggle('on', st.connected);
     nc('keepAwake', st.screen === 'main' && st.connected);
     if (SEL.on) renderSelection();
+    // Settings open: its PC row ("Connected over Wi-Fi", Disconnect or Connect) and the speed test follow
+    const sp = $('settings');
+    if (!sp.hidden && !sp.classList.contains('closing')) renderSettings();
     runHooks('conn');                        // the features (phone/features/*.js)
   }
 
@@ -1067,6 +1120,7 @@
     if (!H.raf) H.raf = requestAnimationFrame(holdFrame);
   }
   function holdEnd() {
+    H.upAt = now();
     if (!H.down) return;
     H.down = false;
     btn.classList.remove('down');
@@ -1077,6 +1131,13 @@
   btn.addEventListener('pointercancel', holdEnd);
   btn.addEventListener('pointerleave', holdEnd);
   btn.addEventListener('contextmenu', (e) => e.preventDefault());
+  // A click with no hold before it is the go-ahead too: a screen reader's double tap (TalkBack) or a keyboard's Enter
+  // can't hold, so pairing was out of reach. A finger's or a mouse's own click, as it lets go, is left alone.
+  btn.addEventListener('click', () => {
+    if (btn.disabled || now() - (H.upAt || 0) < 600) return;
+    haptic('tick');
+    requestConnect();
+  });
 
   // ------------------------------------------------------------------ views (file manager)
   const CATS = [
@@ -1115,8 +1176,9 @@
     let sub = '';
     if (V.loading && !V.items.length) sub = '<span class="spin"></span>Loading…';
     else if (inDir && V.path && STG.root && V.path.indexOf(STG.root) === 0 && V.path !== STG.root) {
-      // breadcrumb, e.g. "Phone storage › DCIM › Camera"
-      sub = esc(['Phone storage'].concat(V.path.slice(STG.root.length).split('/').filter(Boolean)).join('  ›  '));
+      // breadcrumb, e.g. "Phone storage › DCIM › Camera": each name on its own, so Hebrew or Arabic folder names next
+      // to each other keep their order (they read as one right-to-left run: the deepest folder first)
+      sub = ['Phone storage'].concat(V.path.slice(STG.root.length).split('/').filter(Boolean)).map((s) => '<bdi>' + esc(s) + '</bdi>').join('  ›  ');
     }
     $('hsub').innerHTML = sub;
     if (SEL.on) renderSelection();
@@ -1136,7 +1198,11 @@
     if (SRCH.on) endSearch(true);            // a search belongs to the view it was started in
     V.gen++;
     V.cat = cat; V.title = title; V.items = []; V.more = false; V.total = 0; V.offset = 0; V.loading = false;
-    st.hidden.clear();
+    // a Flick-list file on its way to the PC stays out of the list until the PC has it (it came back as if never sent
+    // once the user had looked at another tab meanwhile); anything else hidden is let go
+    const going = new Set();
+    for (const p of st.pending.values()) if (p.phase === 'sent') for (const x of itemsOf(p)) going.add(x.id);
+    for (const id of st.hidden) if (!going.has(id)) st.hidden.delete(id);
     for (const [, el] of cards) el.remove();
     cards.clear();
     scroller.scrollTop = 0;
@@ -1272,6 +1338,8 @@
   }
 
   function visibleItems() { return V.items.filter((it) => !st.hidden.has(it.id) && shown(it)); }
+  // the hidden files this view has (one on its way is hidden in every tab, but counted only in its own)
+  function hiddenHere() { let n = 0; if (st.hidden.size) for (const it of V.items) if (st.hidden.has(it.id)) n++; return n; }
 
   function updateCount() {
     let sending = 0, sent = 0, total = 0, rate = 0, waiting = 0;
@@ -1283,7 +1351,7 @@
     }
     $('count').classList.toggle('busy', sending + waiting > 0);
     if (!sending && waiting) { $('count').textContent = 'Waiting for ' + (([...st.jobs.values()].find((j) => j.state === 'waiting') || {}).pcName || 'your PC') + '…'; return void updateEmpty(); }
-    const n = needsPermission() ? 0 : V.cat === 'dir' || SRCH.f ? visibleItems().filter((i) => !i.incoming).length : Math.max(V.total - st.hidden.size, visibleItems().length);
+    const n = needsPermission() ? 0 : V.cat === 'dir' || SRCH.f ? visibleItems().filter((i) => !i.incoming).length : Math.max(V.total - hiddenHere(), visibleItems().length);
     const pct = total > 0 ? Math.min(99, Math.floor((sent / total) * 100)) : -1;
     $('count').textContent = sending ? 'Sending' + (pct >= 0 ? ' ' + pct + '%' : '…') + (rate > 0 && settings.showSpeed ? ' · ' + fmtRate(rate) : '') : n.toLocaleString() + (n === 1 ? ' item' : ' items');
     updateEmpty();
@@ -1342,12 +1410,14 @@
     const meta = document.createElement('div');
     meta.className = 'meta';
     const n = document.createElement('div'); n.className = 'name'; n.textContent = VIEW.list ? it.name : midName(it.name);
+    n.dir = 'auto';                          // a Hebrew or Arabic name reads right to left (and is cut at its end)
     const i = document.createElement('div'); i.className = 'info';
     i.textContent = it.dir ? (it.count === 1 ? '1 item' : (it.count || 0) + ' items') : it.incoming ? 'Receiving…' : fmtSize(it.size) + ' · ' + fmtWhen(it.mtime || it.added);
     if (VIEW.list) i.textContent = rowInfo(it);       // list rows: size, date and type
     meta.appendChild(n); meta.appendChild(i);
     {
       const more = document.createElement('button'); more.className = 'more';
+      more.setAttribute('aria-label', 'More for ' + it.name);
       more.appendChild(svgEl('<svg viewBox="0 0 24 24"><circle cx="5.5" cy="12" r="1.7" fill="currentColor"/><circle cx="12" cy="12" r="1.7" fill="currentColor"/><circle cx="18.5" cy="12" r="1.7" fill="currentColor"/></svg>'));
       more.onclick = (e) => { e.stopPropagation(); itemMenu(it); };
       meta.appendChild(more);
@@ -1538,7 +1608,10 @@
   }
 
   // ------------------------------------------------------------------ multi-select
-  function selItems() { return V.items.filter((it) => SEL.ids.has(it.id) && !it.incoming); }
+  // what can be selected: the files the grid shows (not one still coming from the PC, nor a Flick-list file already
+  // on its way to it: hidden, Select all took it too, and Send sent it again)
+  function selectable(it) { return !it.incoming && !st.hidden.has(it.id); }
+  function selItems() { return V.items.filter((it) => SEL.ids.has(it.id) && selectable(it)); }
   function setSelecting(on) {
     SEL.on = !!on;
     if (!SEL.on) SEL.ids.clear();
@@ -1563,7 +1636,7 @@
     const n = SEL.ids.size;
     $('htitle').textContent = n === 1 ? '1 selected' : n.toLocaleString() + ' selected';
     $('hsub').textContent = st.connected ? 'Drag to your PC, or tap Send' : 'Connect to your PC to send';
-    const all = V.items.filter((it) => !it.incoming && shown(it));
+    const all = V.items.filter((it) => selectable(it) && shown(it));
     $('selAll').textContent = all.length && all.every((it) => SEL.ids.has(it.id)) ? 'Select none' : 'Select all';
     const send = $('selSend');
     send.classList.toggle('off', !st.connected);
@@ -1571,7 +1644,7 @@
   }
   $('selClose').onclick = () => { haptic('soft'); setSelecting(false); };
   $('selAll').onclick = () => {
-    const all = V.items.filter((it) => !it.incoming && shown(it));   // (while searching: what the search shows)
+    const all = V.items.filter((it) => selectable(it) && shown(it));   // (while searching: what the search shows)
     const every = all.every((it) => SEL.ids.has(it.id));
     if (every) SEL.ids.clear(); else for (const it of all) SEL.ids.add(it.id);
     haptic('tick');
@@ -2574,7 +2647,7 @@
     const it = V.items.find((x) => x.id === card.dataset.id);
     if (!it || it.incoming) return;
     const t = e.touches[0];
-    T = { id: t.identifier, item: it, x0: t.clientX, y0: t.clientY, t0: now(), moved: false };
+    T = { id: t.identifier, item: it, x0: t.clientX, y0: t.clientY, t0: now(), ts: e.timeStamp, moved: false };
     T.lp = setTimeout(() => { if (T && !T.moved) startDrag(null, 'press'); }, 230);
   }, { passive: true });
 
@@ -2610,18 +2683,40 @@
     }
     if (T) {
       clearTimeout(T.lp);
-      const quick = now() - T.t0 < 300 && !T.moved;
+      // how long the finger was down, by the touches' own times: a tap that came while the page was busy for a moment
+      // (a big folder opening, files arriving) is still a tap (timed by when it was handled, it did nothing)
+      const held = e.timeStamp > 0 && T.ts > 0 ? e.timeStamp - T.ts : now() - T.t0;
+      const quick = held < 300 && !T.moved;
       const it = T.item;
       T = null;
       if (quick && it && !it.incoming) {
         if (e.cancelable) e.preventDefault();
-        if (SEL.on) toggleSel(it);
-        else if (it.dir) { haptic('soft'); openDir(it.path, it.name); } else itemMenu(it);
+        tapCard(it);
       }
     }
   }
-  grid.addEventListener('touchend', touchEnd, { passive: false });
-  grid.addEventListener('touchcancel', () => { if (D && D.phase === 'drag') dragEnd(); else if (T) { clearTimeout(T.lp); T = null; } }, { passive: true });
+  // a tap on a card: while selecting it is selected or not; a folder opens; a file shows its menu
+  function tapCard(it) {
+    if (SEL.on) toggleSel(it);
+    else if (it.dir) { haptic('soft'); openDir(it.path, it.name); } else itemMenu(it);
+  }
+  let touchedAt = 0;
+  grid.addEventListener('touchend', (e) => { touchedAt = now(); touchEnd(e); }, { passive: false });
+  grid.addEventListener('touchcancel', () => { touchedAt = now(); if (D && D.phase === 'drag') dragEnd(); else if (T) { clearTimeout(T.lp); T = null; } }, { passive: true });
+  // A click no finger made does what a tap does: a screen reader's double tap (TalkBack), a switch, a keyboard or a
+  // mouse (cards answered only to touches: a folder couldn't be opened, nor a file's menu, without a finger). A
+  // finger's own click is left alone: its tap was handled as it ended, and a press that only selected must stay so.
+  // (a mouse held down a while before it lets go is a press, not a click)
+  let downAt = 0, upAt = 0;
+  grid.addEventListener('pointerdown', () => { downAt = now(); }, { passive: true });
+  grid.addEventListener('pointerup', () => { upAt = now(); }, { passive: true });
+  grid.addEventListener('click', (e) => {
+    if (now() - touchedAt < 800 || (now() - upAt < 300 && upAt - downAt > 500)) return;
+    if (!e.target.closest || e.target.closest('.more')) return;
+    const card = e.target.closest('.card');
+    const it = card && V.items.find((x) => x.id === card.dataset.id);
+    if (it && !it.incoming && !st.hidden.has(it.id)) tapCard(it);
+  });
   document.addEventListener('contextmenu', (e) => e.preventDefault());
 
   // ------------------------------------------------------------------ incoming (PC -> phone)
@@ -2796,12 +2891,14 @@
         refreshStorage(false);
         if (Date.now() - UPD.ghAt > 3600e3) checkGitHub(false);
         if (st.pc && !st.wsOpen && !st.connecting) openLink(st.trusted);
+        else if (st.wsOpen) checkLink();
         break;
       case 'pause': nc('discover', false); break;
       default: break;
     }
   };
   window.__back = function () {
+    if (runHooks('backTop')) return true;    // overlays above everything (the ringing screen, the walkthrough)
     if (!$('ask').hidden) { $('ask').hidden = true; return true; }
     if (sheetOpen) { closeSheet(); return true; }
     if (runHooks('back')) return true;       // feature pages and overlays
@@ -3100,6 +3197,7 @@
   sField.className = 'sfield';
   const sIn = document.createElement('input');
   sIn.type = 'search'; sIn.id = 'searchIn'; sIn.autocomplete = 'off'; sIn.spellcheck = false;
+  sIn.dir = 'auto';                          // Hebrew or Arabic typed in reads right to left
   sIn.setAttribute('enterkeyhint', 'search'); sIn.setAttribute('aria-label', 'Search');
   const sClear = iconBtn(HIC.clear, 'Clear search', () => { sIn.value = ''; sClear.hidden = true; runSearch(); sIn.focus(); }, 'sclear');
   sClear.hidden = true;
@@ -3134,7 +3232,7 @@
       b.className = 'chip pin';
       b.dataset.v = pinCat(p.path);
       b.appendChild(svgEl(HIC.folder));
-      b.appendChild(Object.assign(document.createElement('span'), { textContent: p.name }));
+      b.appendChild(Object.assign(document.createElement('span'), { textContent: p.name, dir: 'auto' }));
       b.classList.toggle('on', V.cat === 'dir' && V.rootCat === b.dataset.v);
       b.onclick = () => { if (b._held) { b._held = false; return; } haptic('soft'); openCat(b.dataset.v); };
       onHold(b, () => pinMenu(p));
@@ -3259,7 +3357,7 @@
   //   ws       a PC message the app doesn't handle itself (clip, link, ring, ring-stop)
   //   native   every Android event (before the app's own handling)
   //   sent     the items of a send the PC confirmed ('saved')
-  //   back     Android's back button (return true when handled)
+  //   back     Android's back button (return true when handled); backTop: the same, before the menus and prompts
   //   menu     items for the ••• sheet (return one item or a list)
   //   settings the Settings page is being drawn (its body element; add sections to it)
   //   settings-end  the same, after the app's own sections
@@ -3312,7 +3410,18 @@
   }
 
   // ------------------------------------------------------------------ boot
-  window.addEventListener('resize', () => { measureHeader(); layout(false); wsSend({ t: 'screen', w: innerWidth, h: innerHeight, dpr: devicePixelRatio }); });
+  // A new width lays the grid out anew (turned sideways, unfolded, split screen): the file at the top stays at the top
+  // (the same scroll position was other files, far from it). A new height only (the keyboard) moves nothing.
+  let gridW = innerWidth;
+  window.addEventListener('resize', () => {
+    measureHeader();
+    const top = scroller.scrollTop;
+    const keep = innerWidth !== gridW && top > 0 ? geo.find((it) => it._y + it._th > top) : null;
+    gridW = innerWidth;
+    layout(false);
+    if (keep && geo.includes(keep)) { scroller.scrollTop = keep._y; renderWindow(false); }
+    wsSend({ t: 'screen', w: innerWidth, h: innerHeight, dpr: devicePixelRatio });
+  });
   measureHeader();
   openCat(STG.granted ? (pref.get('lastView', 'recent') || 'recent') : 'recent');
   setPcName();

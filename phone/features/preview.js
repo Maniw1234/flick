@@ -28,7 +28,7 @@
   const xBtn = h('button', 'pvx');
   xBtn.setAttribute('aria-label', 'Close');
   xBtn.appendChild(A.svgEl(X.SVG.close));
-  const tName = h('b'), tSub = h('small');
+  const tName = X.nm('b'), tSub = h('small');
   const tBox = h('div', 'pvt');
   tBox.append(tName, tSub);
   top.append(xBtn, tBox);
@@ -117,7 +117,7 @@
         img.src = th;
         pic.appendChild(img);
       }
-      card.append(pic, h('b', '', it.name));
+      card.append(pic, X.nm('b', '', it.name));
       z.appendChild(card);
     }
   }
@@ -377,7 +377,7 @@
     }
     if (e.touches.length !== 1) return;
     const p = pt(e.touches[0]);
-    G = { mode: '', x0: p.x, y0: p.y, t0: performance.now(), zx: Z.x, zy: Z.y, sm: [{ t: performance.now(), x: p.x, y: p.y }] };
+    G = { mode: '', x0: p.x, y0: p.y, t0: performance.now(), ts: e.timeStamp, zx: Z.x, zy: Z.y, sm: [{ t: performance.now(), x: p.x, y: p.y }] };
   }, { passive: false });
   el.addEventListener('touchmove', (e) => {
     if (!G || !S.open) return;
@@ -448,7 +448,9 @@
     const last = g.sm ? g.sm[g.sm.length - 1] : { x: g.x0, y: g.y0 };
     const dx = last.x - g.x0, dy = last.y - g.y0;
     if (!g.mode) {
-      if (performance.now() - g.t0 < 350) tap(g.x0, g.y0);
+      // (timed by the touches' own times: a tap that came while the page was busy is still a tap)
+      const held = e.timeStamp > 0 && g.ts > 0 ? e.timeStamp - g.ts : performance.now() - g.t0;
+      if (held < 350) tap(g.x0, g.y0);
       return;
     }
     if (g.mode === 'pan') {

@@ -96,7 +96,7 @@
     const tx = h('span', 'ftx');
     const top = h('span', 'ftop');
     r._time = h('span', 'ftime');
-    top.append(h('b', '', j.name || 'File'), r._time);
+    top.append(X.nm('b', '', j.name || 'File'), r._time);
     tx.appendChild(top);
     r._sm = h('small', bad ? 'fwrap fbad' : 'fwrap');
     tx.appendChild(r._sm);

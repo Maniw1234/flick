@@ -96,7 +96,7 @@
     ic.appendChild(A.svgEl(bad ? ARROW.bad : e.dir === 'in' ? ARROW.in : ARROW.out));
     const tx = h('span', 'ftx');
     const top = h('span', 'ftop');
-    top.append(h('b', '', e.name), h('span', 'ftime', timeOf(+e.time || 0)));
+    top.append(X.nm('b', '', e.name), h('span', 'ftime', timeOf(+e.time || 0)));
     tx.appendChild(top);
     const sm = h('small', 'fwrap');
     if (bad) sm.appendChild(h('span', 'fbad', (WHY[e.why] || (e.dir === 'in' ? 'Didn’t arrive' : 'Didn’t send')) + ' · '));

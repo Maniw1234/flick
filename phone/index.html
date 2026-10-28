@@ -14,7 +14,7 @@
   <section id="pair" class="screen on">
     <div class="ptext">
       <div class="l1" id="pairL1">Hold phone next to</div>
-      <div class="l2" id="pcName">Looking for your PC…</div>
+      <div class="l2" id="pcName" dir="auto">Looking for your PC…</div>
       <div class="l3" id="pairL3">Then press and hold Connect.</div>
     </div>
     <button id="connect" aria-label="Connect">
@@ -54,7 +54,7 @@
       <div class="hrow">
         <button id="backBtn" class="hback" hidden aria-label="Back"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         <button id="selClose" class="hback" hidden aria-label="Cancel selection"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round"/></svg></button>
-        <div class="htext"><div class="htitle" id="htitle">Recent</div><div class="hsub" id="hsub"></div></div>
+        <div class="htext"><div class="htitle" id="htitle" dir="auto">Recent</div><div class="hsub" id="hsub"></div></div>
         <button id="selAll" class="hsel" hidden>Select all</button>
       </div>
       <div class="chips" id="chips"></div>
@@ -84,11 +84,11 @@
   <div id="dragLayer"></div>
   <canvas id="fx"></canvas>
   <div id="flash"></div>
-  <div id="toast"></div>
+  <div id="toast" role="status" aria-live="polite"></div>
 
   <div id="sheet" hidden>
     <div class="backdrop"></div>
-    <div class="panel"><div class="grab"></div><div class="stitle" id="sheetTitle"></div><div class="items" id="sheetItems"></div></div>
+    <div class="panel" role="dialog" aria-modal="true" aria-labelledby="sheetTitle"><div class="grab"></div><div class="stitle" id="sheetTitle" dir="auto"></div><div class="items" id="sheetItems"></div></div>
   </div>
 
   <section id="settings" hidden>
@@ -104,7 +104,7 @@
     <div class="box">
       <div class="atitle" id="askTitle">Enter PC address</div>
       <div class="asub" id="askSub">Shown on your PC in the Flick window, e.g. 192.168.1.23</div>
-      <input id="askInput" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="192.168.1.23">
+      <input id="askInput" dir="auto" inputmode="decimal" enterkeyhint="go" autocomplete="off" spellcheck="false" placeholder="192.168.1.23" aria-labelledby="askTitle" aria-describedby="askSub">
       <div class="abtns"><button id="askCancel">Cancel</button><button id="askOk" class="primary">Connect</button></div>
     </div>
   </div>

@@ -66,7 +66,7 @@
     if (e.thumb && /^data:image\/jpeg;base64,/.test(e.thumb)) { const im = h('img'); im.src = e.thumb; im.alt = ''; ic.appendChild(im); }
     else ic.appendChild(A.svgEl(KIND[e.kind] || KIND.text));
     const tx = h('span', 'fctx');
-    tx.appendChild(h('b', e.kind === 'image' ? '' : 'two', title(e)));
+    tx.appendChild(X.nm('b', e.kind === 'image' ? '' : 'two', title(e)));
     const who = (e.dir === 'in' ? 'From ' : 'To ') + (e.pcName || X.pcName());
     tx.appendChild(h('small', '', (e.kind === 'link' ? 'Link · ' : '') + who + ' · ' + A.fmtWhen(+e.time || Date.now())));
     main.append(ic, tx);
