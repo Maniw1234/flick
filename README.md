@@ -5,6 +5,8 @@ phone. Share the clipboard and links, sync folders, see phone notifications on t
 and share files with an iPhone or any computer through a browser. Phone and PC talk directly (Wi-Fi, a USB cable, the
 phone's hotspot or Bluetooth), encrypted; nothing goes through the internet.
 
+![A photo thrown from the phone lands on the PC with each of Flick's animations: Meteor, Volt, Warp and Glitch](art/animations.gif)
+
 ## Install
 
 1. On the PC, from the latest [release](https://github.com/Maniw1234/flick/releases/latest):

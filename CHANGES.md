@@ -1,6 +1,16 @@
 # Changes
 
-## 1.2.0
+## 2.0.0
+
+The biggest update yet. In short:
+
+- **Air grab.** Move files between your phone and your PC with your hand.
+- **New animations with sound.** Meteor, Volt, Warp and Glitch, or Surprise me for a different one each time.
+- **Faster transfers.** In tests, a single photo arrives in about 40% less time.
+- **A send shortcut.** Select files on the PC and press Ctrl+Alt+F (Command-Option-F on a Mac).
+- **A buzz in your hand when the file lands**, a volume slider, and Reduce effects for a lighter version.
+
+Everything that changed:
 
 - **New animations, each with its own sound.** Meteor catches fire and crashes down, Volt jumps across on lightning,
   Warp flies out of a tunnel of light and Glitch skips across like a broken signal; Surprise me picks one for each
