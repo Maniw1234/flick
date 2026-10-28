@@ -238,6 +238,7 @@ function attach(o) {
   // ---- phone to PC: the hand carrying a phone's file
   function onCarry(ev, a, now) {
     if (ev.type === 'leave') {
+      const sawFist = a.sawFist;
       a.sawFist = 0;                                     // a hand coming back is a new one until seen as a fist
       // the fist it followed lost as it opened (the tracker loses an opening hand now and then): it opened there
       const opening = ev.raw === 'open' || (ev.pose === 'fist' && ev.raw === 'other');
@@ -247,6 +248,9 @@ function attach(o) {
         land(a, q);
         return;
       }
+      // the same before the phone let go: the fist this camera saw, lost with its last frame open (a pose that hadn't
+      // settled yet), opened here: the phone is told as for one seen opening
+      if (!a.go && sawFist && ev.raw === 'open' && ev.pose !== 'open' && Array.isArray(ev.aim)) { openedHere(a, toScreen(ev.aim), now); return; }
       // the fist it followed went out of view: the file goes back to waiting at the edge
       if (a.follow) { a.follow = false; o.fx('air', { tid: a.t.tid, off: true }); bob(a); }
       return;
@@ -277,6 +281,11 @@ function attach(o) {
     // before that, only the fist this camera saw (without it leaving the view) opening tells the phone to let go:
     // another hand, or one never seen closed, sends nothing
     if (ev.type !== 'pose' || !a.sawFist) return;
+    openedHere(a, at, now);
+  }
+  // the fist carrying a's file opened in front of the PC (at: where it was aimed) before the phone let go: the phone is
+  // told ('air-land'), and when it lets go the file lands there
+  function openedHere(a, at, now) {
     lastOpen = a.landAt = { x: at.x, y: at.y, at: now };
     if (o.server) o.server.pushToPhone({ t: 'air-land', tid: a.t.tid }, a.device);
   }
