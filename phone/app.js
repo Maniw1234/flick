@@ -2600,7 +2600,8 @@
   // A file downloads as soon as the PC offers it; its card comes in when the PC's card reaches the phone (m.delay).
   // Cards due together (a big batch: the PC staggers only the first dozen) are laid out once a frame and only a few
   // of them fly in; a file that arrives before its card has landed shows once it has.
-  const IN = { q: [], raf: 0, t: 0, fly: [], flyRaf: 0, wait: new Set(), got: new Map(), done: [], doneRaf: 0, doneT: 0, tickAt: 0 };
+  const IN = { q: [], raf: 0, t: 0, fly: [], flyRaf: 0, wait: new Set(), got: new Map(), done: [], doneRaf: 0, doneT: 0,
+    tickAt: 0 };
   function onIncoming(m) {
     (st.incoming = st.incoming || new Map()).set(m.fid, String(m.name || 'file'));
     IN.wait.add(m.fid);
@@ -2726,8 +2727,9 @@
       if (nel) nel.animate([{ filter: 'brightness(1.6)' }, { filter: 'brightness(1)' }], { duration: 420, easing: 'ease-out' });
     }
     if (saved) toast('Saved to Downloads › Flick', 1600);
+    // one buzz, not one per file
     if (bad) haptic('reject');
-    else if (shown.length && now() - IN.tickAt > 300) { IN.tickAt = now(); haptic('tick'); }   // (not one buzz per file)
+    else if (shown.length && now() - IN.tickAt > 300) { IN.tickAt = now(); haptic('tick'); }
   }
 
   // ------------------------------------------------------------------ native events
