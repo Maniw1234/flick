@@ -132,6 +132,8 @@ class Hotspot extends EventEmitter {
     this.ssid = ''; this.pass = ''; this.why = '';
     this.mine = false;       // Flick turned it on (and turns it off again)
     this.proc = null;
+    this.gen = 0;            // which start is the current one: stop() makes one under way stale
+    this.pending = null;     // the start under way (and the undoing of one that was stopped)
   }
 
   get can() { return this.platform === 'win32' || this.platform === 'linux'; }
@@ -143,28 +145,49 @@ class Hotspot extends EventEmitter {
 
   _set(state, why) { this.state = state; this.why = why || ''; this.emit('state', this.view()); }
 
+  // Starting takes seconds (PowerShell, nmcli). Stopping meanwhile (the user stops sharing, or the share ends) must
+  // win: a start that finishes after it is undone, never left on (on Linux the PC's own Wi-Fi connection pauses while
+  // the network is up). A new start waits until one that was stopped has been undone.
   async start() {
     if (!this.can || this.state === 'on' || this.state === 'starting') return this.view();
+    const gen = ++this.gen;
     this._set('starting');
+    const before = this.pending;
+    let settle;
+    this.pending = new Promise((r) => { settle = r; });
     try {
-      if (this.platform === 'win32') await this._startWindows();
-      else await this._startLinux();
+      await before;
+      if (gen !== this.gen) return this.view();
+      let r;
+      try { r = this.platform === 'win32' ? await this._startWindows() : await this._startLinux(); }
+      catch (e) {
+        if (gen === this.gen) { this.log('hotspot: ' + e.message); this._set('error', e.message); }
+        return this.view();
+      }
+      if (gen !== this.gen) {
+        this.log('hotspot: stopped while it was starting');
+        if (r.proc) { try { r.proc.kill(); } catch (e) { /* ignore */ } if (this.proc === r.proc) this.proc = null; }
+        await this._down(r.kind, r.mine);
+        return this.view();
+      }
+      this.kind = r.kind; this.ssid = r.ssid; this.pass = r.pass; this.mine = r.mine;
       this._set('on');
-    } catch (e) {
-      this.log('hotspot: ' + e.message);
-      this.kind = ''; this.ssid = ''; this.pass = '';
-      this._set('error', e.message);
-    }
-    return this.view();
+      return this.view();
+    } finally { settle(); }
   }
 
   async stop() {
+    this.gen++;                                              // a start under way is undone when it finishes
     const was = this.state;
     if (was === 'off') return;
     const kind = this.kind, mine = this.mine;
     this.mine = false; this.kind = ''; this.ssid = ''; this.pass = '';
     if (this.proc) { try { this.proc.kill(); } catch (e) { /* ignore */ } this.proc = null; }
     this._set('off');
+    await this._down(kind, mine);
+  }
+
+  async _down(kind, mine) {
     if (!mine) return;                                       // it was on before Flick: it stays on
     try {
       if (kind === 'mobile') await (this.run ? this.run('mobile-off') : runPs(PS_MOBILE_OFF, 20000));
@@ -172,36 +195,34 @@ class Hotspot extends EventEmitter {
     } catch (e) { this.log('hotspot stop: ' + e.message); }
   }
 
+  // each resolves to what came up: { kind, ssid, pass, mine, proc? }
   async _startWindows() {
     // the Mobile hotspot first: what people know, and devices that join it keep the internet
     const lines = await (this.run ? this.run('mobile-on') : runPs(PS_MOBILE_ON, 40000));
     const ok = lines.find((l) => l.startsWith('ok '));
     if (ok) {
       const ssid = (lines.find((l) => l.startsWith('ssid ')) || '').slice(5), pass = (lines.find((l) => l.startsWith('pass ')) || '').slice(5);
-      if (ssid && pass.length >= 8) {
-        this.kind = 'mobile'; this.ssid = ssid; this.pass = pass; this.mine = ok === 'ok started';
-        return;
-      }
+      if (ssid && pass.length >= 8) return { kind: 'mobile', ssid, pass, mine: ok === 'ok started' };
     }
     const err = (lines.find((l) => l.startsWith('error ')) || 'error unknown').slice(6);
     this.log('mobile hotspot: ' + err + ' (trying a Wi-Fi Direct network)');
     // without an internet connection to share (or if the Mobile hotspot can't): a Wi-Fi Direct network Flick keeps up
-    await this._startDirect(err);
+    return this._startDirect(err);
   }
 
   _startDirect(before) {
     const ssid = 'DIRECT-FL-' + pick(4), pass = pick(10);
     return new Promise((resolve, reject) => {
-      let settled = false;
-      const finish = (e) => { if (settled) return; settled = true; clearTimeout(t); if (e) reject(e); else resolve(); };
+      let settled = false, p = null, t = null;
+      const finish = (e, r) => { if (settled) return; settled = true; clearTimeout(t); if (e) reject(e); else resolve(r); };
       const onLine = (l) => {
-        if (l === 'status Started') { this.kind = 'direct'; this.ssid = ssid; this.pass = pass; this.mine = true; finish(); }
+        if (l === 'status Started') finish(null, { kind: 'direct', ssid, pass, mine: true, proc: p });
         else if (l.startsWith('error ') || l === 'status Aborted') finish(new Error(words(before, l.slice(l.indexOf(' ') + 1))));
       };
-      const p = this.run ? this.run('direct', { ssid, pass, onLine }) : powershell(PS_DIRECT, { FLICK_SSID: ssid, FLICK_PASS: pass }, onLine);
+      p = this.run ? this.run('direct', { ssid, pass, onLine }) : powershell(PS_DIRECT, { FLICK_SSID: ssid, FLICK_PASS: pass }, onLine);
       this.proc = p;
       if (p && p.on) p.on('close', () => { if (this.proc === p) { this.proc = null; if (this.state === 'on' && this.kind === 'direct') { this.kind = ''; this._set('error', 'The PC’s Wi-Fi network stopped'); } } finish(new Error(words(before, 'stopped'))); });
-      const t = setTimeout(() => { try { if (p && p.kill) p.kill(); } catch (e) { /* ignore */ } finish(new Error(words(before, 'timeout'))); }, 25000);
+      t = setTimeout(() => { try { if (p && p.kill) p.kill(); } catch (e) { /* ignore */ } finish(new Error(words(before, 'timeout'))); }, 25000);
     });
   }
 
@@ -213,7 +234,7 @@ class Hotspot extends EventEmitter {
     const ssid = 'Flick-' + pick(4), pass = pick(10);
     const r = await (this.run ? this.run('nm-hotspot', { dev: wifi[0], ssid, pass }) : nmcli(['device', 'wifi', 'hotspot', 'ifname', wifi[0], 'con-name', 'Flick', 'ssid', ssid, 'password', pass], 30000));
     if (!r.ok) throw new Error('Couldn’t start the PC’s Wi-Fi network: ' + (r.err.trim().split('\n').pop() || 'nmcli failed'));
-    this.kind = 'nm'; this.ssid = ssid; this.pass = pass; this.mine = true;
+    return { kind: 'nm', ssid, pass, mine: true };
   }
 }
 
