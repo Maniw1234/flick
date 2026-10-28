@@ -359,7 +359,7 @@ function attach(o) {
     clearTimeout(G.armT);
     stopCamIfIdle();
   }
-  function tellPhones(msg) { if (o.server) for (const d of phones) o.server.pushToPhone(msg, d); }
+  function tellPhones(msg, but) { if (o.server) for (const d of phones) if (d !== but) o.server.pushToPhone(msg, d); }
 
   function onPick(ev, now) {
     const h = G.held;
@@ -529,6 +529,9 @@ function attach(o) {
       clearTimeout(h.backT);
       G.held = null;
       o.fx('air-out', { id: h.id, go: true });          // the card goes into the phone
+      // the other phones ready to catch heard a fist holds files for them: not any more (else their next fist that
+      // opens asks for files that went, and is told how to pick some up)
+      tellPhones({ t: 'air-held', n: 0 }, device);
       log('caught', h.paths.length, 'file(s)');
       o.sendPaths(h.paths, { fx: false, y: h.y, device });   // to the phone that caught them
       // done: a grab again takes files selected again
