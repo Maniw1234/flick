@@ -81,6 +81,15 @@ final class Outbox {
         private static final long serialVersionUID = 1L;
         Restart(String why) { super(why); }
     }
+    /**
+     * The PC answered with an error of its own (500: it couldn't write a file, say). Tried again a few times, as it may
+     * pass (a file another program holds); one that keeps coming ends the send (MAX_REFUSALS). Bytes moving in between
+     * don't count as getting anywhere: each try sends some before the PC answers.
+     */
+    static final class Refusal extends IOException {
+        private static final long serialVersionUID = 1L;
+        Refusal(String why) { super(why); }
+    }
 
     static final class Item {
         final String path, id, name;
@@ -102,6 +111,7 @@ final class Outbox {
         String state = QUEUED, why, want, sig, refused;
         volatile String att;                          // written under this, read by the part threads
         int ways, restarts, fails;
+        int refusals;                                 // tries the PC answered with an error in a row (see Refusal)
         long total, ended, waitingSince, wakeAt;
         final Set<Integer> had = new HashSet<Integer>();
         AtomicBoolean stop = new AtomicBoolean(false);
@@ -251,6 +261,7 @@ final class Outbox {
     static final int MAX_RUNNING = 2;                     // jobs moving bytes at once (each over several connections)
     static final long PARALLEL_MIN = 8L * 1024 * 1024;    // smaller files go as one part
     static final int MAX_RESTARTS = 4;
+    static final int MAX_REFUSALS = 6;                    // (about a minute of tries, see BACKOFF_MS)
     static volatile long GIVE_UP_MS = 6 * 3600 * 1000L;    // as long as the PC keeps what arrived
     static volatile long KEEP_ENDED_MS = 24 * 3600 * 1000L; // finished ones stay in the list this long
     static final int KEEP_ENDED = 30;
@@ -333,7 +344,7 @@ final class Outbox {
         Job j = get(tid);
         if (j == null) return;
         synchronized (j) {
-            if (PAUSED.equals(j.state)) { j.state = QUEUED; j.why = null; j.fails = 0; j.waitingSince = 0; }
+            if (PAUSED.equals(j.state)) { j.state = QUEUED; j.why = null; j.fails = 0; j.refusals = 0; j.waitingSince = 0; }
             else if (WAITING.equals(j.state)) j.wakeAt = 0;
             else if (RUNNING.equals(j.state) && PAUSED.equals(j.want)) j.want = null;
             else return;
@@ -366,7 +377,7 @@ final class Outbox {
             else {
                 // a canceled one was dropped on the PC too, and so was one turned down there: it starts over
                 if (CANCELED.equals(j.state) || j.refused != null) newAttempt(j);
-                j.state = QUEUED; j.why = null; j.ended = 0; j.fails = 0; j.waitingSince = 0; j.restarts = 0; j.committed = true; j.retried = true;
+                j.state = QUEUED; j.why = null; j.ended = 0; j.fails = 0; j.refusals = 0; j.waitingSince = 0; j.restarts = 0; j.committed = true; j.retried = true;
                 j.again = true; j.refused = null;
             }
         }
@@ -530,12 +541,14 @@ final class Outbox {
             else if (!j.committed && now() - j.created > DRAG_MS) { delay = -1; }   // a drag that was never finished
             else {
                 j.fails++;
+                if (e instanceof Refusal) j.refusals++;
                 long now = now();
                 if (j.waitingSince == 0) j.waitingSince = now;
                 if (now - j.waitingSince > GIVE_UP_MS) delay = -2;
+                else if (j.refusals >= MAX_REFUSALS) delay = -3;
                 else {
                     long[] b = BACKOFF_MS;
-                    delay = b[Math.min(j.fails - 1, b.length - 1)];
+                    delay = b[Math.min(Math.max(j.fails, j.refusals) - 1, b.length - 1)];
                     j.state = WAITING;
                     j.why = "Waiting for " + j.pcName;
                     j.wakeAt = now + delay;
@@ -545,6 +558,7 @@ final class Outbox {
         if (lateWish(j, late)) return;
         if (delay == -1) { settle(j, CANCELED, null); return; }
         if (delay == -2) { settle(j, FAILED, "Couldn't reach " + j.pcName); return; }
+        if (delay == -3) { env.log("send " + j.tid + " gives up: " + e.getMessage()); settle(j, FAILED, "Couldn't save it on " + j.pcName); return; }
         env.log("send " + j.tid + " waits " + delay + " ms: " + e.getMessage());
         save(j);
         env.changed(j);
@@ -596,8 +610,12 @@ final class Outbox {
         if (a.code == 422) throw new Restart("arrived damaged");
         if (a.code == 409 && "gone".equals(err)) throw new Restart("the PC doesn't have it any more");
         if (a.code == 400) throw new Restart("refused: " + err);
+        if (a.code >= 500) throw new Refusal("http " + a.code + " " + err);
         throw new IOException("http " + a.code + " " + err);
     }
+
+    /** The PC took a part or a stream: it isn't refusing this send. */
+    private static void accepted(Job j) { synchronized (j) { j.refusals = 0; } }
 
     private void progress(Job j, long n) {
         long s = j.sent.addAndGet(n);
@@ -768,6 +786,7 @@ final class Outbox {
             g.idle();
             through = true;
             check(j, c.answer(64 * 1024));
+            accepted(j);
             return hex(md.digest());
         } catch (Fatal e) {
             throw e;
@@ -954,6 +973,7 @@ final class Outbox {
             g.idle();
             through = true;
             check(j, c.answer(64 * 1024));
+            accepted(j);
             return;
         } catch (Bundle.ResumeLost e) {
             // the file it was to carry on with can't be read now: that entry goes again from its start (or is left out)
@@ -997,9 +1017,10 @@ final class Outbox {
     }
 
     private static int rank(IOException e) {
-        if (e instanceof Fatal) return 4;
-        if (e instanceof Aborted) return 3;
-        if (e instanceof Restart) return 2;
+        if (e instanceof Fatal) return 5;
+        if (e instanceof Aborted) return 4;
+        if (e instanceof Restart) return 3;
+        if (e instanceof Refusal) return 2;
         String m = e.getMessage();
         return m != null && (m.startsWith("aborted") || m.startsWith("stopped")) ? 0 : 1;
     }
