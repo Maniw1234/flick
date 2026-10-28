@@ -2600,7 +2600,7 @@
   // A file downloads as soon as the PC offers it; its card comes in when the PC's card reaches the phone (m.delay).
   // Cards due together (a big batch: the PC staggers only the first dozen) are laid out once a frame and only a few
   // of them fly in; a file that arrives before its card has landed shows once it has.
-  const IN = { q: [], raf: 0, t: 0, fly: [], flyRaf: 0, wait: new Set(), got: new Map(), tickAt: 0 };
+  const IN = { q: [], raf: 0, t: 0, fly: [], flyRaf: 0, wait: new Set(), got: new Map(), done: [], doneRaf: 0, doneT: 0, tickAt: 0 };
   function onIncoming(m) {
     (st.incoming = st.incoming || new Map()).set(m.fid, String(m.name || 'file'));
     IN.wait.add(m.fid);
@@ -2689,29 +2689,45 @@
     const it = V.items.find((x) => x.fid === e.fid);
     if (it && e.total) setCardProgress(it.id, e.got / e.total);
   }
+  // downloads that finished show together, once a frame (a batch finishing laid the grid out again for each file)
   function onDownDone(e) {
     if (IN.wait.has(e.fid)) { IN.got.set(e.fid, e); return; }    // its card hasn't landed yet (see landed)
-    const idx = V.items.findIndex((x) => x.fid === e.fid);
-    const name = (st.incoming && st.incoming.get(e.fid)) || (idx >= 0 ? V.items[idx].name : 'a file');
-    if (st.incoming) st.incoming.delete(e.fid);
-    if (!e.ok || !e.item) {
-      if (idx >= 0) { V.items.splice(idx, 1); V.total--; layout(true); }
-      toast('Couldn’t receive ' + midName(name), 2600);          // even when the user has moved to another view
-      haptic('reject');
-      return;
+    IN.done.push(e);
+    if (!IN.doneRaf) { IN.doneRaf = requestAnimationFrame(downDone); IN.doneT = setTimeout(downDone, 100); }
+  }
+  function downDone() {
+    cancelAnimationFrame(IN.doneRaf); clearTimeout(IN.doneT); IN.doneRaf = 0;
+    const shown = [];
+    let gone = false, bad = false, saved = false, ids = null;
+    for (const e of IN.done.splice(0)) {
+      const idx = V.items.findIndex((x) => x.fid === e.fid);
+      const name = (st.incoming && st.incoming.get(e.fid)) || (idx >= 0 ? V.items[idx].name : 'a file');
+      if (st.incoming) st.incoming.delete(e.fid);
+      if (!e.ok || !e.item) {
+        if (idx >= 0) { V.items.splice(idx, 1); V.total--; gone = true; }
+        toast('Couldn’t receive ' + midName(name), 2600);          // even when the user has moved to another view
+        bad = true;
+        continue;
+      }
+      wsSend({ t: 'incoming-done', fid: e.fid });
+      if (idx < 0) continue;
+      const real = e.item;
+      const el = cards.get(V.items[idx].id);
+      cards.delete(V.items[idx].id);
+      if (el) el.remove();
+      ids = ids || new Set(V.items.map((x) => x.id));             // (the view may show the file already)
+      if (ids.has(real.id)) V.items.splice(idx, 1); else { V.items[idx] = real; ids.add(real.id); }
+      shown.push(real);
+      if (real.path && /\/Download\/Flick\//.test(real.path)) saved = true;
     }
-    if (idx < 0) { wsSend({ t: 'incoming-done', fid: e.fid }); return; }
-    const real = e.item;
-    const el = cards.get(V.items[idx].id);
-    cards.delete(V.items[idx].id);
-    if (el) el.remove();
-    if (V.items.find((x) => x.id === real.id)) V.items.splice(idx, 1); else V.items[idx] = real;
-    layout(false);
-    const nel = cards.get(real.id);
-    if (nel) nel.animate([{ filter: 'brightness(1.6)' }, { filter: 'brightness(1)' }], { duration: 420, easing: 'ease-out' });
-    wsSend({ t: 'incoming-done', fid: e.fid });
-    if (real.path && /\/Download\/Flick\//.test(real.path)) toast('Saved to Downloads › Flick', 1600);
-    if (now() - IN.tickAt > 150) { IN.tickAt = now(); haptic('tick'); }   // a batch finishing buzzes once, not per file
+    if (gone || shown.length) layout(gone);
+    for (const real of shown) {
+      const nel = cards.get(real.id);
+      if (nel) nel.animate([{ filter: 'brightness(1.6)' }, { filter: 'brightness(1)' }], { duration: 420, easing: 'ease-out' });
+    }
+    if (saved) toast('Saved to Downloads › Flick', 1600);
+    if (bad) haptic('reject');
+    else if (shown.length && now() - IN.tickAt > 300) { IN.tickAt = now(); haptic('tick'); }   // (not one buzz per file)
   }
 
   // ------------------------------------------------------------------ native events
