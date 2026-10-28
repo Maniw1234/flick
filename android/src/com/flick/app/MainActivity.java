@@ -18,6 +18,8 @@ import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.provider.Settings;
 import android.util.Log;
+import android.util.TypedValue;
+import android.view.Gravity;
 import android.view.RoundedCorner;
 import android.view.View;
 import android.view.Window;
@@ -34,6 +36,7 @@ import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.TextView;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -73,7 +76,16 @@ public class MainActivity extends Activity {
         lock = new AppLock(this);
         setupWindow();
 
-        web = new WebView(this);
+        try {
+            web = new WebView(this);
+        } catch (Throwable e) {
+            // Android's WebView is missing, turned off or being updated this very moment: said so, instead of Flick
+            // closing at once (and again after "Open Flick" on the crash report)
+            Log.w(TAG, "no WebView: " + e);
+            lock = null;
+            noWebView();
+            return;
+        }
         web.setBackgroundColor(Color.BLACK);
         web.setOverScrollMode(View.OVER_SCROLL_NEVER);
         web.setVerticalScrollBarEnabled(false);
@@ -166,6 +178,20 @@ public class MainActivity extends Activity {
             }
         });
         Thumbs.trimSoon(this);                       // the thumbnail cache stays a reasonable size
+    }
+
+    /** What shows when there's no WebView to show the page with; a tap tries again. */
+    private void noWebView() {
+        TextView t = new TextView(this);
+        t.setText("Flick shows its screen with Android System WebView, and that isn't available right now: it may be "
+                + "updating, or turned off.\n\nTap to try again, or turn it on in Settings › Apps › Android System WebView.");
+        t.setTextColor(Color.WHITE);
+        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
+        t.setGravity(Gravity.CENTER);
+        int pad = Math.round(32 * getResources().getDisplayMetrics().density);
+        t.setPadding(pad, pad, pad, pad);
+        t.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { recreate(); } });
+        setContentView(t);
     }
 
     @Override
