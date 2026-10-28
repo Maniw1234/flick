@@ -461,6 +461,7 @@ class Features {
   }
 
   stop() {
+    this.sync.flush();
     this.history.flush();
     this.clip.stop();
     this.keys.stop();

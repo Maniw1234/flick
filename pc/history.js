@@ -1,7 +1,8 @@
 'use strict';
 // The transfer history (userData/history.json): every file received from a phone (a fling, sent quietly, Quick Share,
-// a browser, folder sync) and every file sent to one, newest first, at most 500. Written a moment after each change,
-// atomically: a temp file, flushed to disk, then renamed over the old one, so a crash mid-write never leaves half a file.
+// a browser, folder sync) and every file sent to one, newest first, at most 500. Written a moment after a change (one
+// write for a burst of them, as in a folder sync), in the background and atomically: a temp file, flushed to disk, then
+// renamed over the old one, so a crash mid-write never leaves half a file.
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -15,11 +16,12 @@ class History {
   constructor(file, opts = {}) {
     this.file = file;
     this.max = opts.max || MAX;
-    this.delay = opts.delay == null ? 300 : opts.delay;
+    this.delay = opts.delay == null ? 1500 : opts.delay;
     this.log = opts.log || (() => {});
     this.onChange = opts.onChange || (() => {});
     this.items = this._load();
     this.t = null;
+    this.saving = null; this.again = false; this.flushes = 0;
   }
 
   _load() {
@@ -70,13 +72,39 @@ class History {
   _changed() {
     this.onChange();
     clearTimeout(this.t);
-    this.t = setTimeout(() => this.flush(), this.delay);
+    this.t = setTimeout(() => this.save(), this.delay);
   }
 
-  /** Writes it now (also on quit). */
-  flush() {
+  /** Writes it in the background (one write at a time; a change meanwhile is written right after). */
+  save() {
     clearTimeout(this.t); this.t = null;
-    const tmp = this.file + '.tmp';
+    if (this.saving) { this.again = true; return this.saving; }
+    this.saving = (async () => {
+      do {
+        this.again = false;
+        const tmp = this.file + '.tmp', n = this.flushes;
+        try {
+          await fs.promises.mkdir(path.dirname(this.file), { recursive: true });
+          const fh = await fs.promises.open(tmp, 'w');
+          try { await fh.writeFile(JSON.stringify(this.items)); await fh.sync(); } finally { await fh.close(); }
+          if (this.flushes !== n) return;                // flush() wrote a newer one meanwhile
+          // (briefly locked by an antivirus: copied instead)
+          try { await fs.promises.rename(tmp, this.file); }
+          catch (e) { await fs.promises.copyFile(tmp, this.file); await fs.promises.unlink(tmp).catch(() => {}); }
+        } catch (e) {
+          this.log('history not saved: ' + e.message);
+          await fs.promises.unlink(tmp).catch(() => {});
+        }
+      } while (this.again);
+    })().finally(() => { this.saving = null; });
+    return this.saving;
+  }
+
+  /** Writes it now (on quit). */
+  flush() {
+    this.flushes++;
+    clearTimeout(this.t); this.t = null;
+    const tmp = this.file + '.tmpq';
     try {
       fs.mkdirSync(path.dirname(this.file), { recursive: true });
       const fd = fs.openSync(tmp, 'w');

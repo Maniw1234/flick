@@ -98,24 +98,52 @@ const DEFAULTS = {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const readJson = (f) => { try { const o = JSON.parse(fs.readFileSync(f, 'utf8')); return o && typeof o === 'object' ? o : null; } catch (e) { return null; } };
 // settings.json, or its last good copy if it was damaged (a crash or power cut mid-save must not lose the pairings)
-let store = Object.assign({}, DEFAULTS, readJson(SETTINGS) || readJson(SETTINGS + '.bak') || {});
+const onDisk = readJson(SETTINGS);
+let store = Object.assign({}, DEFAULTS, onDisk || readJson(SETTINGS + '.bak') || {});
 if (!store.id) store.id = rid(8);
-let saveTimer = null;
-function writeStoreNow() {
+// settings.json on disk is whole (it read fine, or Flick wrote it whole since): it may become the last good copy
+let storeWhole = !!onDisk;
+// Settings are written in the background, one write at a time: a temp file, flushed to disk, then renamed over
+// settings.json (the copy that was there is kept first as settings.json.bak).
+let saveTimer = null, saving = null, saveAgain = false;
+function saveStore() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(writeStore, 150);
+}
+function writeStore() {
   saveTimer = null;
+  if (saving) { saveAgain = true; return; }
+  saving = (async () => {
+    do {
+      saveAgain = false;
+      const tmp = SETTINGS + '.tmp';
+      try {
+        await fs.promises.mkdir(userDir, { recursive: true });
+        const fh = await fs.promises.open(tmp, 'w');
+        try { await fh.writeFile(JSON.stringify(store, null, 2)); await fh.sync(); } finally { await fh.close(); }
+        if (app.isQuitting) return;                     // quitting: writeStoreNow writes it, and has the newest
+        if (storeWhole) await fs.promises.copyFile(SETTINGS, SETTINGS + '.bak').catch(() => {});
+        storeWhole = false;
+        // (briefly locked by an antivirus: copied instead)
+        try { await fs.promises.rename(tmp, SETTINGS); }
+        catch (e) { await fs.promises.copyFile(tmp, SETTINGS); await fs.promises.unlink(tmp).catch(() => {}); }
+        storeWhole = true;
+      } catch (e) { log('save failed', e.message); }
+    } while (saveAgain && !app.isQuitting);
+  })().finally(() => { saving = null; });
+}
+// on quit, at once (the process ends right after)
+function writeStoreNow() {
+  clearTimeout(saveTimer); saveTimer = null;
   try {
     fs.mkdirSync(userDir, { recursive: true });
-    const tmp = SETTINGS + '.tmp';
+    const tmp = SETTINGS + '.tmpq';
     const fd = fs.openSync(tmp, 'w');
     try { fs.writeSync(fd, JSON.stringify(store, null, 2)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-    if (readJson(SETTINGS)) { try { fs.copyFileSync(SETTINGS, SETTINGS + '.bak'); } catch (e) { /* ignore */ } }
+    if (storeWhole) { try { fs.copyFileSync(SETTINGS, SETTINGS + '.bak'); } catch (e) { /* ignore */ } }
     try { fs.renameSync(tmp, SETTINGS); }
     catch (e) { fs.copyFileSync(tmp, SETTINGS); fs.unlinkSync(tmp); }     // briefly locked (antivirus): copy instead
   } catch (e) { log('save failed', e.message); }
-}
-function saveStore() {
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(writeStoreNow, 150);
 }
 
 function defaultName() {
@@ -1904,10 +1932,10 @@ app.on('second-instance', (_e, argv) => {
 app.on('window-all-closed', (e) => { /* keep running in tray */ });
 app.on('before-quit', () => {
   app.isQuitting = true;
-  if (saveTimer) { clearTimeout(saveTimer); writeStoreNow(); }      // don't lose a setting changed just before quitting
   try { if (bt) bt.stop(); } catch (e) { /* ignore */ }
   try { if (qs) qs.stop(); } catch (e) { /* ignore */ }
-  try { if (feats) feats.stop(); } catch (e) { /* ignore */ }
+  try { if (feats) feats.stop(); } catch (e) { /* ignore */ }      // (folder sync's latest activity goes into the store)
+  if (saveTimer || saving) writeStoreNow();                         // don't lose a setting changed just before quitting
   try { if (air) air.stop(); } catch (e) { /* ignore */ }
   try { hotspot.stop(); } catch (e) { /* ignore */ }                // the PC's own Wi-Fi network, if Flick started it
   try { if (fb) fb.stop(); } catch (e) { /* ignore */ }

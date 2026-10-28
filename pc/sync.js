@@ -113,7 +113,18 @@ class SyncStore extends EventEmitter {
     return p;
   }
 
-  _touch(p) { p.last = Date.now(); this.persist(); this.emit('changed'); }
+  // A pair's last activity (it orders the panel's list) changes with every file: it's kept in memory and saved at most
+  // once a minute (and on quit, flush), rather than rewriting the settings for every file synced.
+  _touch(p) {
+    p.last = Date.now();
+    this.emit('changed');
+    if (this.touchT) return;
+    this.touchT = setTimeout(() => { this.touchT = null; this.persist(); }, 60000);
+    if (this.touchT.unref) this.touchT.unref();
+  }
+
+  /** Saves the activity not saved yet (Flick is quitting). */
+  flush() { if (this.touchT) { clearTimeout(this.touchT); this.touchT = null; this.persist(); } }
 
   /** Creates (or reuses) the folder for the phone's folder `name`: { id, folder }. */
   async pair(device, phone, name) {
