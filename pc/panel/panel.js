@@ -8,11 +8,13 @@
   // the page's own words are Windows'; on a Mac or Linux these lines name what is there instead
   const OS_TEXT = {
     mac: {
+      hotkeyLbl: 'Send selected files with ⌘⌥F',
       sendSub: 'Or drop files on this window, or on Flick in the menu bar or the Dock. In Finder, right-click a file and choose Open With > Flick.',
       startupLbl: 'Open Flick when you log in',
       fNotifySub: 'As notifications on this Mac. Turn it on in Flick on the phone too.',
     },
     linux: {
+      hotkeyLbl: 'Send copied files with Ctrl+Alt+F',
       sendSub: 'Or drop files on this window. In your file manager, right-click a file and choose Open With > Flick.',
       sendToLbl: 'Add Flick to your file manager’s Open With menu',
       startupLbl: 'Start Flick when you log in',
@@ -48,6 +50,17 @@
     const custom = $('saveDir').querySelector('option[value=custom]');
     custom.textContent = s.saveDir === 'desktop' || s.saveDir === 'downloads' ? 'Choose folder…' : s.saveDirLabel;
     $('sound').checked = !!s.sound;
+    if (document.activeElement !== $('volume')) $('volume').value = s.volume == null ? 0.7 : s.volume;
+    $('volume').disabled = !s.sound;
+    $('volumeRow').classList.toggle('off', !s.sound);
+    $('reduceFx').checked = !!s.reduceFx;
+    $('hotkey').checked = s.hotkey !== false;
+    const hk = $('hotkeySub');
+    hk.className = 'sub0' + (s.hotkey !== false && !s.hotkeyOk ? ' warn' : '');
+    hk.textContent = s.hotkey !== false && !s.hotkeyOk ? 'Another app is using these keys, so Flick can’t.'
+      : s.os === 'mac' ? 'Select files in Finder, then press Command-Option-F.'
+        : s.os === 'linux' ? 'Copy files in your file manager (Ctrl+C), then press Ctrl+Alt+F.'
+          : 'Select files in File Explorer or on the desktop, then press Ctrl+Alt+F.';
     $('openAfter').checked = !!s.openAfter;
     $('showSpeed').checked = !!s.showSpeed;
     $('airCam').checked = s.airCam !== false;
@@ -212,6 +225,10 @@
   $('anchor').oninput = (e) => { set('anchor', parseFloat(e.target.value)); document.querySelector('.scene .phone').style.top = (14 + (parseFloat(e.target.value) - 0.5) * 30) + 'px'; };
   $('size').oninput = (e) => set('size', parseFloat(e.target.value));
   $('sound').onchange = (e) => set('sound', e.target.checked);
+  $('volume').oninput = (e) => set('volume', parseFloat(e.target.value));
+  $('volume').onchange = () => act('soundTest');
+  $('reduceFx').onchange = (e) => set('reduceFx', e.target.checked);
+  $('hotkey').onchange = (e) => set('hotkey', e.target.checked);
   $('openAfter').onchange = (e) => set('openAfter', e.target.checked);
   $('showSpeed').onchange = (e) => set('showSpeed', e.target.checked);
   $('airCam').onchange = (e) => set('airCam', e.target.checked);

@@ -90,15 +90,29 @@
   const UPD = { app: null, pcApp: null, ghApp: null, ghAt: 0, ghAsk: false, pcKnows: false, state: 'idle', got: 0, total: 0, why: '', dismissed: 0, checkT: 0, auto: false, loud: false };
   const MY_CODE = +INFO.code || 0;
 
-  // ------------------------------------------------------------------ animation themes (the PC is the source of truth)
+  // ------------------------------------------------------------------ animations (the PC is the source of truth)
+  // Surprise me: each flick gets one of the four at random, chosen here (and told to the PC with the flick)
   const THEMES = [
-    { v: 'roadster', name: 'Roadster', desc: 'Launches on jets, flips, lands' },
-    { v: 'liquid', name: 'Liquid', desc: 'Ripples through your desktop' },
-    { v: 'teleport', name: 'Teleport', desc: 'Beamed in, pixel by pixel' },
-    { v: 'halo', name: 'Halo', desc: 'Soft light and a glass sweep' },
+    { v: 'meteor', name: 'Meteor', desc: 'Catches fire and crashes down' },
+    { v: 'volt', name: 'Volt', desc: 'Jumps across on lightning' },
+    { v: 'warp', name: 'Warp', desc: 'Flies out of a tunnel of light' },
+    { v: 'glitch', name: 'Glitch', desc: 'Skips across like a broken signal' },
+    { v: 'surprise', name: 'Surprise me', desc: 'A different one for each file' },
   ];
+  const LOOKS = ['meteor', 'volt', 'warp', 'glitch'];
+  // (an older choice, gone now, is Meteor)
   function themeOf(v) { return THEMES.find((t) => t.v === v) || THEMES[0]; }
-  st.theme = themeOf(pref.get('theme', 'roadster')).v;
+  let lastLook = null;
+  function pickLook() {
+    if (st.theme !== 'surprise') return LOOKS.includes(st.theme) ? st.theme : 'meteor';
+    const opts = LOOKS.filter((l) => l !== lastLook);
+    lastLook = opts[Math.floor(Math.random() * opts.length)];
+    return lastLook;
+  }
+  // flicks this phone sent lately: the PC says when each one's card hits its desktop ('landed'), and the phone thuds
+  const flung = new Map();
+  function flungNow(tid) { const t = now(); flung.set(tid, t); for (const [k, v] of flung) if (t - v > 15000) flung.delete(k); }
+  st.theme = themeOf(pref.get('theme', 'meteor')).v;
   function applyTheme(v) {
     const t = themeOf(v).v;
     st.theme = t;
@@ -850,6 +864,9 @@
         toast('Another phone is using ' + (st.pc ? st.pc.name : 'your PC') + ' now. Hold Connect to switch back.', 3200);
         break;
       case 'saved': if (linkTrusted()) onSaved(m); break;
+      case 'landed':                            // its card just hit the PC's desktop: a short thud in the hand
+        if (linkTrusted() && flung.has(m.tid) && now() - flung.get(m.tid) < 8000 && !document.hidden) { flung.delete(m.tid); haptic('thud'); }
+        break;
       case 'asking':                            // the PC asks its user first ("Ask each time"): see settleSent
         if (linkTrusted() && st.pending.has(m.tid)) st.pending.get(m.tid).asking = true;
         runHooks('ws', m);
@@ -1693,7 +1710,7 @@
         wsSend({ t: 'set-theme', theme: t.v });
         refreshThemeSheet();
         haptic('tick');
-        toast(t.name + ' is playing on your PC', 1800);
+        toast(t.v === 'surprise' ? 'Your PC plays a different one for each file' : t.name + ' is playing on your PC', 1800);
       };
       box.appendChild(b);
     }
@@ -1915,6 +1932,7 @@
   function egKick() { if (!EG.raf) { EG.last = 0; EG.raf = requestAnimationFrame(egFrame); } }
   function egFlash(y) { EG.y = y; EG.flashT = now(); egKick(); }
   function onEdge(m) {
+    delete edge.dataset.look;                      // (the PC's own: the animation's colours)
     EG.hover = !!m.on;
     EG.target = m.on ? 0.85 : 0;
     EG.h = 380;
@@ -1948,118 +1966,107 @@
     if (fxParts.length) fxRaf = requestAnimationFrame(fxFrame);
     else { fxRaf = 0; fctx.clearRect(0, 0, innerWidth, innerHeight); fxc.style.display = 'none'; }
   }
-  // a soft cloud sprite, drawn once
-  // vapor puffs: a few turbulent, wispy sprites (value-noise fbm, lit from the upper left), made once at startup
-  // made on first use (or once the page is idle), not while the app starts: ~25 ms on a desktop, ~90 ms on a phone
-  let puffCache = null;
-  const puffImgs = () => puffCache || (puffCache = makePuffs());
-  (window.requestIdleCallback || ((f) => setTimeout(f, 2000)))(() => puffImgs(), { timeout: 4000 });
-  function makePuffs() {
-    const N = 128, out = [];
-    const hash = (x, y, sd) => { let h = (Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(sd, 1442695041)) | 0; h = Math.imul(h ^ (h >>> 13), 1274126177); return ((h ^ (h >>> 16)) >>> 0) / 4294967295; };
-    const vn = (x, y, sd) => {
-      const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi, u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
-      const a = hash(xi, yi, sd), b = hash(xi + 1, yi, sd), c = hash(xi, yi + 1, sd), d = hash(xi + 1, yi + 1, sd);
-      return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
-    };
-    const fbm = (x, y, sd) => { let t = 0, a = 0.5; for (let i = 0; i < 4; i++) { t += a * vn(x, y, sd + i * 17); x = x * 2.03 + 1.7; y = y * 2.03 + 9.2; a *= 0.5; } return t; };
-    for (let k = 0; k < 3; k++) {
-      const c = document.createElement('canvas'); c.width = c.height = N;
-      const g = c.getContext('2d'), id = g.createImageData(N, N), d = id.data;
-      for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
-        const nx = (x - N / 2 + 0.5) / (N / 2), ny = (y - N / 2 + 0.5) / (N / 2), r2 = nx * nx + ny * ny;
-        if (r2 >= 1) continue;
-        const wx = fbm(nx * 2.2 + 3.1, ny * 2.2, k * 5) - 0.5, wy = fbm(nx * 2.2, ny * 2.2 + 7.3, k * 5 + 3) - 0.5;
-        const n = fbm(nx * 2.7 + wx * 1.8, ny * 2.7 + wy * 1.8, k * 11 + 1);
-        const win = 1 - r2;
-        const a = Math.max(0, Math.min(1, (Math.exp(-r2 * 2.4) * win * win * (0.3 + 1.2 * n) - 0.06) * 1.6));
-        const lit = Math.max(0, Math.min(1, 0.55 - (nx * 0.5 + ny * 0.7) * 0.45 + (n - 0.5) * 0.8));
-        const l = 214 + 41 * lit, i = (y * N + x) * 4;
-        d[i] = l - 5; d[i + 1] = l - 2; d[i + 2] = l; d[i + 3] = Math.round(a * 255);
+  // ------------------------------------------------------------------ each animation's moment as a card leaves for the
+  // PC, at the edge it goes through (the PC plays the rest): Meteor throws sparks back, Volt crackles, Warp pulls light
+  // in, Glitch tears the edge into colours. The edge flashes in its colour.
+  const back = () => -towardSign();
+  function sparks(x, y) {
+    for (let i = 0; i < 26; i++) {
+      const a = (Math.random() - 0.5) * 2.2, sp = 160 + Math.random() * 480;
+      fxParts.push({ x, y: y + (Math.random() - 0.5) * 60, vx: back() * Math.cos(a) * sp, vy: Math.sin(a) * sp - 70, age: -Math.random() * 0.05, life: 0.22 + Math.random() * 0.32,
+        draw(p, dt) {
+          const f = Math.exp(-dt * 2.5); p.vx *= f; p.vy = p.vy * f + 600 * dt;
+          const x0 = p.x, y0 = p.y; p.x += p.vx * dt; p.y += p.vy * dt;
+          const k = 1 - p.age / p.life;
+          fctx.lineCap = 'round';
+          fctx.strokeStyle = 'rgba(255,' + Math.round(140 + 100 * k) + ',' + Math.round(50 + 140 * k * k) + ',' + k.toFixed(3) + ')';
+          fctx.lineWidth = 1.7;
+          fctx.beginPath(); fctx.moveTo(x0 - p.vx * 0.022, y0 - p.vy * 0.022); fctx.lineTo(p.x, p.y); fctx.stroke();
+        } });
+    }
+    fxKick();
+  }
+  // a jagged line from (x0, y0) to (x1, y1): midpoint displacement
+  function jag(x0, y0, x1, y1) {
+    let pts = [[x0, y0], [x1, y1]];
+    for (let d = 0; d < 4; d++) {
+      const out = [pts[0]];
+      for (let i = 1; i < pts.length; i++) {
+        const a = pts[i - 1], b = pts[i], len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1, off = (Math.random() - 0.5) * 0.55 * len;
+        out.push([(a[0] + b[0]) / 2 - (b[1] - a[1]) / len * off, (a[1] + b[1]) / 2 + (b[0] - a[0]) / len * off], b);
       }
-      g.putImageData(id, 0, 0);
-      out.push(c);
+      pts = out;
     }
-    return out;
+    return pts;
   }
-  function vaporBurst(x, y, dir, n) {
-    for (let i = 0; i < n; i++) {
-      const sp = 240 + Math.random() * 560, a = (Math.random() - 0.5) * 1.4;
-      fxParts.push({ x: x + (Math.random() - 0.5) * 10, y: y + (Math.random() - 0.5) * 70, vx: dir * Math.cos(a) * sp, vy: Math.sin(a) * sp * 0.6,
-        s0: 16 + Math.random() * 14, s1: 90 + Math.random() * 90, rot: Math.random() * 6.28, spin: (Math.random() - 0.5) * 1.2,
-        img: (P => P[i % P.length])(puffImgs()), al: 0.55 + Math.random() * 0.3, age: -Math.random() * 0.07, life: 0.75 + Math.random() * 0.5,
-        draw(p, dt) {
-          const f = Math.exp(-dt / 0.17); p.vx *= f; p.vy *= f; p.x += p.vx * dt; p.y += p.vy * dt;
-          const u = p.age / p.life, s = p.s0 + (p.s1 - p.s0) * (1 - Math.exp(-p.age / 0.22));
-          // fast gas is streaky, slow gas billows; it thins out as it spreads
-          const spd = Math.hypot(p.vx, p.vy), stretch = 1 + Math.min(spd / 650, 1.2);
-          fctx.globalAlpha = p.al * Math.pow(p.s0 / s, 0.3) * (1 - u * u) * Math.min(1, p.age / 0.04);
-          fctx.save(); fctx.translate(p.x, p.y); fctx.rotate(Math.atan2(p.vy, p.vx)); fctx.scale(stretch, 1 / Math.sqrt(stretch));
-          fctx.rotate(p.rot + p.age * p.spin); fctx.drawImage(p.img, -s / 2, -s / 2, s, s); fctx.restore();
-          fctx.globalAlpha = 1;
-        } });
-    }
+  function crackle(x, y) {
+    fxParts.push({ x, y, age: 0, life: 0.28, fr: -1, bolts: null,
+      draw(p) {
+        const fr = Math.floor(p.age * 30);
+        if (fr !== p.fr) {
+          p.fr = fr; p.bolts = [];
+          for (let i = 0; i < 3; i++) { const yy = p.y + (Math.random() - 0.5) * 60; p.bolts.push(jag(p.x, yy, p.x + back() * (40 + Math.random() * 90), yy + (Math.random() - 0.5) * 130)); }
+        }
+        const k = 1 - p.age / p.life;
+        fctx.lineCap = 'round'; fctx.lineJoin = 'round';
+        for (const pts of p.bolts) {
+          for (const [w, c] of [[7, 'rgba(120,185,255,' + (0.3 * k).toFixed(3) + ')'], [1.6, 'rgba(235,245,255,' + k.toFixed(3) + ')']]) {
+            fctx.strokeStyle = c; fctx.lineWidth = w;
+            fctx.beginPath(); fctx.moveTo(pts[0][0], pts[0][1]);
+            for (let i = 1; i < pts.length; i++) fctx.lineTo(pts[i][0], pts[i][1]);
+            fctx.stroke();
+          }
+        }
+      } });
     fxKick();
   }
-  function ripples(x, y) {
-    for (let i = 0; i < 3; i++) {
-      fxParts.push({ x, y, age: -i * 0.11, life: 0.85,
+  function pullIn(x, y) {
+    for (let i = 0; i < 22; i++) {
+      const ang = (back() > 0 ? 0 : Math.PI) + (Math.random() - 0.5) * 2.4, r0 = 90 + Math.random() * 220;
+      fxParts.push({ x, y, ang, r0, age: -Math.random() * 0.12, life: 0.3 + Math.random() * 0.15,
         draw(p) {
-          const u = p.age / p.life, r = 18 + 230 * (1 - Math.pow(1 - u, 2));
-          fctx.lineWidth = 3.2 * (1 - u) + 0.6;
-          fctx.strokeStyle = `rgba(190,244,255,${(0.75 * (1 - u)).toFixed(3)})`;
-          fctx.beginPath(); fctx.arc(p.x, p.y, r, 0, Math.PI * 2); fctx.stroke();
-          fctx.lineWidth = 1;
-          fctx.strokeStyle = `rgba(255,255,255,${(0.5 * (1 - u)).toFixed(3)})`;
-          fctx.beginPath(); fctx.arc(p.x, p.y, r - 3, 0, Math.PI * 2); fctx.stroke();
+          const u = p.age / p.life, r1 = p.r0 * Math.pow(1 - u, 2), r2 = r1 + 16 + 40 * (1 - u);
+          const c = Math.cos(p.ang), sn = Math.sin(p.ang);
+          fctx.lineCap = 'round';
+          fctx.strokeStyle = 'rgba(205,190,255,' + (Math.min(1, u * 5) * (1 - u)).toFixed(3) + ')';
+          fctx.lineWidth = 1.5;
+          fctx.beginPath(); fctx.moveTo(p.x + c * r2, p.y + sn * r2); fctx.lineTo(p.x + c * r1, p.y + sn * r1); fctx.stroke();
         } });
     }
     fxKick();
   }
-  // the card dissolves into its own pixels, which stream off toward the PC
-  function dissolve(img, rect, rot, dir) {
-    const cols = 34, rows = Math.max(12, Math.round(34 * rect.h / rect.w));
-    const cv = document.createElement('canvas'); cv.width = cols; cv.height = rows;
-    const g = cv.getContext('2d');
-    let data = null;
-    try {
-      if (img && img.complete && img.naturalWidth) {
-        const ia = img.naturalWidth / img.naturalHeight, ca = rect.w / rect.h;
-        let sw = img.naturalWidth, sh = img.naturalHeight, sx = 0, sy = 0;
-        if (ia > ca) { sw = sh * ca; sx = (img.naturalWidth - sw) / 2; } else { sh = sw / ca; sy = (img.naturalHeight - sh) / 2; }
-        g.drawImage(img, sx, sy, sw, sh, 0, 0, cols, rows);
-      } else { g.fillStyle = '#f2f2f5'; g.fillRect(0, 0, cols, rows); }
-      data = g.getImageData(0, 0, cols, rows).data;
-    } catch (e) { data = null; }
-    const cx = rect.x + rect.w / 2, cy = rect.y + rect.h / 2, cs = Math.cos(rot), sn = Math.sin(rot);
-    const cw = rect.w / cols, ch = rect.h / rows;
-    for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) {
-      const lx = (i + 0.5) * cw - rect.w / 2, ly = (j + 0.5) * ch - rect.h / 2;
-      const x = cx + lx * cs - ly * sn, y = cy + lx * sn + ly * cs;
-      const k = (j * cols + i) * 4;
-      const col = data ? `rgb(${data[k]},${data[k + 1]},${data[k + 2]})` : '#f2f2f5';
-      const lead = dir < 0 ? i / cols : 1 - i / cols;          // the side nearest the PC goes first
-      fxParts.push({ x, y, vx: dir * (700 + Math.random() * 900), vy: (Math.random() - 0.5) * 120 + (j / rows - 0.5) * 80, col, s: Math.max(cw, ch) * 1.05,
-        age: -(lead * 0.22 + Math.random() * 0.06), life: 0.5 + Math.random() * 0.2,
-        draw(p, dt) {
-          p.vx *= 1 + dt * 1.8; p.x += p.vx * dt; p.y += p.vy * dt;
-          const u = p.age / p.life;
-          const s = p.s * (1 - u * 0.6);
-          fctx.globalAlpha = 1 - u * u;
-          fctx.fillStyle = p.col; fctx.fillRect(p.x - s / 2, p.y - s / 2, s, s);
-          fctx.globalAlpha = 1;
-        } });
-    }
+  function tear(x, y) {
+    fxParts.push({ x, y, age: 0, life: 0.3, fr: -1, bars: null,
+      draw(p) {
+        const fr = Math.floor(p.age * 30);
+        if (fr !== p.fr) {
+          p.fr = fr; p.bars = [];
+          for (let i = 0; i < 7; i++) p.bars.push([back() * Math.random() * 70, (Math.random() - 0.5) * 170, 12 + Math.random() * 60, 2 + Math.random() * 5, ['#ff3ea5', '#34e0ff', '#ffffff'][i % 3]]);
+        }
+        fctx.globalAlpha = 0.85 * (1 - p.age / p.life);
+        for (const b of p.bars) { fctx.fillStyle = b[4]; fctx.fillRect(back() > 0 ? p.x + b[0] : p.x + b[0] - b[2], p.y + b[1], b[2], b[3]); }
+        fctx.globalAlpha = 1;
+      } });
     fxKick();
   }
-  // themed moment when a card leaves the phone toward the PC
-  function releaseFx(rect, rot, img) {
-    const dir = towardSign();
+  // the card that's leaving, in the look: Warp stretches it into a streak; Glitch splits its colours and makes it skip
+  function exitLook(d, t) {
+    const u = (t - d.exitT) / 1000;
+    if (d.look === 'warp') d.sx = 1 + 3.2 * Math.min(1, u / 0.16) ** 2;
+    else if (d.look === 'glitch') {
+      if (!d.split) { d.split = true; d.f.style.filter = 'drop-shadow(5px 0 0 rgba(255,40,140,.85)) drop-shadow(-5px 0 0 rgba(40,230,255,.85))'; }
+      d.jx = Math.floor(t / 34) % 2 ? (Math.random() - 0.5) * 14 : 0;
+    }
+  }
+  // the moment a card leaves the phone toward the PC (true: the card is gone already, nothing flies off)
+  function releaseFx(rect, look) {
     const ex = st.side === 'right' ? 0 : innerWidth;
     const y = clamp(rect.y + rect.h / 2, 0, innerHeight);
-    if (st.theme === 'roadster') { vaporBurst(ex, y, -dir, 20); egFlash(y); return false; }
-    if (st.theme === 'liquid') { ripples(ex + dir * -6, y); egFlash(y); return false; }
-    if (st.theme === 'teleport') { dissolve(img, rect, rot, dir); return true; }
+    edge.dataset.look = LOOKS.includes(look) ? look : pickLook();
+    if (look === 'meteor') sparks(ex, y);
+    else if (look === 'volt') crackle(ex, y);
+    else if (look === 'warp') pullIn(ex, y);
+    else if (look === 'glitch') tear(ex, y);
     egFlash(y);
     return false;
   }
@@ -2254,7 +2261,8 @@
     for (const x of items) { const e2 = cards.get(x.id); if (e2) e2.classList.add('lifted'); }
     if (items.length > 1) gather(items.slice(1), () => (D ? { x: D.x, y: D.y, w: D.w, h: D.h } : { x: r.left, y: r.top, w: r.width, h: r.height }));
     haptic('lift');
-    if (st.theme === 'teleport') { const src = nativeThumb(it); if (src) { D.sampleImg = new Image(); D.sampleImg.src = src; } }
+    D.look = pickLook();
+    edge.dataset.look = D.look;
     // a long press may only be selecting: nothing is sent until the finger actually moves
     if (D.how !== 'press') beginSend();
     D.raf = requestAnimationFrame(dragFrame);
@@ -2272,7 +2280,7 @@
         d.sending = true;
         st.pending.set(d.tid, { item: d.it, items: d.items, phase: 'lifted' });
         startSend(d.tid, d.items);
-        wsSend({ t: 'lift', tid: d.tid, file: fileInfo(d.items), thumb: nativeThumb(d.it), thumbs: sheetThumbs(d.items), w: d.w, h: d.h, pw: innerWidth, ph: innerHeight });
+        wsSend({ t: 'lift', tid: d.tid, file: fileInfo(d.items), thumb: nativeThumb(d.it), thumbs: sheetThumbs(d.items), w: d.w, h: d.h, pw: innerWidth, ph: innerHeight, look: d.look });
       };
       const after = () => requestAnimationFrame(() => setTimeout(go, 0));    // after the next frame is on screen
       thumbsAhead(d.items, 600).then(after, after);
@@ -2305,6 +2313,7 @@
     } else if (D.phase === 'exit') {
       D.x += D.evx * dt; D.y += D.evy * dt;
       D.r = damp(D.r, D.evx > 0 ? 6 : -6, dt, 90);
+      exitLook(D, t);
       const off = D.evx < 0 ? D.x + D.w * D.s < -10 : D.x > innerWidth + 10;
       if (off || t - D.exitT > 900) { D.f.remove(); D = null; EG.target = 0; egKick(); return; }
     } else if (D.phase === 'back') {
@@ -2315,7 +2324,8 @@
       if (D.row) rowBack(D, u);                      // shrinks back into the row's thumbnail
       if (u >= 1) { unlift(D.items); D.f.remove(); D = null; return; }
     }
-    D.f.style.transform = 'translate3d(' + (D.x + (D.gx || 0)).toFixed(1) + 'px,' + (D.y + (D.gy || 0)).toFixed(1) + 'px,0) rotate(' + D.r.toFixed(2) + 'deg) scale(' + D.s.toFixed(4) + ')';
+    D.f.style.transform = 'translate3d(' + (D.x + (D.gx || 0) + (D.jx || 0)).toFixed(1) + 'px,' + (D.y + (D.gy || 0)).toFixed(1) + 'px,0) rotate(' + D.r.toFixed(2) + 'deg) scale(' + D.s.toFixed(4) + ')' +
+      (D.sx ? ' scale(' + D.sx.toFixed(3) + ',' + (1 / Math.sqrt(D.sx)).toFixed(3) + ')' : '');
 
     if (D.phase === 'drag' && st.connected && D.sending) {
       const dist = st.side === 'right' ? D.x : innerWidth - (D.x + D.w);
@@ -2359,11 +2369,13 @@
       if (Math.abs(evx) > 5) evx = 5 * sign;
       const evy = clamp(v.y, -1.6, 1.6) * 0.65;
       D.phase = 'exit'; D.evx = evx; D.evy = evy; D.exitT = now();
-      wsSend({ t: 'drop', tid: D.tid, x: Math.round(D.x * 10) / 10, y: Math.round(D.y * 10) / 10, w: D.w, h: D.h, r: Math.round(D.r * 10) / 10, s: D.s, vx: evx, vy: evy, pw: innerWidth, ph: innerHeight });
+      wsSend({ t: 'drop', tid: D.tid, x: Math.round(D.x * 10) / 10, y: Math.round(D.y * 10) / 10, w: D.w, h: D.h, r: Math.round(D.r * 10) / 10, s: D.s, vx: evx, vy: evy, pw: innerWidth, ph: innerHeight, look: D.look });
+      flungNow(D.tid);
+      runHooks('flicked', D.items);
       const p = st.pending.get(D.tid);
       if (p) { p.phase = 'sent'; if (p.job) nc('sendCommit', D.tid); }
       haptic('confirm');
-      const gone = releaseFx({ x: D.x + D.w * (1 - D.s) / 2, y: D.y + D.h * (1 - D.s) / 2, w: D.w * D.s, h: D.h * D.s }, D.r * Math.PI / 180, D.sampleImg);
+      const gone = releaseFx({ x: D.x + D.w * (1 - D.s) / 2, y: D.y + D.h * (1 - D.s) / 2, w: D.w * D.s, h: D.h * D.s }, D.look, D);
       // files that stay on the phone keep their place in the grid (an empty slot until the PC has them)
       let hid = false;
       for (const x of D.items) {
@@ -2411,10 +2423,11 @@
       const w = Math.min(190, innerWidth * 0.46), h = w * 0.75;
       r = { left: (innerWidth - w) / 2, top: innerHeight * 0.42 - h / 2, width: w, height: h, right: (innerWidth + w) / 2, bottom: innerHeight * 0.42 + h / 2 };
     }
-    const tid = rid();
+    const tid = rid(), look = pickLook();
     st.pending.set(tid, { item: it, items, phase: 'sent' });
     startSend(tid, items, true);
-    wsSend({ t: 'send', tid, file: fileInfo(items), thumb: nativeThumb(it), thumbs: sheetThumbs(items), w: r.width, h: r.height, pw: innerWidth, ph: innerHeight });
+    wsSend({ t: 'send', tid, file: fileInfo(items), thumb: nativeThumb(it), thumbs: sheetThumbs(items), w: r.width, h: r.height, pw: innerWidth, ph: innerHeight, look });
+    flungNow(tid);
     if (SEL.on) setSelecting(false);
     const keep = (x) => !!x.path || st.keep;
     const settle = () => {                                     // the stack is gone from the phone: empty slots until saved
@@ -2426,15 +2439,6 @@
     for (const x of items) { x._sentAt = now() + 400; const e2 = cards.get(x.id); if (e2) e2.classList.add('lifted'); }
     haptic('confirm');
     if (o.quiet) { setTimeout(settle, 450); return; }
-    if (st.theme === 'teleport') {
-      const img = new Image();
-      const src = nativeThumb(it);
-      for (const x of items) x._sentAt = now();
-      if (items.length > 1) gather(items.slice(1), () => ({ x: r.left, y: r.top, w: r.width, h: r.height }));
-      const go = () => { releaseFx({ x: r.left, y: r.top, w: r.width, h: r.height }, 0, img); settle(); };
-      if (src) { img.onload = go; img.onerror = go; img.src = src; } else go();
-      return;
-    }
     const f = makeStackFloat(items, r);
     let x = r.left, last = 0, s = 1;
     const y = r.top;
@@ -2454,7 +2458,7 @@
       }
       requestAnimationFrame(fly);
     })(t0);
-    setTimeout(() => releaseFx({ x: r.left, y: r.top, w: r.width, h: r.height }, 0, null), wait * 1000);
+    setTimeout(() => releaseFx({ x: r.left, y: r.top, w: r.width, h: r.height }, look, null), wait * 1000);
   }
 
   // ------------------------------------------------------------------ Air grab (features/air.js)
@@ -2478,9 +2482,10 @@
     startSend(tid, items);
     // a card's size on the PC (a photo open full screen is shown as large as a card in the grid)
     const k = rect ? Math.min(1, 230 / Math.max(rect.width, rect.height, 1)) : 1;
+    const look = pickLook();
     wsSend({ t: 'lift', tid, air: true, file: fileInfo(items), thumb: nativeThumb(it), thumbs: sheetThumbs(items),
       w: rect ? Math.round(rect.width * k) : 160, h: rect ? Math.round(rect.height * k) : 120, y: rect ? Math.round(rect.top + rect.height * (1 - k) / 2) : undefined,
-      pw: innerWidth, ph: innerHeight });
+      pw: innerWidth, ph: innerHeight, look });
     for (const x of items) { const e2 = cards.get(x.id); if (e2) e2.classList.add('lifted'); }
     haptic('lift');
     return tid;
@@ -2490,6 +2495,7 @@
     const p = st.pending.get(tid);
     if (!p || p.phase !== 'lifted') return false;
     wsSend({ t: 'air-go', tid, video: o && o.video ? { t: Math.max(0, +o.video.t || 0) } : undefined });
+    flungNow(tid);
     p.phase = 'sent';
     if (p.job) nc('sendCommit', tid);
     haptic('confirm');
@@ -2774,6 +2780,7 @@
     const g = { fid: it.fid, el, target, f: makeFloat(it, { width: w, height: h }, target), y0, t0: now(),
       sx: st.side === 'right' ? -w - 8 : innerWidth + 8, mx: st.side === 'right' ? 26 : innerWidth - w - 26 };
     flyAt(g, g.t0, null);
+    delete edge.dataset.look;
     egFlash(y0 + h / 2);
     IN.fly.push(g);
     if (!IN.flyRaf) IN.flyRaf = requestAnimationFrame(flyFrame);
@@ -3357,6 +3364,7 @@
   //   ws       a PC message the app doesn't handle itself (clip, link, ring, ring-stop)
   //   native   every Android event (before the app's own handling)
   //   sent     the items of a send the PC confirmed ('saved')
+  //   flicked  the items of a card just flicked off the edge to the PC
   //   back     Android's back button (return true when handled); backTop: the same, before the menus and prompts
   //   menu     items for the ••• sheet (return one item or a list)
   //   settings the Settings page is being drawn (its body element; add sections to it)

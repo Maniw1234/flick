@@ -493,5 +493,27 @@
     body.appendChild(g);
   });
 
-  X.air = { state: () => ({ on, camState, mode: M.mode }), stats: () => (cam ? cam.stats : null) };
+  // ---- a tip, once: after the first few files flicked, Air grab is offered (it stays off until turned on). Not on a
+  // phone whose camera Flick may no longer ask for, or with a PC that doesn't know Air grab yet.
+  function offerAir(n) {
+    if (on || A.pref.get('airTip', '') || !A.st.connected || !pcKnows() || A.nc('cameraState') === 'blocked') return;
+    if (!gridFree() || document.hidden || A.selecting) { if (n < 20) setTimeout(() => offerAir(n + 1), 3000); return; }
+    A.pref.set('airTip', '1');
+    A.openSheet('Tip: send files with a wave of your hand', [
+      { label: 'Turn on Air grab', tag: 'Front camera', run: turnOn },
+      { label: 'Not now', run: () => A.toast('Air grab is in Settings any time', 2200) },
+    ]);
+  }
+  A.on('flicked', () => {
+    if (on || A.pref.get('airTip', '')) return;
+    const n = (+A.pref.get('flicks', '0') || 0) + 1;
+    A.pref.set('flicks', String(n));
+    if (n >= 3) setTimeout(() => offerAir(0), 1400);
+  });
+  function turnOn() {
+    if (camOk()) { on = true; A.pref.set('air', '1'); update(); A.toast('Air grab is on: make a fist over a file, then move it to your PC', 3200); return; }
+    A.nc('askCamera');                                    // Android asks once; its answer comes back as 'camera'
+  }
+
+  X.air = { state: () => ({ on, camState, mode: M.mode }), stats: () => (cam ? cam.stats : null), offer: () => offerAir(0) };
 });

@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, Tray, Menu, nativeImage, screen, ipcMain, desktopCapturer, shell, dialog } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, screen, ipcMain, desktopCapturer, shell, dialog, globalShortcut } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -91,7 +91,10 @@ if (process.stdout && process.stdout.on) process.stdout.on('error', () => {});
 const DEFAULTS = {
   // received files land on the desktop, except on Linux, where desktops often show no files at all
   id: null, name: null, side: 'right', anchor: 0.5, size: 1, saveDir: IS_LINUX ? 'downloads' : 'desktop', sound: true,
-  startup: true, edgeSend: true, devices: {}, firstRun: true, displayId: null, theme: 'roadster',
+  startup: true, edgeSend: true, devices: {}, firstRun: true, displayId: null, theme: 'meteor',
+  volume: 0.7,                 // the animations' sound (0..1)
+  reduceFx: false,             // the light version of the animations (it's also used on its own on a slow PC)
+  hotkey: true,                // Ctrl+Alt+F (Cmd+Option+F) sends the selected files to the phone
   openAfter: false, showSpeed: true, sendTo: true, autoUpdate: true, bluetooth: false, quickShare: false,
   airCam: true,                // Air grab: this PC's camera sees where the hand opens, and a fist picking files up (air.js)
 };
@@ -286,7 +289,8 @@ function overlayConfig() {
   const ob = overlayBounds();
   const taskbar = Math.max(0, (d.bounds.y + d.bounds.height) - (d.workArea.y + d.workArea.height));
   return { W: ob.width, H: ob.height, dispW: d.bounds.width, dispH: d.bounds.height, dpr: d.scaleFactor || 1,
-    side: store.side, anchor: store.anchor, k: kFactor(), sound: !!store.sound, taskbar: taskbar || 0, saveLabel: saveDirLabel(), theme: themeName() };
+    side: store.side, anchor: store.anchor, k: kFactor(), sound: !!store.sound, volume: volumeOf(), reduceFx: !!store.reduceFx,
+    taskbar: taskbar || 0, saveLabel: saveDirLabel(), theme: themeName() };
 }
 
 function createOverlay() {
@@ -336,12 +340,15 @@ function placeOverlay() {
   overlay.webContents.send('fx:config', overlayConfig());
 }
 
-const THEMES = ['roadster', 'liquid', 'teleport', 'halo'];
-function themeName() { return THEMES.includes(store.theme) ? store.theme : 'roadster'; }
+// the animations (pc/overlay/looks); 'surprise': one of them at random for each flick. An older setting (Roadster,
+// Liquid, Teleport, Halo: gone) is Meteor now.
+const THEMES = ['meteor', 'volt', 'warp', 'glitch', 'surprise'];
+function themeName() { return THEMES.includes(store.theme) ? store.theme : 'meteor'; }
+function volumeOf() { const v = +store.volume; return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0.7; }
 
-// Moments that start from a quiet screen take a fresh photo of the desktop first (used for blur, refraction and
-// night grading), while the overlay is still hidden so it can never photograph itself. Teleport uses no photo.
-const SHOT_FIRST = { lift: true, hold: true, outgoing: true, demo: true, 'edge-hover': true, preview: true, connect: true };
+// Moments that start from a quiet screen take a fresh photo of the desktop first (bent, dimmed and lit by the
+// animations), while the overlay is still hidden so it can never photograph itself.
+const SHOT_FIRST = { lift: true, hold: true, outgoing: true, demo: true, 'edge-hover': true, preview: true, connect: true, hint: true };
 const SHOT_MS = 600;            // a slower photo is given up on: the effects run without it rather than wait
 // once the overlay hides, its desktop photo is out of date: drop it so no later effect paints an old screen
 function dropShot() { lastShot = 0; if (overlay) overlay.webContents.send('fx:noshot'); }
@@ -362,7 +369,7 @@ function reveal() {
 }
 function ensureShown(withShot) {
   if (!overlay || overlayShown || revealT) return;
-  if (withShot && themeName() !== 'teleport' && shotAllowed() && Date.now() - lastShot > 1500) {
+  if (withShot && shotAllowed() && Date.now() - lastShot > 1500) {
     // photograph the desktop first and only then show the overlay, so the picture never contains the overlay itself;
     // a slow capture is abandoned (the effects then run without it) rather than holding the animation back for long
     let done = false;
@@ -429,6 +436,49 @@ ipcMain.on('fx:ready', () => { overlayReady = true; if (overlay) overlay.webCont
 ipcMain.on('fx:idle', () => {
   if (overlay && overlayShown) { overlay.hide(); overlayShown = false; dropShot(); }
 });
+// a card from the phone just hit the desktop: the phone that threw it gives a short thud
+ipcMain.on('fx:landed', (e, m) => {
+  if (!fromWin(e, overlay) || !m || typeof m.tid !== 'string' || !server) return;
+  if (transfers.has(m.tid)) server.pushToPhone({ t: 'landed', tid: m.tid });
+});
+
+// ------------------------------------------------------------ the send shortcut
+// Ctrl+Alt+F (Cmd+Option+F on a Mac) sends the files selected in File Explorer or Finder (on Linux, where file managers
+// don't say what's selected: the files copied) to the phone, as Send to does. Settings can turn it off (another app
+// may want the keys; some keyboards type a character with AltGr+F, which Windows sees as Ctrl+Alt+F).
+const HOTKEY = 'CommandOrControl+Alt+F';
+let hotkeyOk = false, hotkeyBusy = false, selNow = null;
+function applyHotkey() {
+  const want = store.hotkey !== false;
+  if (want && !hotkeyOk) {
+    try { hotkeyOk = globalShortcut.register(HOTKEY, () => { onHotkey(); }); } catch (e) { hotkeyOk = false; }
+    if (!hotkeyOk) log('send shortcut: another app has', HOTKEY);
+  } else if (!want && hotkeyOk) {
+    try { globalShortcut.unregister(HOTKEY); } catch (e) { /* ignore */ }
+    hotkeyOk = false;
+    if (selNow) selNow.stop();
+  }
+}
+async function onHotkey() {
+  if (hotkeyBusy) return;
+  hotkeyBusy = true;
+  try {
+    fx('hint', { pulse: true });                   // heard: the phone's edge lights up at once
+    if (!selNow) { const { SelNow } = require('./selnow'); selNow = new SelNow({ log }); }
+    const sel = await selNow.ask();
+    log('send shortcut:', sel.paths.length, 'file(s)', sel.kind);
+    if (sel.paths.length) {
+      if (!store.hotkeyUsed) { store.hotkeyUsed = true; saveStore(); }
+      queueForPhone(sel.paths);
+      return;
+    }
+    const text = sel.kind === 'denied' ? 'Let Flick use Finder: System Settings › Privacy & Security › Automation'
+      : IS_LINUX ? 'Copy files first (Ctrl+C), then press Ctrl+Alt+F'
+        : IS_MAC ? 'Select files in Finder first' : 'Select files in File Explorer first';
+    fx('hint', { text });
+  } catch (e) { log('send shortcut failed', e.message); }
+  finally { hotkeyBusy = false; }
+}
 
 // The photo of the desktop needs Screen Recording permission on macOS, which Flick doesn't ask for (the effects do
 // without it unless the user gave it), and under Wayland every capture would ask through a dialog of its own.
@@ -643,6 +693,8 @@ function flushSendQueue() {
 // without one. The files after the dozen go right after, with no card (the phone makes its own picture of a file).
 const THUMB_MS = 900;
 const THUMBS_AHEAD = IS_WIN ? 0 : 3;              // Windows makes its thumbnails on this thread: one at a time there
+// the phone shows its cards coming in as this screen's leave it (the animations take 0.75 s to send a card off the edge)
+const FLY_OUT_MS = 650;
 async function sendPathsToPhone(list, screenY, opts) {
   if (!server || !server.connected) return 0;
   const device = (opts && opts.device) || undefined;
@@ -681,8 +733,8 @@ async function sendPathsToPhone(list, screenY, opts) {
     server.pushToPhone({
       t: 'incoming', fid: f.offer.fid, name: f.name, size: f.offer.size, mime: f.mime, kind: f.kind, ext: f.ext,
       thumb: th && th.url, aspect, y: phoneYFromOverlayY(y), url: '/api/file/' + encodeURIComponent(f.offer.fid),
-      // the phone's cards fly 90 ms apart: time already spent here on pictures counts toward that
-      delay: Math.max(0, Math.min(i, shown) * 90 - (Date.now() - t0)),
+      // the phone's cards fly 90 ms apart, after this screen's have left: time already spent here on pictures counts
+      delay: Math.max(0, (overlay && overlayReady ? FLY_OUT_MS : 0) + Math.min(i, shown) * 90 - (Date.now() - t0)),
     }, device);
     log('offer', f.name, f.offer.size);
     if (i < shown) await new Promise((r) => setImmediate(r));    // downloads and messages run between cards
@@ -972,7 +1024,8 @@ function panelState() {
     phoneHas: s && s.connected ? { code: s.app || 0, name: s.appName || '' } : null,
     update: { state: updateInfo.state, version: updateInfo.version || '' },
     side: store.side, anchor: store.anchor, size: store.size, saveDir: store.saveDir, saveDirLabel: saveDirLabel(), saveDirPath: saveDirPath(),
-    sound: store.sound, startup: store.startup, edgeSend: store.edgeSend, isWin: IS_WIN, os: IS_WIN ? 'win' : IS_MAC ? 'mac' : 'linux', theme: themeName(),
+    sound: store.sound, volume: volumeOf(), reduceFx: !!store.reduceFx, hotkey: store.hotkey !== false, hotkeyOk,
+    startup: store.startup, edgeSend: store.edgeSend, isWin: IS_WIN, os: IS_WIN ? 'win' : IS_MAC ? 'mac' : 'linux', theme: themeName(),
     openAfter: store.openAfter, showSpeed: store.showSpeed, sendTo: store.sendTo, autoUpdate: store.autoUpdate,
     bluetooth: store.bluetooth, btState: btState, quickShare: store.quickShare, qsState: qsState, airCam: store.airCam !== false, airCamState: air ? air.camState : 'off',
     via: s && s.connected ? s.via || '' : '',
@@ -1003,6 +1056,9 @@ ipcMain.on('panel:set', (e, m) => {
     case 'anchor': store.anchor = Math.max(0.15, Math.min(0.85, +value || 0.5)); break;
     case 'size': store.size = Math.max(0.7, Math.min(1.5, +value || 1)); break;
     case 'sound': store.sound = !!value; break;
+    case 'volume': { const v = +value; if (Number.isFinite(v)) store.volume = Math.round(Math.max(0, Math.min(1, v)) * 100) / 100; break; }
+    case 'reduceFx': store.reduceFx = !!value; break;
+    case 'hotkey': store.hotkey = !!value; applyHotkey(); break;
     case 'edgeSend': store.edgeSend = !!value; break;
     case 'displayId': store.displayId = value || null; break;
     case 'saveDir': if (value === 'desktop' || value === 'downloads') { store.saveDir = value; updateStage(); } break;
@@ -1049,6 +1105,8 @@ ipcMain.on('panel:action', async (e, m) => {
     case 'fixFirewall': fixFirewall(); break;
     case 'testFx': fx('connect', {}); break;
     case 'demo': fx('demo', {}); break;
+    // the volume slider let go: the animation's sound at the new volume (sound only, nothing on the screen)
+    case 'soundTest': if (overlay && overlayReady && store.sound) overlay.webContents.send('fx:sound', {}); break;
     case 'dismissIntro': store.firstRun = false; saveStore(); pushPanelState(); break;
     case 'openLog': shell.openPath(LOG); break;
     case 'openRelease': shell.openExternal(updateInfo.page && /^https:\/\/github\.com\//.test(updateInfo.page) ? updateInfo.page : 'https://github.com/Maniw1234/flick/releases/latest'); break;
@@ -1402,6 +1460,7 @@ function liftInfo(m, t) {
     tid: m.tid, name: t.name, kind: f.kind, badge: f.badge, thumb: m.thumb || null, thumbs,
     count: Math.max(1, Math.min(100000, +f.count || 1)), folder: !!f.folder,
     size: f.size || 0, card: { w: m.w || 160, h: m.h || 160 },
+    look: typeof m.look === 'string' ? m.look.slice(0, 12) : undefined,     // the animation the phone chose (Surprise me)
   };
 }
 
@@ -2051,6 +2110,10 @@ app.on('second-instance', (_e, argv) => {
   else showPanel();
 });
 app.on('window-all-closed', (e) => { /* keep running in tray */ });
+app.on('will-quit', () => {
+  try { globalShortcut.unregisterAll(); } catch (e) { /* ignore */ }
+  try { if (selNow) selNow.stop(); } catch (e) { /* ignore */ }
+});
 app.on('before-quit', () => {
   app.isQuitting = true;
   try { if (bt) bt.stop(); } catch (e) { /* ignore */ }
@@ -2150,6 +2213,13 @@ app.whenReady().then(async () => {
   });
   createTray();
   applyStartup();
+  applyHotkey();
+  // Windows: someone who uses the send shortcut gets its helper started ahead (it takes a second or two)
+  if (IS_WIN && store.hotkeyUsed && store.hotkey !== false) setTimeout(() => {
+    if (!hotkeyOk) return;
+    if (!selNow) { const { SelNow } = require('./selnow'); selNow = new SelNow({ log }); }
+    selNow.warm();
+  }, 20000).unref();
   screen.on('display-metrics-changed', () => { placeOverlay(); ensureCatcher(); });
   screen.on('display-added', () => { placeOverlay(); ensureCatcher(); });
   screen.on('display-removed', () => { placeOverlay(); ensureCatcher(); });
@@ -2179,6 +2249,7 @@ function startTestControl() {
       if (u.pathname === '/air' && air) { air.testHand(JSON.parse(u.searchParams.get('ev') || '{}')); return res.end('ok'); }   // a hand the camera "sees"
       if (u.pathname === '/air-select' && air) { air.testSelect(JSON.parse(u.searchParams.get('paths') || '[]'), u.searchParams.get('first') === '1'); return res.end('ok'); }   // files "selected"
       if (u.pathname === '/air-state' && air) return res.end(JSON.stringify(air.state));
+      if (u.pathname === '/hotkey') { await onHotkey(); return res.end(JSON.stringify({ ok: hotkeyOk })); }   // the send shortcut, pressed
       if (u.pathname === '/fb/flush' && fb) { await fb.flush(); return res.end(JSON.stringify(fb.info())); }
       if (u.pathname === '/capture') {
         const w = u.searchParams.get('w') === 'panel' ? panel : u.searchParams.get('w') === 'air' && air ? air.window : overlay;

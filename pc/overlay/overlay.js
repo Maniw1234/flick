@@ -22,7 +22,7 @@
 
   // ------------------------------------------------------------------ settings
   const S = { W: innerWidth, H: innerHeight, dispW: innerWidth, dispH: innerHeight + 1, dpr: devicePixelRatio || 1,
-    side: 'right', anchor: 0.5, k: 0.66, sound: true, taskbar: 48, saveLabel: 'Desktop', theme: 'roadster', iconSize: 56 };
+    side: 'right', anchor: 0.5, k: 0.66, sound: true, volume: 0.7, reduceFx: false, taskbar: 48, saveLabel: 'Desktop', theme: 'meteor', iconSize: 56 };
 
   // dirty: something drawn changed outside the cards' own state (a picture loaded, a new card, the canvas resized, which
   // blanks it): the next frame draws, whatever else (see frame)
@@ -65,13 +65,14 @@
     shake: { amp: 0, t0: 0, dur: 0 },
     hud,
     cards: null,
+    send: (ch, d) => api.send(ch, d),
   };
 
   // ------------------------------------------------------------------ themes
   const THEMES = window.FLICK_THEMES || {};
   let theme = null;
   function setTheme(name) {
-    const next = THEMES[name] || THEMES.roadster || Object.values(THEMES)[0];
+    const next = THEMES[name] || THEMES.meteor || Object.values(THEMES)[0];
     if (!next || next === theme) return;
     // anything still on screen belongs to the old animation's physics: clear it before the new one takes over
     if (theme) resetAll();
@@ -185,6 +186,15 @@
     const q = R.apply(R.model(p), o.dx * w, o.dy * h, o.z);
     return { x: q[0], y: q[1], z: q[2], rx: p.rx || 0, ry: p.ry || 0, rz: (p.rz || 0) + o.rz, sx: p.sx || 1, sy: p.sy || 1 };
   }
+  // the sheets of a stack, for a look that draws its card itself
+  E.sheetsOf = function (c) {
+    const out = [], n = Math.min(2, (c.info.count || 1) - 1);
+    for (let i = 2 - n; i < 2; i++) {
+      const sh = (c.sheets && c.sheets[i]) || {};
+      out.push({ tex: sh.tex || null, texW: sh.w || 0, texH: sh.h || 0, pose: sheetPose(c.pose, SHEETS[i], c.w, c.h) });
+    }
+    return out;
+  };
   function drawSheets(c) {
     const n = Math.min(2, (c.info.count || 1) - 1);
     for (let i = 2 - n; i < 2; i++) {
@@ -312,6 +322,8 @@
     S.dispW = c.dispW || S.W; S.dispH = c.dispH || (S.H + 1);
     S.dpr = c.dpr || devicePixelRatio || 1;
     A.enabled = S.sound !== false;
+    A.setVolume(S.volume == null ? 0.7 : S.volume);
+    if (!A.enabled) A.stopAll();
     applySize();
     if (c.theme && c.theme !== prevTheme) setTheme(c.theme); else if (!theme) setTheme(S.theme);
   });
@@ -386,7 +398,6 @@
       c.pose.sx = c.pose.sy = 0.6;                       // grows into the hand
       c.prev = Object.assign({}, c.pose);
       c.air = { x: c.pose.x, y: c.pose.y, at: now() };
-      E.A.tone && E.A.tone({ type: 'sine', f0: 520, f1: 880, sweep: 0.12, dur: 0.16, gain: 0.02, attack: 0.005 });
     }
     if (c.state !== 'airout') return;
     // its picture, made after it was picked up (it showed its file type until then)
@@ -419,6 +430,7 @@
     // Air grab: where the hand opened in front of the PC; otherwise where the throw carries it
     c.target = m.land ? { x: clamp(+m.land.x || 0, c.w / 2 + 30, S.W - c.w / 2 - 30), y: clamp(+m.land.y || 0, c.h / 2 + 30, E.floorY() - c.h / 2 - 30) }
       : landingSpot(c, vx, vy);
+    if (typeof m.look === 'string') c.info.look = m.look;      // the look the phone chose for it (Surprise me)
     theme.launch(E, c);
     kick();
   });
@@ -466,6 +478,10 @@
     kick();
   });
   on('fx:reset', () => resetAll());
+  // the send shortcut: heard (the phone's edge lights up), or what to do first ({ text })
+  on('fx:hint', (m) => { if (theme.hint) theme.hint(E, m || {}); kick(); });
+  // the volume was changed: the animation's sound alone, at the new volume
+  on('fx:sound', () => { if (theme.soundTest) theme.soundTest(E); });
   on('fx:demo', (m) => demo(m || {}));
   // Linux: thumbnails of files sent to the phone, made by a worker (thumbs.js) for main.js
   let thumbs = null;
@@ -846,6 +862,7 @@
     if (t - idleSince > 300) {
       raf = 0;
       if (GL_OK) R.clear();
+      if (theme.sleep) theme.sleep(E);
       drawnLook = null;
       if (!idleSent) { idleSent = true; requestAnimationFrame(() => api.send('fx:idle')); }
       return;

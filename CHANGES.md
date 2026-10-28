@@ -2,6 +2,19 @@
 
 ## 1.2.0
 
+- **New animations, each with its own sound.** Meteor catches fire and crashes down, Volt jumps across on lightning,
+  Warp flies out of a tunnel of light and Glitch skips across like a broken signal; Surprise me picks one for each
+  file. Files sent to the phone leave the PC the same way, and come in on the phone as they leave. The sounds are
+  played whole and timed so their peak is the moment the card lands. Meteor is the new default: Roadster, Liquid,
+  Teleport and Halo are gone (a PC set to one of them plays Meteor).
+- **Volume and Reduce effects.** Flick's window has a volume slider (a little quieter than before to start with) and
+  Reduce effects, a lighter version of the animations. A PC that can't keep up switches to it by itself.
+- **The phone thuds when the file lands.** A short knock in your hand as the card hits the PC's desktop (Settings >
+  Vibration turns it off with the other vibrations).
+- **Send with a keyboard shortcut.** Select files in File Explorer, on the desktop or in Finder and press Ctrl+Alt+F
+  (Command-Option-F on a Mac) to send them to the phone. On Linux, copy them first (Ctrl+C). It can be turned off in
+  Flick's window (Files).
+- **Air grab, offered once.** After your first few flicks, the phone offers to turn Air grab on.
 - **Air grab: move files with your hand.** Turn it on in the phone's Settings (Android asks for the camera once). Hold
   your open hand over Flick and the file under it lights up; pinch to select it, and keep pinching across more files;
   make a fist to grab the file open full screen, the selection or the lit-up file, then open your hand in front of the

@@ -2,12 +2,15 @@ package com.flick.app;
 
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
+import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Build;
 import android.os.CancellationSignal;
 import android.os.OperationCanceledException;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
 import android.view.HapticFeedbackConstants;
 import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
@@ -415,6 +418,7 @@ final class Bridge {
 
     @JavascriptInterface
     public void haptic(final String kind) {
+        if ("thud".equals(kind)) { thud(); return; }
         a.runOnUiThread(new Runnable() {
             @Override
             public void run() {
@@ -427,6 +431,18 @@ final class Bridge {
                 if (a.web != null) a.web.performHapticFeedback(c);
             }
         });
+    }
+
+    /** A short, heavy knock: a flicked file's card hitting the PC's desktop. */
+    @SuppressWarnings("deprecation")
+    private void thud() {
+        try {
+            Vibrator v = Build.VERSION.SDK_INT >= 31 ? Ringer.Api31.vibrator(a) : (Vibrator) a.getSystemService(Context.VIBRATOR_SERVICE);
+            if (v == null || !v.hasVibrator()) return;
+            if (Build.VERSION.SDK_INT >= 29) v.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_HEAVY_CLICK));
+            else if (Build.VERSION.SDK_INT >= 26) v.vibrate(VibrationEffect.createOneShot(28, 255));
+            else v.vibrate(28);
+        } catch (Throwable e) { /* no vibration */ }
     }
 
     @JavascriptInterface

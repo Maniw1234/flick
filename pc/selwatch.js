@@ -19,7 +19,9 @@ const { clipFiles } = require('./clipfiles');
 const MAX = 100;
 
 // (one statement a line: PowerShell needs them apart)
-const PS = String.raw`$ErrorActionPreference = "SilentlyContinue"
+// The script's parts: the selection of the window in front (PS_PICK sets $kind and $paths), asked in a loop that
+// reports changes (PS, for SelWatch) or once for each line read (PS_ASK, for the send shortcut: selnow.js)
+const PS_HEAD = String.raw`$ErrorActionPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 Add-Type -Namespace FlickSel -Name W -MemberDefinition '
 [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
@@ -42,13 +44,8 @@ public static long TabOf(object w) {
 }
 '
 $sh = New-Object -ComObject Shell.Application
-# Flick (FLICK_PID) gone without stopping this, as after a crash: this stops too
-$parent = $null
-if ($env:FLICK_PID) { try { $parent = [System.Diagnostics.Process]::GetProcessById([int]$env:FLICK_PID) } catch {} }
-$last = $null
-while ($true) {
-  if ($parent -and $parent.HasExited) { exit }
-  $fg = [FlickSel.W]::GetForegroundWindow()
+`;
+const PS_PICK = String.raw`  $fg = [FlickSel.W]::GetForegroundWindow()
   $cb = New-Object System.Text.StringBuilder 256
   [void][FlickSel.W]::GetClassName($fg, $cb, 256)
   $cls = $cb.ToString()
@@ -91,7 +88,14 @@ while ($true) {
       foreach ($i in $d.Document.SelectedItems()) { $paths.Add($i.Path); if ($paths.Count -ge 100) { break } }
     } catch {}
   }
-  $now = $kind + "|" + ($paths -join "|")
+`;
+const PS = PS_HEAD + String.raw`# Flick (FLICK_PID) gone without stopping this, as after a crash: this stops too
+$parent = $null
+if ($env:FLICK_PID) { try { $parent = [System.Diagnostics.Process]::GetProcessById([int]$env:FLICK_PID) } catch {} }
+$last = $null
+while ($true) {
+  if ($parent -and $parent.HasExited) { exit }
+` + PS_PICK + String.raw`  $now = $kind + "|" + ($paths -join "|")
   if ($now -ne $last) {
     $last = $now
     [Console]::Out.WriteLine("@ " + $kind)
@@ -100,6 +104,16 @@ while ($true) {
     [Console]::Out.Flush()
   }
   Start-Sleep -Milliseconds 400
+}
+`;
+// (stops when its input closes: Flick gone, or done with it)
+const PS_ASK = PS_HEAD + String.raw`while ($true) {
+  $q = [Console]::In.ReadLine()
+  if ($q -eq $null) { exit }
+` + PS_PICK + String.raw`  [Console]::Out.WriteLine("@ " + $kind)
+  foreach ($p in $paths) { [Console]::Out.WriteLine($p) }
+  [Console]::Out.WriteLine(".")
+  [Console]::Out.Flush()
 }
 `;
 
@@ -219,4 +233,4 @@ class SelWatch extends EventEmitter {
   _log(s) { if (this.o.log) this.o.log('selection: ' + s); }
 }
 
-module.exports = { SelWatch, PS, JXA };
+module.exports = { SelWatch, PS, PS_ASK, JXA };

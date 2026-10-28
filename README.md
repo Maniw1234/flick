@@ -30,9 +30,11 @@ Both update themselves after that.
 
 The PC app is the same everywhere, with these differences:
 
-- **Sending PC files to the phone:** on Windows, File Explorer's right-click menu has Send with Flick and Send to >
-  Flick (phone). On a Mac, drop files on Flick in the menu bar or in the Dock, or right-click them in Finder and choose
-  Open With > Flick. On Linux, choose Open With > Flick in the file manager.
+- **Sending PC files to the phone:** everywhere, drag files to the screen's edge on the phone's side, or select them
+  and press Ctrl+Alt+F (Command-Option-F on a Mac; on Linux, where file managers don't say what's selected, copy them
+  with Ctrl+C first). On Windows, File Explorer's right-click menu also has Send with Flick and Send to > Flick
+  (phone). On a Mac, drop files on Flick in the menu bar or in the Dock, or right-click them in Finder and choose Open
+  With > Flick. On Linux, choose Open With > Flick in the file manager.
 - **Bluetooth** is Windows only.
 - **The phone as a media remote:** on a Mac, macOS asks once to let Flick control the computer (Privacy & Security >
   Accessibility); on Linux it needs `playerctl` (for example `sudo apt install playerctl`). Flick on the PC says so
@@ -40,6 +42,18 @@ The PC app is the same everywhere, with these differences:
 - **Linux:** under Wayland Flick runs through X11 (XWayland), since its animations cover the screen and stay on top,
   which Wayland doesn't let a window do. Received files go to Downloads. To remove Flick, delete the AppImage or the
   folder, and `~/.local/share/applications/flick.desktop` and `~/.config/autostart/flick.desktop`.
+
+## Animations
+
+A file flies onto the PC with one of four animations, each timed to its own sound (the whole sound, sped up so its
+peak is the moment the card lands): **Meteor** catches fire and crashes down, **Volt** jumps across on lightning,
+**Warp** flies out of a tunnel of light and **Glitch** skips across like a broken signal. **Surprise me** picks one
+for each file. Files sent to the phone leave the same way. Choose in Flick's window or on the phone (••• >
+Animation). Flick's window also has the sound, its volume and **Reduce effects** (a lighter version, which Flick also
+uses by itself on a PC that can't keep up). The phone gives a short thud as the card lands. The animations are worked
+out from the time since the flick alone (`pc/overlay/looks/`) and drawn with WebGL (`pc/overlay/fx2.js`), with the
+desktop under them bent and lit where Flick may take a picture of it (on a Mac, only if Screen Recording is allowed for
+Flick; not under Wayland).
 
 ## Air grab
 
@@ -72,7 +86,7 @@ Pick files up with your hand and drop them on the PC, without touching the scree
 
 | Folder | What it is |
 |---|---|
-| `pc/` | PC app (Electron, for Windows, macOS and Linux; `platform.js` holds what macOS and Linux do differently): LAN server (HTTP, WebSocket, UDP discovery, mDNS), the transparent overlay with the animation themes (Roadster, Liquid, Teleport, Halo), the settings panel, the service that hands phone updates to the phone, the phone features (`phoneapi.js`, `features.js`, `sync.js`, `clip.js`, `history.js`, `keys.js`, `browse.js`, `cliphist.js`, `ask.js`), files already received (`have.js`), Air grab (`air.js`, `air/`, `clipfiles.js`), the PC's own Wi-Fi network (`hotspot.js`), Send feedback (`feedback.js`) and the "Share with a browser" page (`webshare.js`, `web/`) |
+| `pc/` | PC app (Electron, for Windows, macOS and Linux; `platform.js` holds what macOS and Linux do differently): LAN server (HTTP, WebSocket, UDP discovery, mDNS), the transparent overlay with the animations (`overlay/looks/`: Meteor, Volt, Warp, Glitch; `overlay/fx2.js` draws them; their sounds in `overlay/sounds/`), the settings panel, the service that hands phone updates to the phone, the phone features (`phoneapi.js`, `features.js`, `sync.js`, `clip.js`, `history.js`, `keys.js`, `browse.js`, `cliphist.js`, `ask.js`), files already received (`have.js`), Air grab (`air.js`, `air/`, `clipfiles.js`, `selwatch.js`), the send shortcut (`selnow.js`), the PC's own Wi-Fi network (`hotspot.js`), Send feedback (`feedback.js`) and the "Share with a browser" page (`webshare.js`, `web/`) |
 | `phone/` | The phone app's interface (HTML, CSS, JS) that runs inside the Android app's WebView, and the hand tracker it shares with the PC app (`phone/hand/`: models, engine, camera and gestures) |
 | `hand/` | Air grab's hand tracker source: the WebAssembly engine (`engine.c`), the converter from MediaPipe's TensorFlow Lite models (`convert.py`), `build.sh` (fetches the models, checks them, builds `phone/hand/`) and tests |
 | `android/` | Android app (Java, built without Gradle): WebView host, file browser access, transfers (the send engine that carries on in the background: `Outbox.java`, `Wire.java`, `Sends.java`), folder bundles, self-updater, and the background parts of the features (link service, auto-send, tiles, widget, notification forwarding, folder sync, Browse phone, clipboard history, Send feedback) |

@@ -104,7 +104,7 @@ class FlickServer extends EventEmitter {
     this.tmpDir = opts.tmpDir || path.join(os.tmpdir(), 'flick-incoming');
     this.version = opts.version || '1.0.0';
     this.devices = Object.assign({}, opts.devices || {}); // deviceId -> { name, token, added }
-    this.settings = Object.assign({ side: 'right', anchor: 0.5, theme: 'roadster' }, opts.settings || {});
+    this.settings = Object.assign({ side: 'right', anchor: 0.5, theme: 'meteor' }, opts.settings || {});
     this.session = null;   // active phone session: the one PC-initiated sends go to
     this.sessions = new Map();  // deviceId -> session, every phone connected right now (several at once)
     this.usedAt = new Map();    // deviceId -> when the user last used that phone (a fling from it, a click in the panel)
