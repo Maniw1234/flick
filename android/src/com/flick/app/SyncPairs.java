@@ -6,6 +6,7 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Locale;
 import java.util.UUID;
 
 /**
@@ -36,7 +37,7 @@ final class SyncPairs {
         return null;
     }
 
-    /** A new pair (not made on the PC yet). */
+    /** A new pair (not made on the PC yet). name: the folder's name, which the PC names its folder after. */
     synchronized JSONObject create(String pc, String pcName, String path, String name) {
         JSONObject p = new JSONObject();
         try {
@@ -44,7 +45,7 @@ final class SyncPairs {
             p.put("pc", pc);
             p.put("pcName", pcName);
             p.put("path", path);
-            p.put("name", name);
+            p.put("name", freeName(pc, path, name));
             p.put("pair", "");
             p.put("last", 0L);
             p.put("state", "idle");
@@ -80,6 +81,36 @@ final class SyncPairs {
     }
 
     synchronized int size() { return load().size(); }
+
+    /**
+     * The name a new pair goes by on the PC. The PC takes one name of this phone's as one folder (asked again, it's
+     * "the same folder"), so a second folder of the same name synced with that PC (DCIM's and Pictures' Screenshots)
+     * was given the first one's folder there, and the two filled each other up. It gets its parent's name too.
+     */
+    private String freeName(String pc, String path, String name) {
+        String n = name == null || name.trim().length() == 0 ? "Phone" : name;
+        if (!taken(pc, n)) return n;
+        File parent = new File(path).getParentFile();
+        String q = parent == null || parent.getName().length() == 0 ? "phone" : parent.getName();
+        String alt = n + " (" + q + ")";
+        for (int i = 2; taken(pc, alt); i++) alt = n + " (" + q + " " + i + ")";
+        return alt;
+    }
+
+    /** A pair with this PC goes by a name the PC can't tell from this one. */
+    private boolean taken(String pc, String name) {
+        String k = asOnPc(name);
+        for (JSONObject p : load()) if (p.optString("pc", "").equals(pc) && asOnPc(p.optString("name", "")).equals(k)) return true;
+        return false;
+    }
+
+    /** A name as the PC makes a folder name of it (pc/sync.js cleanName), in lower case: Windows ignores case. */
+    static String asOnPc(String n) {
+        String s = (n == null ? "" : n).replaceAll("[<>:\"/\\\\|?*\\u0000-\\u001f\\u007f\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]", "_")
+                .replaceAll("[. ]+$", "").trim();
+        if (s.length() > 100) s = s.substring(0, 100).replaceAll("[. ]+$", "");
+        return s.toLowerCase(Locale.ROOT);
+    }
 
     private ArrayList<JSONObject> load() {
         if (pairs != null) return pairs;
