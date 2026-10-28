@@ -388,6 +388,7 @@
           onResult: (r) => stream.push(r),
           onState: (s, d) => {
             camState = s;
+            if (s !== 'on' && s !== 'starting') handGone();
             tellReady();
             // said once until Flick comes back to the screen: no camera, a camera Android won't give, one that's busy
             if ((s === 'denied' || s === 'nocamera' || s === 'error') && !deniedSaid) {
@@ -406,6 +407,16 @@
     return building;
   }
 
+  // the camera is off (turned off here, or it stopped by itself: taken by another app): the hand it followed is gone
+  // with it. Files it carried go back (no frame would ever say it left, and they'd wait in the fist for good)
+  function handGone() {
+    if (M.mode === 'carry' || M.mode === 'away') putBack();
+    Object.assign(M, { mode: 'idle', wasOpen: false, openRun: 0, back: false, paint: null });
+    spot.hidden = true;
+    setHover(null);
+    if (stream) stream.reset();
+  }
+
   // (locked: Lock Flick's cover hides the page; a hand mustn't pick files up behind it)
   const wanted = () => on && !paused && !locked && !document.hidden && A.st.connected && camOk();
   async function update() {
@@ -415,14 +426,7 @@
       return;
     }
     if (!cam) return;
-    if (camState !== 'off') {
-      cam.stop();
-      if (M.mode === 'carry' || M.mode === 'away') putBack();
-      M.mode = 'idle';
-      spot.hidden = true;
-      setHover(null);
-      stream.reset();
-    }
+    if (camState !== 'off') cam.stop();                 // (its 'off' puts back what a hand carried: handGone)
     // Air grab turned off: the hand tracker's memory goes too (it loads again when it's turned on)
     if (!on) cam.close();
   }
