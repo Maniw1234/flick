@@ -2,6 +2,11 @@
 
 ## 2.1.0
 
+**Updating from Flick 2.0.0 or older: install this version yourself, once.** Download it from this page and install it
+over the one you have, on the computer and on the phone. Flick's releases are signed with a new key from this version
+on, and Flick 2.0.0 and older don't know it, so they can't take this update by themselves. From 2.1.0 on, updates
+arrive as before. Your pairings and settings stay.
+
 Send to any of your devices, any way they're connected. In short:
 
 - **Phone to phone and computer to computer**, with everything Flick does between a phone and a PC.

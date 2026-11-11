@@ -55,7 +55,8 @@ checkout has it (never as GitHub describes it):
 
 - the release's tag `v<version>` on GitHub is that commit (`--commit` names it when your checkout has moved on);
 - `SHA256SUMS` lists exactly what the release workflow publishes, every file matches it, and nothing else is on the
-  release;
+  release, but for `Flick.apk`: the phone app once more under a name that stays the same (for a link that always gives
+  the latest), which must be the listed `Flick-<its version>.apk` byte for byte;
 - every file of the three update bundles (`flick-app-<version>.zip`, `flick-app-mac-<version>.zip`,
   `flick-app-linux-<version>.zip`) is the commit's, byte for byte, as the build scripts copy them; `package.json` only
   gains `flickElectron` (the commit's `electronVersion`), and besides them there is only what the build makes: the
@@ -105,3 +106,8 @@ one, it only checks it, and stops (deleting nothing) if it's wrong. Until a rele
 phones don't install it.
 
 To change keys later: add the new public key to both lists and release that, then sign later releases with the new key.
+
+That happened once: the first key (1.0.0 to 2.0.0) was lost before 2.1.0 could be signed. 2.1.0 adds the second key
+and is the first release signed with it. Flick 2.0.0 and older trust only the first key, so they don't take 2.1.0 or
+later by themselves: those copies are updated by hand once. Keep a backup of the key (and of this lesson):
+`flick-update-key.pem` in `$FLICK_KEYS`, on something that isn't this computer.

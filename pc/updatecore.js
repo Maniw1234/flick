@@ -13,7 +13,12 @@ const MAX_FILES = 2000;
 // Flick's offline release keys (ECDSA P-256, SubjectPublicKeyInfo DER in base64). Every release's SHA256SUMS is signed
 // with one of them (signing/sign_release.js) and GitHub never sees the private key, so whoever controls the GitHub
 // account still can't ship an update. A list, so a new key can be added here before the old one is retired.
-const RELEASE_KEYS = ['MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEUGJiEHyLcmPkuREqLXb7MLtKMKoRBQUNuKb8Gjcw7tIMuDVr0cRSM2Xjpu3SWDM4vdpGOJXnYjVG5Tin5P1DZA=='];
+// The first signed 1.0.0 to 2.0.0; the second is 2.1.0's and later's (the first one's private key was lost: Flick up
+// to 2.0.0 trusts only the first, so it can't take 2.1.0 or later by itself).
+const RELEASE_KEYS = [
+  'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEUGJiEHyLcmPkuREqLXb7MLtKMKoRBQUNuKb8Gjcw7tIMuDVr0cRSM2Xjpu3SWDM4vdpGOJXnYjVG5Tin5P1DZA==',
+  'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAELU1g7gj5eo8f4zxqhHjy5gQg43UxUxZZcyO7xUf6BM6NdT+2PPtFYDLOjpBqdmbSuicuolvb+aVKBvg6zTyVvA==',
+];
 
 /**
  * Where downloaded app updates live, per user (no admin rights needed): %LOCALAPPDATA%\Flick\app on Windows,

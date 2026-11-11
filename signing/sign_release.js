@@ -233,7 +233,10 @@ if (!list || !list.size) die("SHA256SUMS doesn't parse");
       (apks.length > 1 ? '\n  more than one phone app: ' + apks.join(', ') : apks.length ? '' : '\n  no phone app'));
   }
 }
-for (const a of assets) if (a.name !== 'SHA256SUMS' && a.name !== 'SHA256SUMS.sig' && !list.has(a.name)) die(`${a.name} is on the release but not in SHA256SUMS`);
+// (Flick.apk: the phone app once more, under a name that stays the same from release to release, for a link that
+// always gives the latest. It isn't in SHA256SUMS; it is checked below to be the listed phone app, byte for byte.)
+const SAME_APK = 'Flick.apk';
+for (const a of assets) if (a.name !== 'SHA256SUMS' && a.name !== 'SHA256SUMS.sig' && a.name !== SAME_APK && !list.has(a.name)) die(`${a.name} is on the release but not in SHA256SUMS`);
 const files = new Map();
 for (const [name, want] of list) {
   const a = byName.get(name);
@@ -245,6 +248,11 @@ for (const [name, want] of list) {
   if ((d && d[1].toLowerCase() !== want) || (a.size && a.size !== buf.length)) die(`${name}: GitHub's size or digest doesn't match SHA256SUMS`);
   files.set(name, buf);
   console.log(`  ok ${name} (${buf.length} bytes, sha256 ${got.slice(0, 16)}…)`);
+}
+if (byName.has(SAME_APK)) {
+  const listed = [...files.keys()].find((n) => /^Flick-\d+\.\d+\.\d+\.apk$/.test(n));
+  if (!download(byName.get(SAME_APK)).equals(files.get(listed))) die(`${SAME_APK} on the release isn't ${listed}, the phone app SHA256SUMS lists`);
+  console.log(`  ok ${SAME_APK} is ${listed}`);
 }
 
 // the IDs in an APK's signing block (just before the central directory; 0x7109871a is a v2 signature, 0xf05368c0 v3);

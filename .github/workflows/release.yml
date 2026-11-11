@@ -277,6 +277,10 @@ jobs:
           cp "$A/phone-app/Flick.apk" "$OUT/Flick-$APKV.apk"
           # exactly these files: signing/sign_release.js refuses a release with any other (keep the two in step)
           ( cd "$OUT" && sha256sum -- * > SHA256SUMS )
+          # and the phone app once more under a name that stays the same, for a link that always gives the latest
+          # (releases/latest/download/Flick.apk). Not in SHA256SUMS, which every installed Flick reads as it is:
+          # sign_release.js lets this one file by, when it is the phone app above byte for byte.
+          cp "$OUT/Flick-$APKV.apk" "$OUT/Flick.apk"
           awk -v v="## $V" '$0==v{f=1;next} /^## /{f=0} f' CHANGES.md > notes.md
           [ -s notes.md ] || echo "Flick $V" > notes.md
           # A draft of this release made by the repository's owner beforehand (its tag v<version> or V<version>, or no tag

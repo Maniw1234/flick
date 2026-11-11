@@ -25,7 +25,7 @@ the internet.
      local network, allow it: Flick can't reach the phone without it.
    - **Linux** (64-bit): `Flick-linux-x86_64.AppImage`: make it executable (`chmod +x`) and run it. Or unpack
      `Flick-linux-x64.tar.gz` anywhere and run `Flick/flick`. Either way Flick adds itself to the applications menu.
-2. On the phone (Android 9 or newer): open the same release page, download `Flick-<version>.apk` and install it
+2. On the phone (Android 9 or newer): open the same release page, download `Flick-<version>.apk` (or `Flick.apk`, the same file) and install it
    (Android asks you to allow installs from your browser once).
 3. Open Flick on both, press and hold **Connect** on either one, check that both screens show the same code, then
    click (or tap) **Allow** on the other one and **Same code** on the one you held. On the same Wi-Fi, or with the

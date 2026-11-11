@@ -281,7 +281,10 @@ final class Updater {
      * Flick's offline release keys (ECDSA P-256, SubjectPublicKeyInfo in base64): the same list as RELEASE_KEYS in
      * pc/updatecore.js. signing/sign_release.js signs each release with one of them. Not final: tests use their own.
      */
-    static String[] KEYS = {"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEUGJiEHyLcmPkuREqLXb7MLtKMKoRBQUNuKb8Gjcw7tIMuDVr0cRSM2Xjpu3SWDM4vdpGOJXnYjVG5Tin5P1DZA=="};
+    static String[] KEYS = {
+        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEUGJiEHyLcmPkuREqLXb7MLtKMKoRBQUNuKb8Gjcw7tIMuDVr0cRSM2Xjpu3SWDM4vdpGOJXnYjVG5Tin5P1DZA==",
+        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAELU1g7gj5eo8f4zxqhHjy5gQg43UxUxZZcyO7xUf6BM6NdT+2PPtFYDLOjpBqdmbSuicuolvb+aVKBvg6zTyVvA==",
+    };
     private static final Pattern SUM = Pattern.compile("([0-9a-fA-F]{64}) [ *](\\S.*?)\\r?");
     private static final Pattern BUNDLE = Pattern.compile("flick-app-(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})\\.zip");
     private static final Pattern APK = Pattern.compile("Flick-(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})\\.apk");
