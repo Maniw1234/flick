@@ -7,9 +7,11 @@ import android.content.Context;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.os.Build;
 import android.os.Bundle;
 import android.util.TypedValue;
 import android.view.View;
+import android.view.WindowInsets;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -31,7 +33,21 @@ public class CrashActivity extends Activity {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(0xFF120F19);
-        root.setPadding(20 * dp, 24 * dp, 20 * dp, 16 * dp);
+        final int padL = 20 * dp, padT = 24 * dp, padR = 20 * dp, padB = 16 * dp;
+        root.setPadding(padL, padT, padR, padB);
+        // Android 15 and newer draw Flick edge to edge: the title was under the status bar, and Copy and Open Flick under
+        // the navigation buttons, out of reach. The bars' (and a cutout's) room is added to the padding; where Android
+        // keeps the screen clear of them itself, there is none to add.
+        root.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+            @SuppressWarnings("deprecation")
+            @Override
+            public WindowInsets onApplyWindowInsets(View v, WindowInsets in) {
+                int[] i = Build.VERSION.SDK_INT >= 30 ? Api30.bars(in)
+                        : new int[]{in.getSystemWindowInsetLeft(), in.getSystemWindowInsetTop(), in.getSystemWindowInsetRight(), in.getSystemWindowInsetBottom()};
+                v.setPadding(padL + i[0], padT + i[1], padR + i[2], padB + i[3]);
+                return in;
+            }
+        });
 
         TextView title = new TextView(this);
         title.setText("Flick closed unexpectedly");
@@ -88,5 +104,14 @@ public class CrashActivity extends Activity {
         row.addView(open, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
         root.addView(row);
         setContentView(root);
+    }
+
+    @android.annotation.TargetApi(30)
+    static final class Api30 {
+        /** {left, top, right, bottom} of the bars and the cutout. */
+        static int[] bars(WindowInsets in) {
+            android.graphics.Insets i = in.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+            return new int[]{i.left, i.top, i.right, i.bottom};
+        }
     }
 }

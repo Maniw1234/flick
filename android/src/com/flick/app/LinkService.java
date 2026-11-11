@@ -17,6 +17,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.os.SystemClock;
 
 import org.json.JSONObject;
 
@@ -25,7 +26,8 @@ import org.json.JSONObject;
  * holds GET /api/events open to the paired PC while the app is closed, so the PC can reach the phone: its clipboard,
  * links, "find my phone". Reconnects after 1, 2, 5, 10, then every 30 s, and at once when the network changes. Shows a
  * quiet ongoing notification "Flick: connected to <PC>" with Turn off. Runs folder sync every 15 minutes, and sends
- * auto-send's waiting items when the PC comes back. With no paired PC it waits quietly until there is one.
+ * auto-send's waiting items when the PC comes back. With no paired PC it waits quietly until there is one. While it
+ * runs, the phones (and computers) this phone paired with can send it files too, with Flick closed (Peers).
  *
  * Like TransferService it is never stopped from outside before it is up: stop() turns the setting off, and the service
  * itself goes (after startForeground, so Android never sees a foreground service that didn't start).
@@ -46,7 +48,7 @@ public class LinkService extends Service {
     private volatile boolean wake;                               // a reason to try again now (network, pairing)
     private volatile String state = "";                          // what the notification says now
     private volatile String pcName = "";
-    private volatile long lastSync;
+    private volatile long lastSync;                              // SystemClock.elapsedRealtime (0: not yet)
     private ConnectivityManager.NetworkCallback netCb;
     private Network lastNet;
     private SharedPreferences.OnSharedPreferenceChangeListener prefCb;
@@ -126,6 +128,10 @@ public class LinkService extends Service {
         }
         watchNetwork();
         watchPairing();
+        try { Peers.get(this).background(true); } catch (Throwable e) { Bg.warn("peers", e); }
+        // (another phone on a USB cable: switched over to talk to it, as when Flick is open; after a reboot this is all
+        // that runs)
+        try { UsbPeer.start(this); } catch (Throwable e) { Bg.warn("usb peer", e); }
     }
 
     private void end() {
@@ -133,6 +139,7 @@ public class LinkService extends Service {
             alive = false;
             lock.notifyAll();
         }
+        try { Peers.get(this).background(false); } catch (Throwable e) { /* ignore */ }
         MAIN.removeCallbacks(syncTick);
         PcClient.Hold h = hold;
         if (h != null) h.stop();
@@ -179,7 +186,7 @@ public class LinkService extends Service {
                     // no pairing yet, a new key, a PC that forgot this phone or needs an update: wait (or for pairing)
                     wait = LONG_WAIT;
                     fails = BACKOFF.length;
-                    show(f.is(PcClient.Failure.UNPAIRED) ? "Flick: waiting for you to connect a PC"
+                    show(f.is(PcClient.Failure.UNPAIRED) ? (Peers.get(this).pairedCount() > 0 ? "Flick: ready for files from your devices" : "Flick: waiting for you to connect a PC")
                             : f.is(PcClient.Failure.OLD) ? "Flick: update Flick on " + pcName + " to stay connected"
                             : "Flick: pair with " + (pcName.length() > 0 ? pcName : "your PC") + " again in the app");
                 }
@@ -197,9 +204,10 @@ public class LinkService extends Service {
     private void pause(long ms) {
         if (ms <= 0) return;
         synchronized (lock) {
-            long end = System.currentTimeMillis() + ms;
+            // (not the wall clock: one set back would make this wait as much longer, and the link stay down meanwhile)
+            long end = SystemClock.elapsedRealtime() + ms;
             while (alive && !wake) {
-                long left = end - System.currentTimeMillis();
+                long left = end - SystemClock.elapsedRealtime();
                 if (left <= 0) break;
                 try { lock.wait(left); } catch (InterruptedException e) { return; }
             }
@@ -217,13 +225,14 @@ public class LinkService extends Service {
 
     private void connected(PcClient.Target t, JSONObject hello) {
         JSONObject pc = hello.optJSONObject("pc");
-        if (pc != null && pc.optString("name", "").length() > 0) pcName = pc.optString("name", "");
-        else pcName = t.name;
+        String nm = PeerServer.cleanName(pc == null ? null : pc.opt("name"));    // (text only: see Discovery)
+        pcName = nm.length() > 0 ? nm : t.name;
         show("Flick: connected to " + pcName);
         // the PC is back: what auto-send couldn't send goes now; synced folders catch up if it's been a while
         try {
             AutoSend.kick(this);
-            if (System.currentTimeMillis() - lastSync > SYNC_EVERY) { lastSync = System.currentTimeMillis(); SyncManager.syncAll(this); }
+            long now = SystemClock.elapsedRealtime();
+            if (lastSync == 0 || now - lastSync > SYNC_EVERY) { lastSync = now; SyncManager.syncAll(this); }
             Feedback.flushLater(this);                           // feedback that waited for a connection
         } catch (Throwable e) { Bg.warn("background link", e); }
         MAIN.removeCallbacks(syncTick);
@@ -234,7 +243,7 @@ public class LinkService extends Service {
         @Override
         public void run() {
             if (!alive) return;
-            lastSync = System.currentTimeMillis();
+            lastSync = SystemClock.elapsedRealtime();
             try { SyncManager.syncAll(LinkService.this); } catch (Throwable e) { Bg.warn("sync timer", e); }
             MAIN.postDelayed(this, SYNC_EVERY);
         }

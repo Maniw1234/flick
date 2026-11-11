@@ -84,7 +84,8 @@ final class Clip {
             String t = textOf(c, it, u, d);
             if (t == null) return o;
             o.put("kind", "text");
-            o.put("text", t);
+            // over the limit: said so, never sent cut short without a word (the page and Actions refuse it)
+            if (tooBig(t)) o.put("tooBig", true); else o.put("text", t);
             if (fromPc) o.put("fromPc", true);
         } catch (Throwable e) {
             Bg.warn("clipboard read", e);
@@ -92,12 +93,24 @@ final class Clip {
         return o;
     }
 
-    /** The item's text (at most MAX_TEXT), or null. */
+    /** The item's text, whole (tooBig says when it is over MAX_TEXT), or null. */
     private static String textOf(Context c, ClipData.Item it, Uri u, ClipDescription d) {
         CharSequence t = it.getText();
         if (t == null && it.getHtmlText() != null) { try { t = it.coerceToText(c); } catch (Throwable e) { /* none */ } }
         if (t == null && u != null && mimeOf(c, u, d).startsWith("text/")) { try { t = it.coerceToText(c); } catch (Throwable e) { /* none */ } }
-        return t == null || t.length() == 0 ? null : cut(t.toString(), MAX_TEXT);
+        return t == null || t.length() == 0 ? null : t.toString();
+    }
+
+    /** True when s is over MAX_TEXT bytes of UTF-8: too much text to send. */
+    static boolean tooBig(String s) {
+        if (s.length() * 3 <= MAX_TEXT) return false;
+        long bytes = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char ch = s.charAt(i);
+            bytes += ch < 0x80 ? 1 : ch < 0x800 ? 2 : Character.isHighSurrogate(ch) ? 4 : Character.isLowSurrogate(ch) ? 0 : 3;
+            if (bytes > MAX_TEXT) return true;
+        }
+        return false;
     }
 
     /**
@@ -132,6 +145,7 @@ final class Clip {
             o.put("kind", "text");
             o.put("hash", h);
             o.put("id", "t:" + h);
+            if (tooBig(t)) o.put("tooBig", true);
         } catch (Throwable e) {
             Bg.warn("clipboard read", e);
         }
@@ -148,7 +162,10 @@ final class Clip {
         } catch (Throwable e) { return ""; }
     }
 
-    /** Puts the PC's clipboard ({kind:text,text} / {kind:image,png}) on the phone's. Returns the kind, or null. */
+    /**
+     * Puts the PC's clipboard ({kind:text,text} / {kind:image,png}; "private": an app marked it so where it was copied) on
+     * the phone's. Returns the kind, or null.
+     */
     static String write(Context c, JSONObject m, String pcName) {
         try {
             String kind = m.optString("kind", "");
@@ -168,6 +185,8 @@ final class Clip {
             }
             PersistableBundle x = new PersistableBundle();
             x.putBoolean(FROM_PC, true);
+            // (private: Android 13 and newer doesn't show it in its note of what was copied)
+            if (m.optBoolean("private", false)) x.putBoolean(SENSITIVE, true);
             cd.getDescription().setExtras(x);
             return set(c, cd) ? kind : null;
         } catch (Throwable e) {

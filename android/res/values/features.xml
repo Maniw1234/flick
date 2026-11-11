@@ -5,7 +5,7 @@
     <string name="feat_tile_clip">Send clipboard</string>
     <string name="feat_last_photo">Last photo</string>
     <string name="feat_clipboard">Clipboard</string>
-    <string name="feat_widget_desc">Send your latest photo or your clipboard to your PC in one tap</string>
+    <string name="feat_widget_desc">Send your latest photo or your clipboard to your PC or a phone in one tap</string>
     <color name="feat_widget_bg">#E6120F19</color>
     <color name="feat_widget_btn">#26FFFFFF</color>
     <!-- ActionActivity: nothing to see, no animation, the screen below stays as it is -->

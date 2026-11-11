@@ -24,10 +24,10 @@ import java.util.Map;
 
 /**
  * The phone's sends (Outbox) as the app sees them: one per process, going on whether or not Flick's page is open.
- * While something moves (or waits for the PC, for a while) a foreground service keeps the app alive with a notification
- * saying how far it got; a scheduled job (ResumeJob) brings the app back to carry on if Android stopped it anyway. The
- * PC is found again when its address changed (discovery), and sends waiting for it try again as soon as the network
- * changes. The page hears about every send ("job" events, plus "up"/"up-done" as before).
+ * While something moves (or waits for the PC, for a while) a foreground service keeps the app alive, and each send has
+ * its notification saying how far it got (Moving); a scheduled job (ResumeJob) brings the app back to carry on if
+ * Android stopped it anyway. The PC is found again when its address changed (discovery), and sends waiting for it try
+ * again as soon as the network changes. The page hears about every send ("job" events, plus "up"/"up-done" as before).
  */
 final class Sends {
     private static Sends one;
@@ -36,6 +36,9 @@ final class Sends {
         if (one == null) {
             one = new Sends(c.getApplicationContext());
             one.box.start();
+            // (paused ones and ones waiting for their time, from before Flick last stopped, are listed as moving too;
+            // one that ended while Flick was stopped before its History entries were settled has them settled now)
+            for (Outbox.Job j : one.box.list()) { one.move(j, j.state()); one.history.changed(j); }
         }
         return one;
     }
@@ -48,16 +51,22 @@ final class Sends {
     private final Context app;
     private final SharedPreferences prefs;
     final Outbox box;
+    // each send's History entries, once (see SendHistory): the page that started it notes it itself while it's there
+    private final SendHistory.Settler history;
     private final Map<String, Long> looked = new HashMap<String, Long>();       // pcId -> when discovery last ran
     private final Map<String, Long> noted = new HashMap<String, Long>();        // tid -> when the page last heard of it
     private final Map<String, String> shown = new HashMap<String, String>();    // tid -> the state the page last heard
+    private final java.util.Set<String> listed = new java.util.HashSet<String>(); // tids Moving lists now (under noted)
     private long notifiedAt;
     private volatile boolean held;
+    private final Object statusLock = new Object();
 
     private Sends(Context app) {
         this.app = app;
         this.prefs = app.getSharedPreferences("flick", 0);
         Nets.install(app);
+        // waits (a send's next try, kept connections) count the time the phone sleeps, and not a change of its clock
+        Wire.clock(new Wire.Clock() { @Override public long ms() { return SystemClock.elapsedRealtime(); } });
         box = new Outbox(new File(app.getFilesDir(), "outbox"), new Outbox.Env() {
             @Override public File file(Outbox.Item it) throws IOException { return Sends.this.file(it); }
             @Override public Wire.Link link(Outbox.Job j, boolean look) throws IOException { return Sends.this.link(j, look); }
@@ -65,6 +74,16 @@ final class Sends {
             @Override public void changed(Outbox.Job j) { Sends.this.changed(j); }
             @Override public void moving(boolean on) { Transfers.hold(Sends.this.app, on); }
             @Override public void log(String msg) { Bg.log(msg); }
+        });
+        // (items of Flick's own list a send not over yet still reads stay on the list until it's over)
+        Library.held = new Library.Held() { @Override public java.util.Set<String> ids() { return box.heldIds(); } };
+        history = new SendHistory.Settler(Bg.history(app), box, new SendHistory.Look() {
+            @Override public File file(Outbox.Item it) { try { return Sends.this.file(it); } catch (Throwable e) { return null; } }
+            @Override public String kind(String name) { return Files.kindOf(name, Files.mimeOf(name)); }
+        }, new SendHistory.Settler.Pages() {
+            @Override public Object now() { return Page.get(); }
+            @Override public void changed() { Page.historyChanged(); }
+            @Override public void warn(Throwable e) { Bg.warn("send history", e); }
         });
         watchNetwork();
     }
@@ -84,6 +103,7 @@ final class Sends {
                 items.add(new Outbox.Item(path, it.has("id") ? it.optString("id") : null, it.optString("name", "file"), it.optBoolean("dir", false)));
             }
             if (items.isEmpty()) return "nothing";
+            history.started(tid);
             box.add(tid, pc.optString("id"), pc.optString("name"), pc.optString("ip"), pc.optInt("port", 47860), pc.optString("via", "wifi"),
                     items, spec.optBoolean("committed", false), spec.optBoolean("skipDup", true), spec.optBoolean("parallel", true));
             return "ok";
@@ -110,7 +130,14 @@ final class Sends {
     private String pref(String k) { try { return prefs.getString("p:" + k, ""); } catch (Throwable e) { return ""; } }
 
     private Wire.Link link(Outbox.Job j, boolean look) throws IOException {
-        if ("bluetooth".equals(j.via())) return new Wire.Link("127.0.0.1", j.port(), null);    // the Bluetooth link's own port
+        if ("bluetooth".equals(j.via())) {
+            // the Bluetooth link to that PC open now, that the page signed in over; never the port the send kept: once its
+            // link closed, that port can be any app's (also after Flick restarted). None: it waits for one, as for a PC
+            // out of reach
+            Wire.Link l = BtMux.link(j.pcId);
+            if (l == null) throw new IOException("no Bluetooth link to " + j.pcName);
+            return l;
+        }
         String pin = pref("pin:" + j.pcId).trim().toLowerCase(Locale.US);
         if (pin.length() == 0) throw new Outbox.Fatal("Connect to " + j.pcName + " again to pair");
         if (look || j.host() == null) relocate(j);
@@ -155,9 +182,49 @@ final class Sends {
             news = !state.equals(was) || at == null || now - at >= 250;
             if (news) { shown.put(j.tid, state); noted.put(j.tid, now); }
             if (Outbox.isEnd(state)) noted.remove(j.tid);
+            // (a send no longer in the list, forgotten or made room for: nothing more is said of it)
+            if (Outbox.isEnd(state) && shown.size() > 200) {
+                java.util.Set<String> here = new java.util.HashSet<String>();
+                for (Outbox.Job x : box.list()) here.add(x.tid);
+                shown.keySet().retainAll(here);
+            }
         }
+        move(j, state);
         if (news) tellPage(j, state);
+        if (Outbox.isEnd(state)) history.changed(j);
         status(Outbox.isEnd(state) || !state.equals(Outbox.RUNNING));
+    }
+
+    /**
+     * Each send is one transfer in Moving (its notification, Settings › Transfers): from when it's added (or tried again)
+     * until it ends. Waiting for the PC and paused are said there; Cancel cancels it as the page's does.
+     */
+    private void move(final Outbox.Job j, String state) {
+        final String key = "pc-out:" + j.tid;
+        boolean end = Outbox.isEnd(state), fresh;
+        synchronized (noted) {
+            if (end) { if (!listed.remove(j.tid)) return; fresh = false; }
+            else fresh = listed.add(j.tid);
+        }
+        if (end) {
+            boolean ok = Outbox.DONE.equals(state) || Outbox.SKIPPED.equals(state);
+            String why = j.why();
+            // (canceled here, or on the PC: a cancel either way; one on the PC has words, "Canceled on <PC>", for its note)
+            boolean canceled = Outbox.CANCELED.equals(state);
+            Moving.end(key, ok, ok ? null : canceled ? "canceled" : why, ok || !canceled ? null : why);
+            return;
+        }
+        long total = j.total();
+        if (fresh) {
+            List<String> names = new ArrayList<String>();
+            int files = 0;
+            for (Outbox.Item it : j.items) { names.add(it.name); if (!it.dir) files++; }
+            Moving.start(app, key, "out", j.pcId, j.pcName, "pc", Moving.what(names, j.items.size(), files), Math.max(1, files), total > 0 ? total : -1);
+            Moving.onCancel(key, new Runnable() { @Override public void run() { box.cancel(j.tid); } });
+        }
+        // (queued: about to go, or behind the ones going: "running" with nothing moved yet)
+        Moving.state(key, Outbox.WAITING.equals(state) ? "waiting" : Outbox.PAUSED.equals(state) ? "paused" : "running");
+        Moving.update(key, Math.min(j.sent.get(), Math.max(0, total)), total > 0 ? total : -1);
     }
 
     private void tellPage(Outbox.Job j, String state) {
@@ -182,49 +249,25 @@ final class Sends {
         } catch (Throwable e) { /* ignore */ }
     }
 
-    /** The service, its notification and the scheduled job follow what's going on. force: say it now (not throttled). */
+    /** The service and the scheduled job follow what's going on (each send's notification is Moving's). force: now. */
     private void status(boolean force) {
         long now = SystemClock.elapsedRealtime();
         synchronized (this) {
             if (!force && now - notifiedAt < 1000) return;
             notifiedAt = now;
         }
-        int running = 0, waiting = 0, queued = 0;
-        long sent = 0, total = 0;
-        double rate = 0;
-        String pc = null, name = null;
-        boolean holdWaiting = false;
-        long wall = System.currentTimeMillis();
-        for (Outbox.Job j : box.list()) {
-            String s = j.state();
-            if (Outbox.RUNNING.equals(s)) { running++; sent += Math.min(j.sent.get(), j.total()); total += j.total(); rate += j.rate(); pc = j.pcName; name = j.label; }
-            else if (Outbox.QUEUED.equals(s)) { queued++; if (pc == null) pc = j.pcName; }
-            else if (Outbox.WAITING.equals(s)) {
-                waiting++;
-                if (pc == null) pc = j.pcName;
-                synchronized (j) { if (j.waitingSince == 0 || wall - j.waitingSince < HOLD_WAITING_MS) holdWaiting = true; }
+        // one thread at a time, looking and telling: a look from before a send ended, told after the look that saw it
+        // end (the page pausing it just then), kept the service up with nothing left to send
+        synchronized (statusLock) {
+            boolean hold = false;
+            for (Outbox.Job j : box.list()) {
+                String s = j.state();
+                if (Outbox.RUNNING.equals(s) || Outbox.QUEUED.equals(s)) hold = true;
+                else if (Outbox.WAITING.equals(s) && j.waited() < HOLD_WAITING_MS) hold = true;   // (not the wall clock: see Outbox.mono)
             }
+            if (hold != held) { held = hold; TransferService.want(app, "sends", hold); }
+            if (box.active()) ResumeJob.schedule(app, 60000); else ResumeJob.cancel(app);
         }
-        boolean hold = running > 0 || queued > 0 || holdWaiting;
-        if (hold != held) { held = hold; TransferService.want(app, "sends", hold); }
-        if (running > 0) {
-            int pct = total > 0 ? (int) Math.min(100, sent * 100 / total) : -1;
-            String more = running + queued + waiting > 1 ? (running + queued + waiting) + " sends · " : (name != null ? name + " · " : "");
-            TransferService.say(app, "Sending to " + pc, more + (pct >= 0 ? pct + "%" : "") + (rate > 1e5 ? " · " + fmtRate(rate) : ""), pct);
-        } else if (queued > 0) {
-            TransferService.say(app, "Sending to " + pc, "Starting…", -1);
-        } else if (waiting > 0) {
-            TransferService.say(app, "Waiting for " + pc, "It carries on when " + pc + " is back", -1);
-        } else {
-            TransferService.say(app, null, null, -1);
-        }
-        if (box.active()) ResumeJob.schedule(app, 60000); else ResumeJob.cancel(app);
-    }
-
-    static String fmtRate(double r) {
-        if (r >= 1e7) return Math.round(r / 1e6) + " MB/s";
-        if (r >= 1e6) return String.format(Locale.US, "%.1f MB/s", r / 1e6);
-        return Math.max(1, Math.round(r / 1e3)) + " KB/s";
     }
 
     // ------------------------------------------------------------ the network
@@ -252,7 +295,7 @@ final class Sends {
      * subnets holds the PC's address, when that network isn't the default one (a Wi-Fi without internet next to mobile
      * data). Anything else is left to Android, as before. What it found for an address is kept a few seconds.
      */
-    static final class Nets implements Wire.Binder {
+    static final class Nets implements Wire.Binder, Wire.UdpBinder {
         private static volatile boolean installed;
         private final ConnectivityManager cm;
         private String lastHost;                    // guarded by this
@@ -266,7 +309,7 @@ final class Sends {
             if (installed) return;
             try {
                 ConnectivityManager cm = (ConnectivityManager) c.getApplicationContext().getSystemService(Context.CONNECTIVITY_SERVICE);
-                if (cm != null) { Wire.BINDER = new Nets(cm); installed = true; }
+                if (cm != null) { Nets n = new Nets(cm); Wire.BINDER = n; Wire.UDP_BINDER = n; installed = true; }
             } catch (Throwable e) { /* left to Android */ }
         }
 
@@ -274,6 +317,15 @@ final class Sends {
             if (!Wire.isIp(host)) return;
             Network n = network(host);
             if (n != null) n.bindSocket(s);
+        }
+
+        // (another phone on a Wi-Fi without internet, mobile data on: its discovery goes over that Wi-Fi)
+        @Override public boolean bind(java.net.DatagramSocket s, String host) throws IOException {
+            if (!Wire.isIp(host)) return false;
+            Network n = network(host);
+            if (n == null) return false;
+            n.bindSocket(s);
+            return true;
         }
 
         /** The network to put a socket to host on, or null for the default one. */
@@ -300,9 +352,10 @@ final class Sends {
         }
     }
 
-    /** The page reached a PC (at this address, over this link): sends waiting for it go there now. */
+    /** The page reached a PC (at this address, over this link) and it proved itself there: sends waiting for it go there now. */
     void relink(String pcId, String host, int port, String via) {
         if (pcId == null || host == null || port <= 0) return;
+        if ("bluetooth".equals(via)) BtMux.proven(port, pcId);         // (sends over Bluetooth go over this link: see link)
         box.relink(pcId, host, port, via);
     }
 }

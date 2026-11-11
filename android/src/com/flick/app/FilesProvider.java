@@ -17,7 +17,9 @@ import java.util.List;
 
 /** Lets other apps open/share files Flick shows (read-only, only via URIs Flick hands out with a grant). */
 public class FilesProvider extends ContentProvider {
-    public static final String AUTHORITY = "com.flick.app.files";
+    // <package>.files: the Google Play version has its own package name, and an authority is only ever one app's.
+    // Android makes the provider (onCreate) before any of the app's code runs, so this is set before it's used.
+    static volatile String AUTHORITY = "com.flick.app.files";
 
     static Uri uriFor(String id, String name) {
         return new Uri.Builder().scheme("content").authority(AUTHORITY).appendPath("f").appendPath(id).appendPath(name).build();
@@ -33,7 +35,7 @@ public class FilesProvider extends ContentProvider {
         return new Uri.Builder().scheme("content").authority(AUTHORITY).appendPath("p").appendPath(enc).appendPath(new File(path).getName()).build();
     }
 
-    @Override public boolean onCreate() { return true; }
+    @Override public boolean onCreate() { AUTHORITY = getContext().getPackageName() + ".files"; return true; }
 
     /** Resolves a URI to {file, name, mime} or null. */
     private Object[] resolve(Uri u) {
@@ -46,7 +48,7 @@ public class FilesProvider extends ContentProvider {
         }
         if ("u".equals(seg.get(0))) {
             String n = seg.get(1);
-            if (!Updater.validName(n)) return null;
+            if (Store.play(getContext()) || !Updater.validName(n)) return null;   // (no updates to hand out in the Google Play version)
             File f = new File(Updater.dir(getContext()), n);
             if (!f.isFile()) return null;
             return new Object[]{f, "Flick.apk", "application/vnd.android.package-archive", f.length()};

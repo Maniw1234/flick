@@ -51,7 +51,7 @@
   function gridFree() {
     if (A.st.screen !== 'main' || A.sheetOpen) return false;
     for (const id of ['settings', 'ask']) { const e = document.getElementById(id); if (e && !e.hidden) return false; }
-    return !document.querySelector('.fpage:not([hidden]), .fring:not([hidden]), .ftips:not([hidden])');
+    return !document.querySelector('.fpage:not([hidden]), .fring:not([hidden]), .ftips:not([hidden]), .ftour:not([hidden]), .fphask');   // (a phone asking to pair, too)
   }
 
   // ---- the hand. Modes: idle | hover (a hand over the phone) | carry (a fist holding files) | away (carrying, out of
@@ -340,7 +340,7 @@
     } else if (m.t === 'air-held') {
       // a fist picked files up in front of the PC: they come here when it opens over the phone
       M.pcHeldAt = +m.n > 0 ? Date.now() : 0;
-      if (+m.n > 0) A.toast((+m.n > 1 ? m.n + ' files' : String(m.name || 'A file')) + ' in your hand: open it over the phone', 3200);
+      if (+m.n > 0) A.toast((+m.n > 1 ? m.n + ' files' : X.clean(m.name) || 'A file') + ' in your hand: open it over the phone', 3200);
     } else if (m.t === 'air-land' && m.tid && m.tid === M.tid) {
       // the PC's camera saw the fist open in front of it: the files go there. Out of this camera's view, at once; still
       // in view, only if the hand moved well away from where it grabbed (this camera knows best where it is)
@@ -363,6 +363,14 @@
   }
   function script(src) {
     return new Promise((res) => { const s = document.createElement('script'); s.src = src; s.onload = s.onerror = () => res(); document.head.appendChild(s); });
+  }
+  // frames the tracker skipped (nothing moving) still let a hand that went out of view leave: looked at 5 times a second
+  // while the camera is on, and not at all otherwise (it woke the page 5 times a second from Air grab's first use on,
+  // also with the camera off and Flick in the back)
+  let leaveT = 0;
+  function leaveCheck(on) {
+    clearInterval(leaveT);
+    leaveT = on ? setInterval(() => { if (stream && camState === 'on') stream.push({ t: performance.now() }); }, 200) : 0;
   }
   // the tracker in a worker built from hand.js + worker.js; where that can't be made, on the page
   let workerUrl = null;
@@ -389,18 +397,18 @@
           onResult: (r) => stream.push(r),
           onState: (s, d) => {
             camState = s;
+            leaveCheck(s === 'on');
             if (s !== 'on' && s !== 'starting') handGone();
             tellReady();
             // said once until Flick comes back to the screen: no camera, a camera Android won't give, one that's busy
             if ((s === 'denied' || s === 'nocamera' || s === 'error') && !deniedSaid) {
               deniedSaid = true;
-              A.toast(s === 'nocamera' ? 'Air grab needs a front camera' : s === 'denied' ? 'Flick can’t use the camera' : 'The camera is busy (another app may be using it)', 2600);
+              A.toast(s === 'nocamera' ? 'Air grab needs a front camera' : s === 'denied' ? 'Flick can’t use the camera'
+                : /^tracker: /.test(String(d || '')) ? 'Air grab couldn’t load its hand tracking' : 'The camera is busy (another app may be using it)', 2600);
             }
             if (s === 'error' || s === 'nocamera') console.log('air: ' + s + ' ' + (d || ''));
           },
         });
-        // frames the tracker skipped (nothing moving) still let a hand that went out of view leave
-        setInterval(() => { if (stream && camState === 'on') stream.push({ t: performance.now() }); }, 200);
         return cam;
       })();
       building.catch(() => { building = null; });
@@ -445,8 +453,7 @@
       A.pref.set('air', on ? '1' : '');
       if (on) A.toast('Air grab is on: make a fist over a file, then move it to your PC', 3200);
       update();
-      const s = document.getElementById('settings');
-      if (s && !s.hidden && !s.classList.contains('closing')) A.renderSettings();
+      X.redrawSettings();
     }
   });
   document.addEventListener('visibilitychange', () => update());
@@ -501,7 +508,7 @@
     A.pref.set('airTip', '1');
     A.openSheet('Tip: send files with a wave of your hand', [
       { label: 'Turn on Air grab', tag: 'Front camera', run: turnOn },
-      { label: 'Not now', run: () => A.toast('Air grab is in Settings any time', 2200) },
+      { label: 'Not now', run: () => A.toast('Air grab is in Advanced settings any time', 2200) },
     ]);
   }
   A.on('flicked', () => {

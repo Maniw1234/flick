@@ -19,23 +19,60 @@ const MAX_JSON = 256 * 1024;
 const MAX_MANIFEST = 8 * 1024 * 1024;
 const MAX_ENTRIES = 200000;
 const MAX_DEPTH = 64;
+// what's staged while it arrives is this account's alone (the temp folder can be one every account shares): files only
+// it can read, folders only it can open
+const STAGE_FILE = 0o600, STAGE_DIR = 0o700;
+// names that differ only in case are one name where the disk says so: Windows and macOS (Linux keeps them apart)
+const FOLD = process.platform !== 'linux';
 
 // A name's length: at most 150 characters, and where names are limited in bytes (Linux, macOS: 255) 230 bytes, with room
 // for a " (2)" (140 Hebrew letters are 280 bytes: the whole folder failed there)
 const tooLong = (s) => s.length > 150 || (process.platform !== 'win32' && Buffer.byteLength(s) > 230);
 
+// a name is cut to this before anything else is done to it, so any name costs the same little time (an entry may be
+// hundreds of thousands of characters long)
+const NAME_MAX = 1000;
+// without the dots and white space at its end, which Windows can't keep there
+function stripEnd(s) {
+  let i = s.length;
+  while (i > 0 && (s[i - 1] === '.' || /\s/.test(s[i - 1]))) i--;
+  return i === s.length ? s : s.slice(0, i);
+}
+
+// Windows device names, with or without an extension, in every spelling it takes for one (as pc/main.js and pc/sync.js
+// have them): "con.txt", "con .txt", "COM¹.png", "CONIN$"
+const DEVICE = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$)( *\..*)?$/i;
+
+/**
+ * The longest start of s, in whole characters (never half of one written in two), that is at most `units` UTF-16
+ * units and at most `bytes` UTF-8 bytes long (Infinity: no limit of that kind). Also used by sync.js.
+ */
+function fitStart(s, units, bytes) {
+  let len = 0, b = 0, i = 0;
+  for (const ch of s) {
+    const cb = Buffer.byteLength(ch);
+    if (len + ch.length > units || b + cb > bytes) break;
+    len += ch.length; b += cb; i += ch.length;
+  }
+  return s.slice(0, i);
+}
+
 function safeSegment(n) {
+  let s = String(n || '');
+  if (s.length > NAME_MAX) s = s.slice(0, NAME_MAX);
   // (and the invisible direction marks: "photo<right-to-left>gnp.exe" shows in Explorer as "photoexe.png")
-  let s = String(n || '').replace(/[<>:"/\\|?*\u0000-\u001f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '_').replace(/[. ]+$/, '').trim();
+  s = stripEnd(s.replace(/[<>:"/\\|?*\u0000-\u001f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '_').trim());
   if (!s || s === '.' || s === '..') s = '_';
-  // Windows device names, with or without an extension (as pc/main.js and pc/sync.js have them)
-  if (/^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$)( *\..*)?$/i.test(s)) s = '_' + s;
+  if (DEVICE.test(s)) s = '_' + s;
   if (tooLong(s)) {
-    // shortened by whole characters (never half of one written in two), keeping the extension
-    const e = Array.from(path.extname(s)).slice(0, 20).join('');
-    const base = Array.from(s.slice(0, s.length - path.extname(s).length));
-    while (base.length && tooLong(base.join('') + e)) base.pop();
-    s = (base.join('') + e).replace(/[. ]+$/, '') || '_';
+    // shortened by whole characters (never half of one written in two), keeping the extension: the longest start of
+    // the name that fits, in one pass
+    const x = path.extname(s);
+    const e = Array.from(x).slice(0, 20).join('');
+    const keep = fitStart(s.slice(0, s.length - x.length), 150 - e.length, process.platform !== 'win32' ? 230 - Buffer.byteLength(e) : Infinity);
+    s = stripEnd(keep + e) || '_';
+    // (what's left can be one: "aux", spaces, ".png"; and still fit)
+    if (DEVICE.test(s)) { s = '_' + s; const z = path.extname(s); while (tooLong(s) && s.length > z.length + 4) s = s.slice(0, s.length - z.length - 1) + z; }
   }
   return s;
 }
@@ -74,6 +111,10 @@ class BundleReceiver {
     // the same names as a set: a lookup per entry (an array search was quadratic with thousands of picked files)
     this.topSet = shared ? (shared.topSet || (shared.topSet = new Set(shared.tops))) : new Set();
     this.taken = shared ? shared.taken : new Map(); // lower-cased staged file paths
+    // folders as staged: requested path (lower-cased) -> staged path, and the staged ones lower-cased (Windows names are
+    // case-insensitive: "Photos/a" and "photos/b" share one folder, and a folder never takes a file's name)
+    this.dirAs = shared ? (shared.dirAs || (shared.dirAs = new Map())) : new Map();
+    this.dirKeys = shared ? (shared.dirKeys || (shared.dirKeys = new Set())) : new Set();
     this.assigned = shared ? shared.assigned : null; // requested path -> staged path: a stream sent again rewrites its own files
     this.done = false;
     this.aborted = false;
@@ -86,7 +127,7 @@ class BundleReceiver {
 
   async _mkdir(d) {
     if (this.dirs.has(d)) return;
-    await fs.promises.mkdir(d, { recursive: true });
+    await fs.promises.mkdir(d, { recursive: true, mode: STAGE_DIR });
     this.dirs.add(d);
   }
 
@@ -101,12 +142,35 @@ class BundleReceiver {
   // Windows names are case-insensitive: "IMG.jpg" and "img.JPG" from one Android folder must not overwrite each other
   _key(full) { return path.relative(this.root, full).split(path.sep).join('/').toLowerCase(); }
 
+  // The staged folders for these requested ones: the same folder for names that differ only in case, and a numbered one
+  // ("Notes (2)") where a file was staged under that name before (on Windows the folder couldn't be made: every file
+  // after it would fail)
+  _dirSegs(segs) {
+    let staged = '';
+    for (let i = 0; i < segs.length; i++) {
+      // (on Linux "Photos" and "photos" are two folders, and stay two)
+      const want = FOLD ? segs.slice(0, i + 1).join('/').toLowerCase() : segs.slice(0, i + 1).join('/');
+      let got = this.dirAs.get(want);
+      if (!got) {
+        const pre = staged ? staged + '/' : '';
+        let name = segs[i], n = 2;
+        while (this.taken.has((pre + name).toLowerCase())) name = segs[i] + ' (' + n++ + ')';
+        got = pre + name;
+        this.dirAs.set(want, got);
+        this.dirKeys.add(got.toLowerCase());
+      }
+      staged = got;
+    }
+    return staged ? staged.split('/') : [];
+  }
+
   async _header(json) {
     let h;
     try { h = JSON.parse(json); } catch (e) { throw new Error('bad entry'); }
     if (++this.entries > MAX_ENTRIES) throw new Error('too many entries');
-    const segs = safeRelative(h.p);
-    if (!segs) throw new Error('bad path');
+    const asked = safeRelative(h.p);
+    if (!asked) throw new Error('bad path');
+    const segs = h.d ? this._dirSegs(asked) : this._dirSegs(asked.slice(0, -1)).concat(asked[asked.length - 1]);
     const full = this._resolve(segs);
     const no = Number.isSafeInteger(h.i) && h.i >= 0 ? h.i : this.nextNo;
     this.nextNo = no + 1;
@@ -137,14 +201,14 @@ class BundleReceiver {
         // a name not taken: made new here ('wx': a file already there, from an earlier attempt, is never written over)
         dest = full; let i = 2;
         for (;;) {
-          if (!this.taken.has(this._key(dest))) {
-            try { fd = await fs.promises.open(dest, 'wx'); break; } catch (e) { if (e.code !== 'EEXIST') throw e; }
+          if (!this.taken.has(this._key(dest)) && !this.dirKeys.has(this._key(dest))) {
+            try { fd = await fs.promises.open(dest, 'wx', STAGE_FILE); break; } catch (e) { if (e.code !== 'EEXIST') throw e; }
           }
           dest = base + ' (' + i++ + ')' + ext;
         }
         this.taken.set(this._key(dest), true);
         if (this.assigned) this.assigned.set(String(h.p), dest);
-      } else fd = await fs.promises.open(dest, 'w');
+      } else fd = await fs.promises.open(dest, 'w', STAGE_FILE);
       this.pos = 0;
     }
     if (segs.length === 1) this._top(path.basename(dest));
@@ -238,4 +302,4 @@ class BundleReceiver {
   }
 }
 
-module.exports = { BundleReceiver, safeSegment, safeRelative, MAGIC };
+module.exports = { BundleReceiver, safeSegment, fitStart, safeRelative, MAGIC, STAGE_FILE, STAGE_DIR };

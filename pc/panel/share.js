@@ -19,6 +19,9 @@
   const article = (d) => (d === 'A browser' ? 'a browser' : d);
 
   function showView(on) {
+    // (one view at a time: opening by itself for a note from a browser, the one showing closes first, Devices, History,
+    // Browse, Settings…, or it would be left under this one, with drops and Escape going to the one out of sight)
+    if (on && !open && window.flickNav) window.flickNav.clear();
     open = !!on;
     $('webView').hidden = !open;
     if (open) $('webView').focus();            // keyboard focus moves into the view (Tab reaches Back first)
@@ -64,7 +67,8 @@
     }
     const title = $('webHotTitle'), sub = $('webHotSub'), btn = $('webHotBtn');
     sub.classList.remove('bad');
-    btn.disabled = h.state === 'starting';
+    // (not disabled while it starts: the keyboard stays on it; a press meanwhile does nothing)
+    if (h.state === 'starting') btn.setAttribute('aria-disabled', 'true'); else btn.removeAttribute('aria-disabled');
     if (on) {
       title.textContent = 'This PC’s Wi-Fi is on';
       sub.textContent = (h.kind === 'mobile' ? 'Windows Mobile hotspot: devices that join also get the internet.' : h.kind === 'nm' ? 'This PC’s own Wi-Fi connection is paused meanwhile.' : 'It stays on while Flick shares.') +
@@ -85,7 +89,20 @@
     }
   }
 
+  // Its lists are drawn again with every news (a browser joining, a download ending): the keyboard stays on the same
+  // button of the same row, else of the row that took its place, else in the view (it used to be dropped to the page)
   function render() {
+    const lists = [$('webBrowsers'), $('webFiles'), $('webTexts')], a = document.activeElement;
+    const list = lists.find((l) => l.contains(a)), row = list ? a.closest('[data-id]') : null;
+    const was = row ? { list, id: row.dataset.id, k: a.dataset.k || '', at: [...list.querySelectorAll('[data-id]')].indexOf(row) } : null;
+    draw();
+    if (!was) return;
+    const rows = [...was.list.querySelectorAll('[data-id]')];
+    const r = rows.find((x) => x.dataset.id === was.id) || rows[Math.min(was.at, rows.length - 1)];
+    const f = (r && (r.querySelector('[data-k="' + was.k + '"]') || r.querySelector('button'))) || (open ? $('webView') : null);
+    if (f) f.focus();
+  }
+  function draw() {
     const w = W || { on: false, browsers: [], files: [], texts: [], addrs: [] };
     // the entry on the main view
     const live = w.browsers.filter((b) => b.state === 'ok').length;
@@ -125,6 +142,7 @@
     if (!w.browsers.length) bl.appendChild(el('div', 'wempty', 'No browsers yet. When someone scans the code, you’ll be asked to allow their device here.'));
     for (const b of w.browsers) {
       const row = el('div', 'wrow');
+      row.dataset.id = 'b' + b.id;
       const main = el('div', 'wmain');
       const nm = el('div', 'wname');
       nm.appendChild(el('span', null, b.device));
@@ -138,12 +156,12 @@
       row.appendChild(main);
       if (b.state === 'ok') {
         const k = el('button', 'link danger', 'Disconnect');
-        k.type = 'button';
+        k.type = 'button'; k.dataset.k = 'kick';
         k.onclick = () => send('kick', { id: b.id });
         row.appendChild(k);
       } else if (b.state === 'pending' && b.id !== askId) {
         const a = el('button', 'link', 'Answer');
-        a.type = 'button';
+        a.type = 'button'; a.dataset.k = 'answer';
         a.onclick = () => ask({ id: b.id, device: b.device, address: b.address });
         row.appendChild(a);
       }
@@ -156,13 +174,14 @@
     if (!w.files.length) fl.appendChild(el('div', 'wempty', 'Add files, or drop them on this window, and every allowed browser can download them.'));
     for (const f of w.files) {
       const row = el('div', 'wrow');
+      row.dataset.id = 'f' + f.id;
       const main = el('div', 'wmain');
       const nm = el('div', 'wname'); nm.appendChild(el('span', null, f.name)); nm.title = f.name;
       main.appendChild(nm);
       main.appendChild(el('div', 'd', fmt(f.size || 0)));
       row.appendChild(main);
       const x = el('button', 'wx');
-      x.type = 'button'; x.title = 'Stop sharing this file'; x.setAttribute('aria-label', 'Stop sharing ' + f.name);
+      x.type = 'button'; x.title = 'Stop sharing this file'; x.dataset.k = 'remove'; x.setAttribute('aria-label', 'Stop sharing ' + f.name);
       x.innerHTML = X_ICON;
       x.onclick = () => send('remove', { id: f.id });
       row.appendChild(x);
@@ -176,6 +195,7 @@
     let flashed = false;
     for (const t of w.texts) {
       const row = el('div', 'wrow wtext');
+      row.dataset.id = 't' + t.id;
       if (t.id === flashText) { row.classList.add('flash'); flashed = true; }
       const main = el('div', 'wmain');
       main.appendChild(el('div', 'wnote', t.text));
@@ -183,11 +203,11 @@
       row.appendChild(main);
       const btns = el('div', 'wtextbtns');
       const c = el('button', 'link', 'Copy');
-      c.type = 'button';
+      c.type = 'button'; c.dataset.k = 'copy';
       c.onclick = () => { send('copy', { text: t.id }); c.textContent = 'Copied'; setTimeout(() => { c.textContent = 'Copy'; }, 1500); };
       btns.appendChild(c);
       const x = el('button', 'wx');
-      x.type = 'button'; x.title = 'Remove'; x.setAttribute('aria-label', 'Remove this note');
+      x.type = 'button'; x.title = 'Remove'; x.setAttribute('aria-label', 'Remove this note'); x.dataset.k = 'drop';
       x.innerHTML = X_ICON;
       x.onclick = () => send('drop-text', { id: t.id });
       btns.appendChild(x);
@@ -247,8 +267,9 @@
     render();
   };
   $('webBack').onclick = () => showView(false);
+  (window.flickViews = window.flickViews || {}).web = (on) => { if (open !== !!on) showView(on); };   // (the bar closes it: nav.js)
   $('webStop').onclick = () => send('stop');
-  $('webHotBtn').onclick = () => send(W && W.hot && W.hot.state === 'on' ? 'hot-stop' : 'hot-start');
+  $('webHotBtn').onclick = () => $('webHotBtn').getAttribute('aria-disabled') === 'true' ? null : send(W && W.hot && W.hot.state === 'on' ? 'hot-stop' : 'hot-start');
   $('webAgain').onclick = () => { starting = true; send('start'); render(); };
   $('webAdd').onclick = () => send('pick');
   $('webCopy').onclick = () => { send('copy', { url: true }); $('webCopy').textContent = 'Copied'; setTimeout(() => { $('webCopy').textContent = 'Copy'; }, 1500); };
@@ -274,6 +295,8 @@
   window.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (!$('webAsk').hidden) { e.stopImmediatePropagation(); return; }    // answer the question with a button
+    // (another question in front, pairing, Accept, Quick Share, the ringing: answered first; this view stays behind it)
+    if ([...document.querySelectorAll('.modal')].some((m) => !m.hidden)) return;
     if (open) { e.stopImmediatePropagation(); showView(false); }
   }, true);
 

@@ -1,5 +1,6 @@
 /* "find my phone". The PC asks this phone to ring; the app rings at alarm volume (ring(true, sec)) and this
- * page covers every screen with a big Stop until the phone is found (ring(false, 0) + 'ring-found' to the PC). */
+ * page covers every screen with a big Stop until the phone is found (ring(false, 0) + 'ring-found' to the PC). The PC
+ * stopping it is ring(false, -1): not found here, so it may ring again at once (found here, it stays quiet a while). */
 (window.FlickFeatures = window.FlickFeatures || []).push(function (A, X) {
   'use strict';
   const h = X.h;
@@ -30,7 +31,10 @@
   el.addEventListener('keydown', (e) => { if (e.key === 'Tab') { e.preventDefault(); stopBtn.focus(); } });
   const others = () => Array.from(document.body.children).filter((c) => c !== el && c.id !== 'toast' && c.tagName !== 'SCRIPT');
 
-  function show(sec) {
+  // who is looking for it: the PC, or another phone (its name)
+  function show(sec, from) {
+    // (a phone whose name is only invisible marks: still a phone, not the PC)
+    title.textContent = from ? (X.clean(from) || 'Another phone') + ' is looking for this phone' : 'Your PC is looking for this phone';
     clearTimeout(endT);
     endT = setTimeout(hide, (sec + 2) * 1000);          // the app stops by itself after sec; so does this
     if (on) return;
@@ -64,10 +68,12 @@
     if (!A.linkAuthed()) return;
     if (m.t === 'ring') {
       const sec = Math.max(1, Math.min(60, Math.round(+m.sec || 30)));
-      A.nc('ring', true, sec);
-      show(sec);
+      // (an app that says it won't ring, found a moment ago here, shows nothing: the screen covered it in silence)
+      if (A.nc('ring', true, sec) !== false) show(sec);
     } else if (m.t === 'ring-stop') {
-      A.nc('ring', false, 0);
+      // (the PC's own Stop isn't "found here": counted as that, the app wouldn't ring again for 2 minutes, and the page
+      // showed nothing when the PC asked again)
+      A.nc('ring', false, -1);
       hide();
     }
   });
@@ -75,7 +81,7 @@
   A.on('native', (e) => {
     if (e.t !== 'ring') return;
     if (!e.on) hide();
-    else if (!on) show(60);                             // already showing: the PC's own time limit stands
+    else if (!on) show(60, e.from);                     // already showing: the PC's own time limit stands
   });
   X.back(100, () => { if (!on) return false; stop(); return true; });
 });

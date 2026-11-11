@@ -1,6 +1,6 @@
 /* First-run walkthrough: four short steps with a small animated hand, once, after this phone first connects to a PC
- * it has just paired with: flick a file, select several, send from the PC, Settings. Skippable; Settings › Show tips
- * again shows it any time. pref 'tips': '1' = shown, 'old' = a phone paired before this version (not shown by itself). */
+ * it has just paired with: flick a file, select several, send from the PC, Settings. Skippable; Settings › Help ›
+ * Show tips again shows it any time. pref 'tips': '1' = shown, 'old' = a phone paired before this version (not shown by itself). */
 (window.FlickFeatures = window.FlickFeatures || []).push(function (A, X) {
   'use strict';
   const h = X.h;
@@ -59,13 +59,16 @@
     const p = phone(stage, 'mid menu');
     d('tbar', p); const mo = d('tmore', p);
     for (let i = 0; i < 3; i++) d('tdot', mo);
+    // (the ••• menu as it is: three tiles at its top, Settings the last of them, then the rest listed)
     const sh = d('tsheet', p);
-    for (let i = 0; i < 4; i++) { const r = d('trow r' + i, sh); d('tri', r); d('trl', r); }
+    const tl = d('ttiles', sh);
+    for (let i = 0; i < 3; i++) d('ttile t' + i, tl);
+    for (let i = 0; i < 3; i++) { const r = d('trow r' + i, sh); d('tri', r); d('trl', r); }
     hand(stage, 'h4');
   }
 
   // ---- the overlay
-  let el = null, step = 0, waitT = 0, sx = null;
+  let el = null, step = 0, waitT = 0, sx = null, blocked = [];
   function build() {
     el = h('div', 'ftips');
     el.setAttribute('role', 'dialog'); el.setAttribute('aria-modal', 'true'); el.setAttribute('aria-labelledby', 'fTipsT');
@@ -112,11 +115,16 @@
   function isOpen() { return !!(el && !el.hidden && !el.classList.contains('closing')); }
   function show() {
     clearTimeout(waitT);
+    // (a phone asking to pair is answered first: the walkthrough would cover what's behind it, the question included)
+    if (document.querySelector('.fphask')) { waitT = setTimeout(show, 800); return; }
     A.pref.set('tips', '1');                          // once, even if Flick is closed halfway
     if (!el) build();
     el.hidden = false;
     el.classList.remove('closing');
-    X.block('tips', Array.from(document.body.children).filter((c) => c !== el && c.id !== 'toast' && c.tagName !== 'SCRIPT'), true);
+    // (not the shield a closing Settings leaves for a moment, "Show tips again": taken off the page while out of reach,
+    // it stayed so, and let taps through from then on)
+    blocked = Array.from(document.body.children).filter((c) => c !== el && c.id !== 'toast' && c.tagName !== 'SCRIPT' && !c.classList.contains('fshield'));
+    X.block('tips', blocked, true);
     step = 0;
     go(0);
     setTimeout(() => { if (isOpen()) el._p.next.focus({ preventScroll: true }); }, 60);
@@ -124,7 +132,8 @@
   function finish() {
     if (!isOpen()) return false;
     el.classList.add('closing');
-    X.block('tips', Array.from(document.body.children), false);
+    X.block('tips', blocked.concat(Array.from(document.body.children)), false);
+    blocked = [];
     setTimeout(() => { if (el.classList.contains('closing')) { el.hidden = true; el.classList.remove('closing'); el._p.stage.innerHTML = ''; } }, 220);
     return true;
   }
@@ -133,7 +142,7 @@
   // ---- when: the first time a PC this phone paired with is connected, once the file browser is on screen
   function busy() {
     const open = (id) => { const e = document.getElementById(id); return !!(e && !e.hidden); };
-    return A.st.screen !== 'main' || A.sheetOpen || open('settings') || open('fPv') || open('fRing') || open('ask') || !!document.querySelector('.fpage:not([hidden])');
+    return A.st.screen !== 'main' || A.sheetOpen || open('settings') || open('fPv') || open('fRing') || open('ask') || !!document.querySelector('.fpage:not([hidden]), .fphask, .ftour:not([hidden])');
   }
   function later(n) {
     clearTimeout(waitT);
@@ -145,7 +154,8 @@
   }
   A.on('conn', () => { if (A.st.connected && !A.pref.get('tips', '')) later(0); });
 
-  // ---- Settings › Help, the last section (shared with Send feedback, features/feedback.js): Show tips again comes first
+  // ---- Settings › Help (shared with the other features' rows, core.js X.helpCard): Show tips again goes to its top (the
+  // tour's row, added after it, comes before it)
   A.on('settings-end', (body) => {
     const row = h('button', 'srow nav');
     const lab = h('div', 'sl');

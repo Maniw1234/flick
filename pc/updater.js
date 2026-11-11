@@ -29,21 +29,43 @@ class Updater {
     this.log = o.log || (() => {});
     this.root = o.root || core.updatesRoot();
     this.keys = o.keys || core.RELEASE_KEYS;
+    this.idleMs = o.idleMs || 60000;            // (tests can shorten these)
+    this.maxMs = o.maxMs || 2 * 3600000;
+    this.onState = o.onState || null;            // (told when a new version starts downloading)
     this.state = { state: 'idle' };
   }
 
+  // A download that keeps coming is waited for, however slow the connection: on one too slow for the whole update in two
+  // minutes it used to be cut off, to start again half an hour later, for ever. One that stops coming for a minute is
+  // given up on (and tried again at the next check).
   async _get(url, accept, maxBytes) {
     const ctl = new AbortController();
-    const t = setTimeout(() => ctl.abort(), 120000);
+    let quiet = null;
+    const waiting = () => { clearTimeout(quiet); quiet = setTimeout(() => ctl.abort(), this.idleMs); };
+    const all = setTimeout(() => ctl.abort(), this.maxMs);
+    waiting();
     try {
       const r = await this.fetch(url, { headers: { Accept: accept, 'User-Agent': 'Flick/' + this.version }, signal: ctl.signal, redirect: 'follow' });
       if (r.status !== 200) { const e = new Error('http ' + r.status); e.status = r.status; throw e; }
       const len = +r.headers.get('content-length') || 0;
       if (maxBytes && len > maxBytes) throw new Error('too big');
-      const buf = Buffer.from(await r.arrayBuffer());
+      let buf;
+      if (r.body && typeof r.body.getReader === 'function') {
+        const rd = r.body.getReader(), parts = [];
+        let n = 0;
+        for (;;) {
+          waiting();
+          const { done, value } = await rd.read();
+          if (done) break;
+          n += value.byteLength;
+          if (maxBytes && n > maxBytes) { rd.cancel().catch(() => {}); throw new Error('too big'); }
+          parts.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
+        }
+        buf = Buffer.concat(parts, n);
+      } else buf = Buffer.from(await r.arrayBuffer());
       if (maxBytes && buf.length > maxBytes) throw new Error('too big');
       return buf;
-    } finally { clearTimeout(t); }
+    } finally { clearTimeout(quiet); clearTimeout(all); }
   }
 
   /**
@@ -115,6 +137,7 @@ class Updater {
     if (gh && gh[1].toLowerCase() !== sum) return (this.state = { state: 'error', version: ver, why: 'checksum' });
 
     let buf;
+    if (this.onState) { try { this.onState({ state: 'downloading', version: ver }); } catch (e) { /* the window's business */ } }
     try {
       buf = await this._get(bundle.browser_download_url, 'application/octet-stream', 80 * 1024 * 1024);
     } catch (e) {
@@ -138,8 +161,10 @@ class Updater {
     if (need && this.electron && need.split('.')[0] !== this.electron.split('.')[0]) return (this.state = { state: 'installer', version: ver, page });
 
     try {
-      const r = await core.installFiles(this.root, ver, files);
-      // the signed SHA256SUMS stays with this version: it lets phones trust the phone app inside (see main.js)
+      // the bundle stays with the files unpacked from it: each start checks them against it (updatecore.checkUpdate)
+      const r = await core.installFiles(this.root, ver, files.concat({ name: core.bundleName(ver), data: buf }));
+      // the signed SHA256SUMS stays with this version: it lets phones trust the phone app inside (see main.js), and the
+      // start trust the bundle
       core.writeProof(require('path').join(this.root, r.dir), proof);
       core.writeCurrent(this.root, { version: ver, dir: r.dir, tries: 0, sha256: sum });
       this.log('update', ver, 'ready', r.files, 'files');

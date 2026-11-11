@@ -42,7 +42,6 @@ final class BtLink implements Runnable {
     private Thread thread;
     private BluetoothSocket connecting;         // an RFCOMM connect() in progress
     private BtMux mux;                          // the link, from its greeting on
-    volatile String state = "off";
 
     BtLink(Context c, Listener l) { this.ctx = c.getApplicationContext(); this.listener = l; }
 
@@ -65,7 +64,6 @@ final class BtLink implements Runnable {
     }
 
     private void report(String s, JSONObject pc) {
-        state = s;
         try { listener.onBt(s, pc); } catch (Throwable e) { /* ignore */ }
     }
 
@@ -174,8 +172,11 @@ final class BtLink implements Runnable {
     private static JSONObject hello(int port, BluetoothDevice d) {
         HttpURLConnection c = null;
         try {
-            // straight to the link's local port, never through a proxy the network has (see UpdateFetch.open)
-            c = (HttpURLConnection) new URL("http://127.0.0.1:" + port + "/api/hello").openConnection(Proxy.NO_PROXY);
+            // straight to the link's local port, never through a proxy the network has (see UpdateFetch.open); not at
+            // all once the link closed (its port may be another app's then)
+            String key = TlsProxy.Gate.prefix(port);
+            if (key.length() == 0) return null;
+            c = (HttpURLConnection) new URL("http://127.0.0.1:" + port + key + "/api/hello").openConnection(Proxy.NO_PROXY);
             c.setConnectTimeout(8000);
             c.setReadTimeout(12000);
             if (c.getResponseCode() != 200) return null;
@@ -186,15 +187,17 @@ final class BtLink implements Runnable {
             while ((n = in.read(buf)) > 0 && b.size() < 64 * 1024) b.write(buf, 0, n);
             in.close();
             JSONObject j = new JSONObject(b.toString("UTF-8"));
-            if (!"flick".equals(j.optString("app"))) return null;
+            // (an id a Flick PC has, as from any device on a network: see Discovery)
+            if (!"flick".equals(j.optString("app")) || !Discovery.pcId(j.optString("id"))) return null;
             JSONObject pc = new JSONObject();
             pc.put("id", j.optString("id"));
-            pc.put("name", j.optString("name", "PC"));
+            String nm = PeerServer.cleanName(j.opt("name"));          // (text only, as from any device: see Discovery)
+            pc.put("name", nm.isEmpty() ? "PC" : nm);
             pc.put("ip", "127.0.0.1");
             pc.put("port", port);
             pc.put("v", j.optInt("v", 1));
             pc.put("via", "bluetooth");
-            try { pc.put("bt", d.getName()); } catch (Throwable e) { /* ignore */ }
+            try { pc.put("bt", PeerServer.cleanName(d.getName())); } catch (Throwable e) { /* ignore */ }
             return pc;
         } catch (Throwable e) {
             return null;

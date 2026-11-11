@@ -6,12 +6,13 @@
 //            shortcut before gets it started a little after Flick starts (warm).
 //   macOS    Finder's selection, when Finder is in front (macOS asks once to let Flick ask Finder)
 //   Linux    the copied files (Copy, or Ctrl+C): file managers there don't say what's selected (clipfiles.js)
-// Resolves { kind: 'folder' | 'desktop' | 'copied' | 'denied' | 'other', paths } (at most 100 paths).
+// Resolves { kind: 'folder' | 'desktop' | 'copied' | 'denied' | 'unanswered' | 'other', paths } (at most 100 paths;
+// unanswered: the clipboard didn't answer, see clipfiles.js).
 const fs = require('fs');
 const path = require('path');
 const { spawn, execFile } = require('child_process');
 const { PS_ASK } = require('./selwatch');
-const { clipFiles } = require('./clipfiles');
+const { copied } = require('./clipfiles');
 
 const MAX = 100;
 const KEEP_MS = 30 * 60000;
@@ -41,7 +42,7 @@ class SelNow {
 
   /** @returns {Promise<{kind: string, paths: string[]}>} */
   ask() {
-    if (this.plat === 'linux') return clipFiles().then((l) => ({ kind: l.length ? 'copied' : 'other', paths: clean(l) }), () => ({ kind: 'other', paths: [] }));
+    if (this.plat === 'linux') return copied().then((r) => ({ kind: r.paths.length ? 'copied' : r.unanswered ? 'unanswered' : 'other', paths: clean(r.paths) }), () => ({ kind: 'other', paths: [] }));
     if (this.plat === 'darwin') return this._mac();
     if (this.plat === 'win32') return this._win();
     return Promise.resolve({ kind: 'other', paths: [] });

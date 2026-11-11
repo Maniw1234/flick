@@ -8,16 +8,20 @@ import java.security.MessageDigest;
 import java.security.cert.X509Certificate;
 import java.util.List;
 
-/** Prints how an APK is signed: each scheme's signer, the v3 rotation lineage, and the oldest Android it installs on. */
+/**
+ * Prints how an APK is signed: each scheme's signer, the v3 rotation lineage and what each key in it may still do, and
+ * the oldest Android it installs on. Certificates are named by their whole SHA-256 (verify_apk.sh compares all of it).
+ */
 public class FlickVerify {
     static String sha(X509Certificate c) throws Exception {
         StringBuilder s = new StringBuilder();
         for (byte b : MessageDigest.getInstance("SHA-256").digest(c.getEncoded())) s.append(String.format("%02X", b));
-        return s.substring(0, 16);
+        return s.toString();
     }
+    static String name(X509Certificate c) { return c.getSubjectX500Principal().getName().replaceAll(",.*", ""); }
     static String names(List<X509Certificate> l) throws Exception {
         StringBuilder s = new StringBuilder();
-        for (X509Certificate c : l) s.append(c.getSubjectX500Principal().getName().replaceAll(",.*", "")).append(" ").append(sha(c)).append("; ");
+        for (X509Certificate c : l) s.append(name(c)).append(" ").append(sha(c)).append("; ");
         return s.toString();
     }
     public static void main(String[] a) throws Exception {
@@ -34,6 +38,12 @@ public class FlickVerify {
             System.out.println("  v3.1 verified: " + r.isVerifiedUsingV31Scheme());
             SigningCertificateLineage lin = r.getSigningCertificateLineage();
             System.out.println("  lineage: " + (lin == null ? "none" : names(lin.getCertificatesInLineage())));
+            // what each key in the lineage may still do: the old (public) key must never roll back, i.e. sign an update
+            if (lin != null) for (X509Certificate c : lin.getCertificatesInLineage()) {
+                SigningCertificateLineage.SignerCapabilities k = lin.getSignerCapabilities(c);
+                System.out.println("    " + name(c) + ": installedData=" + k.hasInstalledData() + " sharedUid=" + k.hasSharedUid()
+                        + " permission=" + k.hasPermission() + " rollback=" + k.hasRollback() + " auth=" + k.hasAuth());
+            }
             for (ApkVerifier.IssueWithParams e : r.getErrors()) System.out.println("  ERROR " + e);
         }
     }

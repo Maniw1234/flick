@@ -37,9 +37,22 @@ final class Discovery implements Runnable {
     // pass broadcasts (or where the PC is in another subnet, as on many office networks)
     private volatile String[] known = new String[0];
     private final String anon = "q" + Long.toHexString(new java.security.SecureRandom().nextLong());
+    // the user is holding Connect: asked every 300 ms, so the device they mean shows up within a moment
+    private volatile boolean fast;
+    // PCs (each at each address) listed at most: anyone on the network can answer, as any number of made-up PCs, and the
+    // list is looked at again with each answer; one more is left out, unless it answers from an address a paired PC had
+    private static final int MAX_FOUND = 64;
 
     /** ips: where paired PCs were seen before. */
     void setKnown(String[] ips) { known = ips == null ? new String[0] : ips; }
+
+    /** Asks every 300 ms while on (the user is holding Connect), else at the usual pace. */
+    void setFast(boolean on) { fast = on; }
+
+    // a USB cable was just plugged in (or tethering turned on): asked fast for a few seconds, so a PC over it shows up
+    // within a second
+    private volatile long boostUntil;
+    void boost(long ms) { boostUntil = SystemClock.elapsedRealtime() + ms; }
 
     Discovery(Context ctx, String deviceId, String deviceName, Listener l) {
         this.ctx = ctx.getApplicationContext();
@@ -50,7 +63,8 @@ final class Discovery implements Runnable {
 
     synchronized void setActive(boolean on) {
         active = on;
-        if (on && (thread == null || !thread.isAlive())) {
+        // (the thread there goes on, or is gone: it decides to end under this lock, see run)
+        if (on && thread == null) {
             thread = new Thread(this, "flick-discovery");
             thread.setDaemon(true);
             thread.start();
@@ -59,7 +73,11 @@ final class Discovery implements Runnable {
 
     @Override
     public void run() {
-        while (active) {
+        while (true) {
+            // Decided under the lock, so turned off and on again quickly the search goes on: this thread either sees it on
+            // again here, or is gone from thread before setActive looks (it started another). Deciding outside it, the
+            // search could stop for good with it on (its thread ending just as it was turned on again).
+            synchronized (this) { if (!active) { thread = null; return; } }
             DatagramSocket s = null;
             WifiManager.MulticastLock lock = null;
             try {
@@ -73,20 +91,27 @@ final class Discovery implements Runnable {
                 s.setBroadcast(true);
                 s.setSoTimeout(200);
                 byte[] buf = new byte[4096];
-                long nextSend = 0, lastEmit = 0;
+                long lastSend = -1000000, lastEmit = 0, lastLook = 0;
                 String lastJson = "";
                 while (active) {
                     long now = SystemClock.elapsedRealtime();
-                    if (now >= nextSend) {
+                    // (the pace is looked at each time: holding Connect speeds up the very next question)
+                    if (now - lastSend >= (fast || now < boostUntil ? 300 : found.isEmpty() ? 700 : 1500)) {
                         sendQueries(s);
-                        nextSend = now + (found.isEmpty() ? 700 : 1500);
+                        lastSend = now;
                     }
+                    boolean changed = false;
                     try {
                         DatagramPacket p = new DatagramPacket(buf, buf.length);
                         s.receive(p);
-                        handle(p);
+                        changed = handle(p);
                     } catch (SocketTimeoutException e) { /* tick */ }
-                    String json = snapshot(SystemClock.elapsedRealtime());
+                    // the list as the page gets it: at once after an answer that changed it, else every 250 ms (PCs gone
+                    // quiet drop off), not after every answer (a device on the network can send thousands a second)
+                    long t = SystemClock.elapsedRealtime();
+                    if (!changed && t - lastLook < 250) continue;
+                    lastLook = t;
+                    String json = snapshot(t);
                     if (!json.equals(lastJson) || now - lastEmit > 2000) {
                         lastJson = json;
                         lastEmit = now;
@@ -100,7 +125,6 @@ final class Discovery implements Runnable {
                 try { if (lock != null && lock.isHeld()) lock.release(); } catch (Throwable e) { /* ignore */ }
             }
         }
-        synchronized (this) { thread = null; }
     }
 
     private void sendQueries(DatagramSocket s) {
@@ -140,81 +164,77 @@ final class Discovery implements Runnable {
         }
     }
 
-    // ---- which kind of link a reply came over: the local interface whose subnet holds the PC's address
-    static String linkFor(InetAddress remote) {
-        try {
-            for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
-                if (!ni.isUp() || ni.isLoopback()) continue;
-                for (InterfaceAddress ia : ni.getInterfaceAddresses()) {
-                    InetAddress a = ia.getAddress();
-                    if (a instanceof Inet4Address && sameSubnet(a, remote, ia.getNetworkPrefixLength())) return typeOf(ni.getName());
-                }
-            }
-        } catch (Throwable e) { /* unknown */ }
-        return "wifi";
-    }
+    // ---- which kind of link a reply came over (NetKind: PeerClient asks the same about other phones)
+    static String linkFor(InetAddress remote) { return NetKind.linkFor(remote); }
+    static int rank(String via) { return NetKind.rank(via); }
 
-    static boolean sameSubnet(InetAddress a, InetAddress b, int prefix) {
-        byte[] x = a.getAddress(), y = b.getAddress();
-        if (x.length != y.length || prefix <= 0) return false;
-        for (int i = 0; i < x.length && prefix > 0; i++, prefix -= 8) {
-            int mask = prefix >= 8 ? 0xff : (0xff << (8 - prefix)) & 0xff;
-            if ((x[i] & mask) != (y[i] & mask)) return false;
-        }
-        return true;
-    }
-
-    static String typeOf(String iface) {
-        String n = iface == null ? "" : iface.toLowerCase(java.util.Locale.ROOT);
-        if (n.startsWith("rndis") || n.startsWith("usb") || n.startsWith("ncm")) return "usb";
-        if (n.startsWith("ap") || n.startsWith("swlan") || n.startsWith("softap") || n.startsWith("wigig") || n.equals("wlan1")) return "hotspot";
-        if (n.startsWith("p2p")) return "direct";
-        if (n.startsWith("eth")) return "ethernet";
-        if (n.startsWith("bt-pan") || n.startsWith("bnep")) return "bluetooth";
-        return "wifi";
-    }
-
-    /** Faster links first: a cable beats a direct radio link, which beats Wi-Fi through a router. */
-    static int rank(String via) {
-        if ("usb".equals(via)) return 5;
-        if ("ethernet".equals(via)) return 4;
-        if ("hotspot".equals(via) || "direct".equals(via)) return 3;
-        if ("wifi".equals(via)) return 2;
-        return 1;
-    }
-
-    private void handle(DatagramPacket p) {
-        if (p.getLength() > 12 && p.getData()[p.getOffset()] != '{') { mdns(p); return; }
+    // an answer: whether it changed the list the page gets
+    private boolean handle(DatagramPacket p) {
+        // (one from this phone itself is another app's: a PC is never this phone, and an app answering in a paired PC's
+        // name first would be listed as that PC)
+        if (p.getAddress() == null || p.getAddress().isLoopbackAddress()) return false;
+        if (p.getLength() > 12 && p.getData()[p.getOffset()] != '{') return mdns(p);
         try {
             String txt = new String(p.getData(), p.getOffset(), p.getLength(), "UTF-8");
             JSONObject m = new JSONObject(txt);
-            if (!"flick!".equals(m.optString("t"))) return;
+            if (!"flick!".equals(m.optString("t"))) return false;
+            // (anyone can answer: an id a Flick PC has, and a port one can listen on, or it isn't one)
             String id = m.optString("id", "");
-            if (id.length() == 0) return;
+            int port = m.optInt("port", 47860);
+            if (!pcId(id) || port <= 0 || port > 65535) return false;
             String ip = p.getAddress().getHostAddress();
             JSONObject pc = new JSONObject();
             pc.put("id", id);
-            pc.put("name", m.optString("name", "PC"));
+            // (text only, without the characters that would turn the words around it backwards)
+            String nm = PeerServer.cleanName(m.opt("name"));
+            pc.put("name", nm.isEmpty() ? "PC" : nm);
             pc.put("ip", ip);
-            pc.put("port", m.optInt("port", 47860));
+            pc.put("port", port);
             pc.put("known", m.optBoolean("known", false));
             pc.put("v", m.optInt("v", 1));
             pc.put("tls", m.optInt("tls", 0));      // 1: the PC takes encrypted links (protocol 4)
+            // its window is open on screen: when several PCs answer, it's the one the user means (holding Connect here)
+            pc.put("ready", m.optInt("ready", 0) == 1);
             pc.put("via", linkFor(p.getAddress()));
             pc.put("seen", SystemClock.elapsedRealtime());
             // one entry per PC and address: the same PC can be reachable over a cable and Wi-Fi at once
-            synchronized (found) { found.put(id + "@" + ip, pc); }
-        } catch (Throwable e) { /* ignore junk */ }
+            return keep(id + "@" + ip, pc, ip);
+        } catch (Throwable e) { return false; /* junk */ }
     }
 
-    /** An mDNS answer: the PCs it describes, like discovery replies. */
-    private void mdns(DatagramPacket p) {
+    /** An id a Flick PC has (made up once: letters, digits, - and _), as phones check each other's. */
+    static boolean pcId(String id) { return id != null && id.matches("[A-Za-z0-9_-]{1,64}"); }
+
+    private static boolean among(String[] ips, String ip) {
+        for (String k : ips) if (k.equals(ip)) return true;
+        return false;
+    }
+
+    // listed (see MAX_FOUND): whether that changed what the page is shown of it (not only when it was last seen)
+    private boolean keep(String key, JSONObject pc, String ip) {
+        boolean paired = among(known, ip);
+        synchronized (found) {
+            JSONObject was = found.get(key);
+            if (was == null && found.size() >= MAX_FOUND && !paired) return false;
+            found.put(key, pc);
+            return was == null || !looks(was).equals(looks(pc));
+        }
+    }
+    private static String looks(JSONObject pc) {
+        return pc.optString("name") + "|" + pc.optInt("port") + "|" + pc.optBoolean("known") + "|" + pc.optInt("v") + "|" + pc.optInt("tls") + "|" + pc.optBoolean("ready") + "|" + pc.optString("via");
+    }
+
+    /** An mDNS answer: the PCs it describes, like discovery replies (whether it changed the list). */
+    private boolean mdns(DatagramPacket p) {
         String from = p.getAddress().getHostAddress();
+        boolean changed = false;
         for (Mdns.Pc m : Mdns.parse(p.getData(), p.getOffset(), p.getLength(), from)) {
+            if (!pcId(m.id) || m.port <= 0 || m.port > 65535) continue;
             try {
                 JSONObject pc = new JSONObject();
                 pc.put("id", m.id);
-                pc.put("name", m.name);
+                String nm = PeerServer.cleanName(m.name);
+                pc.put("name", nm.isEmpty() ? "PC" : nm);
                 pc.put("ip", m.ip);
                 pc.put("port", m.port);
                 pc.put("known", false);
@@ -222,15 +242,21 @@ final class Discovery implements Runnable {
                 pc.put("tls", m.tls);
                 pc.put("via", linkFor(p.getAddress()));
                 pc.put("seen", SystemClock.elapsedRealtime());
-                synchronized (found) { found.put(m.id + "@" + m.ip, pc); }
+                changed |= keep(m.id + "@" + m.ip, pc, m.ip);
             } catch (Throwable e) { /* ignore */ }
         }
+        return changed;
     }
 
-    /** Each PC once, at its fastest address; every address it was seen at is listed under "links". */
+    /**
+     * Each PC once, at its fastest address; every address it was seen at is listed under "links". Among addresses as
+     * fast, one a paired PC was seen at before (known) comes first: anyone on the network can answer in a PC's name, and
+     * sooner than the PC, and the first answer would be the one the page goes to.
+     */
     private String snapshot(long now) {
         Map<String, JSONObject> best = new LinkedHashMap<String, JSONObject>();
         Map<String, JSONArray> links = new LinkedHashMap<String, JSONArray>();
+        String[] ips = known;
         synchronized (found) {
             Iterator<Map.Entry<String, JSONObject>> it = found.entrySet().iterator();
             while (it.hasNext()) {
@@ -238,10 +264,11 @@ final class Discovery implements Runnable {
                 if (now - pc.optLong("seen") > 7000) { it.remove(); continue; }
                 String id = pc.optString("id");
                 JSONObject cur = best.get(id);
-                if (cur == null || rank(pc.optString("via")) > rank(cur.optString("via"))) best.put(id, pc);
+                int r = cur == null ? 0 : rank(pc.optString("via")) - rank(cur.optString("via"));
+                if (cur == null || r > 0 || (r == 0 && among(ips, pc.optString("ip")) && !among(ips, cur.optString("ip")))) best.put(id, pc);
                 JSONArray l = links.get(id);
                 if (l == null) { l = new JSONArray(); links.put(id, l); }
-                try { l.put(new JSONObject().put("ip", pc.optString("ip")).put("via", pc.optString("via"))); } catch (Throwable e) { /* ignore */ }
+                try { l.put(new JSONObject().put("ip", pc.optString("ip")).put("port", pc.optInt("port")).put("via", pc.optString("via"))); } catch (Throwable e) { /* ignore */ }
             }
         }
         JSONArray a = new JSONArray();
@@ -256,6 +283,7 @@ final class Discovery implements Runnable {
                 o.put("v", pc.optInt("v", 1));
                 o.put("tls", pc.optInt("tls", 0));
                 o.put("via", pc.optString("via", "wifi"));
+                if (pc.optBoolean("ready")) o.put("ready", true);
                 o.put("links", links.get(pc.optString("id")));
                 a.put(o);
             } catch (Throwable e) { /* ignore */ }

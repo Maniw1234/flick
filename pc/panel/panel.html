@@ -9,6 +9,11 @@
 <link rel="stylesheet" href="features.css">
 <link rel="stylesheet" href="browse.css">
 <link rel="stylesheet" href="more.css">
+<link rel="stylesheet" href="devices.css">
+<link rel="stylesheet" href="connect.css">
+<link rel="stylesheet" href="transfers.css">
+<link rel="stylesheet" href="tour.css">
+<link rel="stylesheet" href="nav.css">
 </head>
 <body>
   <header class="bar">
@@ -19,6 +24,10 @@
   </header>
 
   <main id="main">
+    <section class="xf" id="xf" aria-labelledby="xfTitle" hidden>
+      <h2 id="xfTitle">Transfers</h2>
+      <div class="card"><div id="xfList" role="list"></div><button type="button" class="xfmore" id="xfMore" hidden></button></div>
+    </section>
     <section class="status-row">
       <div class="scene" id="scene" aria-hidden="true">
         <svg class="monitor" viewBox="0 0 120 80"><rect x="2" y="2" width="116" height="66" rx="4"/><path d="M48 70v6M72 70v6M40 77h40"/></svg>
@@ -26,25 +35,39 @@
       </div>
       <div class="status-text">
         <div class="status"><span class="dot" id="dot"></span><span id="statusText">Waiting for your phone</span></div>
-        <div class="hint" id="hint">On your phone, open Flick and press and hold Connect.</div>
+        <div class="hint" id="hint">Hold Connect below, or on your phone.</div>
       </div>
     </section>
-    <section class="card intro" id="news" hidden>
-      <div class="intro-title">What’s new in Flick 2.0</div>
-      <ul>
-        <li>Air grab: move files with your hand. Turn it on in the phone’s Settings.</li>
-        <li>New animations, each with its own sound. Pick one below.</li>
-        <li>A volume slider and Reduce effects, under the animations.</li>
-        <li id="newsKey">Select files in File Explorer and press Ctrl+Alt+F to send them to the phone.</li>
-      </ul>
-      <div class="intro-btns"><button class="btn" id="newsOk">Got it</button><button class="link" id="newsAll">See everything that’s new</button></div>
+    <section class="cn card" id="cn" aria-label="Connect a device">
+      <button class="cnbtn" id="cnBtn" type="button" aria-label="Connect" aria-describedby="cnHow cnText">
+        <svg class="cnring" viewBox="0 0 48 48" aria-hidden="true"><circle class="trk" cx="24" cy="24" r="21"/><circle class="arc" id="cnArc" cx="24" cy="24" r="21"/></svg>
+        <svg class="cnico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="2.1"/><path d="M8.3 8.3a5.2 5.2 0 0 0 0 7.4M15.7 8.3a5.2 5.2 0 0 1 0 7.4M5.5 5.5a9.2 9.2 0 0 0 0 13M18.5 5.5a9.2 9.2 0 0 1 0 13"/></svg>
+      </button>
+      <div class="cntxt">
+        <span class="cnhow" id="cnHow">Hold it, or press Enter.</span>
+        <div class="cnsay" role="status" aria-live="polite" aria-atomic="true">
+          <div class="cnt1" id="cnTitle">Connect a device</div>
+          <div class="cnt2" id="cnText">Hold Connect here, or on your phone or other computer. The other one asks to allow it.</div>
+        </div>
+        <div class="cnbody" id="cnBody"></div>
+      </div>
+    </section>
+    <section class="card intro" id="intro" hidden>
+      <div class="intro-title">Welcome to Flick</div>
+      <ol>
+        <li id="introPhone">Install the Flick app on your Android phone (Android 9 or newer): on the phone, open <span class="mono">github.com/Maniw1234/flick/releases</span>, download the latest Flick .apk and install it.</li>
+        <li>Connect the phone and this PC to the same Wi-Fi.</li>
+        <li>Open Flick on the phone, hold it next to this screen, then press and hold Connect.</li>
+        <li>Drag a file off the edge of the phone toward the PC.</li>
+      </ol>
+      <button class="btn" id="introOk">Got it</button>
     </section>
 
     <section class="send" id="sendRow" hidden>
+      <div class="sendto" id="sendToBox" hidden><label for="sendTarget">Send to</label><select id="sendTarget"></select></div>
       <button class="btn" id="sendFiles">Send files to phone</button>
       <div class="sendsub" id="sendSub">Or drop files on this window. In File Explorer, right-click a file and choose Send to &gt; Flick (phone).</div>
     </section>
-    <div class="note" id="note" hidden></div>
     <div class="drop" id="drop" hidden><div>Drop to send to your phone</div></div>
     <section id="fPhonesBox" hidden>
       <h2 id="fPhonesTitle">Phones</h2>
@@ -54,123 +77,91 @@
         <button class="btn" id="fLinkGo" type="submit">Send</button>
       </form>
     </section>
-    <button class="wentry" id="bEntry" type="button" hidden>
-      <svg class="fhico" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.25" y="2.75" width="11.5" height="18.5" rx="2.5"/><path d="M9.25 7.75h2v2h-2zM12.75 7.75h2v2h-2zM9.25 11.25h2v2h-2zM12.75 11.25h2v2h-2zM10.5 17.75h3"/></svg>
-      <span class="wtxt"><span class="wt1" id="bEntryTitle">Browse your phone</span><span class="wt2" id="bEntrySub">See its photos, videos and files, and copy them to this PC.</span></span>
-      <svg class="wchev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5L10.5 8 6 12.5"/></svg>
-    </button>
-    <button class="wentry" id="webEntry" type="button">
-      <svg class="wqrico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2v2h-2zM18 14h2v2h-2zM14 18h2v2h-2zM18 18h2v2h-2z"/></svg>
-      <span class="wtxt"><span class="wt1"><span class="dot" id="webEntryDot" hidden></span><span id="webEntryTitle">Share with a browser</span></span><span class="wt2" id="webEntrySub">Send and receive files with an iPhone, iPad, Mac or any computer. No app needed.</span></span>
-      <svg class="wchev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5L10.5 8 6 12.5"/></svg>
-    </button>
-    <button class="wentry" id="fHistEntry" type="button">
-      <svg class="fhico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.25"/><path d="M12 7.5V12l3 2"/></svg>
-      <span class="wtxt"><span class="wt1">History</span><span class="wt2" id="fHistSub">Files you send and receive show up here.</span></span>
-      <svg class="wchev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5L10.5 8 6 12.5"/></svg>
-    </button>
-    <button class="wentry" id="cEntry" type="button" hidden>
-      <svg class="fhico" viewBox="0 0 24 24" aria-hidden="true"><rect x="5.25" y="4.25" width="13.5" height="16.5" rx="2.25"/><path d="M9 4.25V3.5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v.75M8.75 10h6.5M8.75 13.5h6.5M8.75 17h4"/></svg>
-      <span class="wtxt"><span class="wt1">Clipboard history</span><span class="wt2" id="cEntrySub">Text, links and pictures you copy show up here.</span></span>
-      <svg class="wchev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5L10.5 8 6 12.5"/></svg>
-    </button>
+    <div class="hcard" data-card="b">
+      <button class="wentry" id="bEntry" type="button" hidden>
+        <svg class="fhico" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.25" y="2.75" width="11.5" height="18.5" rx="2.5"/><path d="M9.25 7.75h2v2h-2zM12.75 7.75h2v2h-2zM9.25 11.25h2v2h-2zM12.75 11.25h2v2h-2zM10.5 17.75h3"/></svg>
+        <span class="wtxt"><span class="wt1" id="bEntryTitle">Browse your phone</span><span class="wt2" id="bEntrySub">See its photos, videos and files, and copy them to this PC.</span></span>
+        <svg class="wchev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5L10.5 8 6 12.5"/></svg>
+      </button>
+      <button class="hx" type="button" data-card="b" aria-label="Hide Browse your phone from Home" title="Hide from Home"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg></button>
+    </div>
+    <div class="hcard" data-card="web">
+      <button class="wentry" id="webEntry" type="button">
+        <svg class="wqrico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2v2h-2zM18 14h2v2h-2zM14 18h2v2h-2zM18 18h2v2h-2z"/></svg>
+        <span class="wtxt"><span class="wt1"><span class="dot" id="webEntryDot" hidden></span><span id="webEntryTitle">Share with a browser</span></span><span class="wt2" id="webEntrySub">Send and receive files with an iPhone, iPad, Mac or any computer. No app needed.</span></span>
+        <svg class="wchev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5L10.5 8 6 12.5"/></svg>
+      </button>
+      <button class="hx" type="button" data-card="web" aria-label="Hide Share with a browser from Home" title="Hide from Home"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg></button>
+    </div>
+    <div class="hcard" data-card="c">
+      <button class="wentry" id="cEntry" type="button" hidden>
+        <svg class="fhico" viewBox="0 0 24 24" aria-hidden="true"><rect x="5.25" y="4.25" width="13.5" height="16.5" rx="2.25"/><path d="M9 4.25V3.5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v.75M8.75 10h6.5M8.75 13.5h6.5M8.75 17h4"/></svg>
+        <span class="wtxt"><span class="wt1">Clipboard history</span><span class="wt2" id="cEntrySub">Text, links and pictures you copy show up here.</span></span>
+        <svg class="wchev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5L10.5 8 6 12.5"/></svg>
+      </button>
+      <button class="hx" type="button" data-card="c" aria-label="Hide Clipboard history from Home" title="Hide from Home"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg></button>
+    </div>
     <section id="fPairsBox" hidden>
       <h2>Synced folders</h2>
       <div class="card" id="fPairs"></div>
     </section>
-    <section class="card intro" id="intro" hidden>
-      <div class="intro-title">Welcome to Flick</div>
-      <ol>
-        <li>Install the Flick app on your Android phone.</li>
-        <li>Connect the phone and this PC to the same Wi-Fi.</li>
-        <li>Open Flick on the phone, hold it next to this screen, then press and hold Connect.</li>
-        <li>Drag a file off the edge of the phone toward the PC.</li>
-      </ol>
-      <button class="btn" id="introOk">Got it</button>
-    </section>
 
-    <h2>Animation</h2>
-    <section class="themes" id="themes">
-      <button class="theme" data-v="meteor">
-        <video src="../assets/themes/meteor.webm" muted loop playsinline preload="auto"></video>
-        <span class="tname">Meteor</span><span class="tdesc">Catches fire and crashes down</span>
-      </button>
-      <button class="theme" data-v="volt">
-        <video src="../assets/themes/volt.webm" muted loop playsinline preload="auto"></video>
-        <span class="tname">Volt</span><span class="tdesc">Jumps across on lightning</span>
-      </button>
-      <button class="theme" data-v="warp">
-        <video src="../assets/themes/warp.webm" muted loop playsinline preload="auto"></video>
-        <span class="tname">Warp</span><span class="tdesc">Flies out of a tunnel of light</span>
-      </button>
-      <button class="theme" data-v="glitch">
-        <video src="../assets/themes/glitch.webm" muted loop playsinline preload="auto"></video>
-        <span class="tname">Glitch</span><span class="tdesc">Skips across like a broken signal</span>
-      </button>
-      <button class="theme wide" data-v="surprise">
-        <svg class="ticon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5h3.2c1.6 0 3 .8 3.9 2.1l2.8 4.3c.9 1.3 2.3 2.1 3.9 2.1h3.2M3.5 16.5h3.2c1.6 0 3-.8 3.9-2.1M13.4 9.6c.9-1.3 2.3-2.1 3.9-2.1h3.2M18 5l2.5 2.5L18 10M18 14l2.5 2.5L18 19"/></svg>
-        <span class="ttxt"><span class="tname">Surprise me</span><span class="tdesc">A different one for each file</span></span>
-      </button>
-    </section>
-    <button class="link play" id="playFx">Play it on the screen</button>
-    <section class="card fxcard">
-      <div class="row"><div class="lbl">Sounds</div><label class="tog"><input type="checkbox" id="sound"><span></span></label></div>
-      <div class="row col" id="volumeRow">
-        <div class="lbl">Volume</div>
-        <input type="range" id="volume" min="0" max="1" step="0.01" aria-label="Volume">
-      </div>
-      <div class="row"><div class="lbl">Reduce effects<div class="sub0" id="reduceFxSub">Lighter animations. Flick also switches to them on its own on a PC that can’t keep up.</div></div><label class="tog"><input type="checkbox" id="reduceFx"><span></span></label></div>
-    </section>
+  </main>
 
-    <h2>Placement</h2>
-    <section class="card">
-      <div class="row">
-        <div class="lbl">Phone is on the</div>
-        <div class="seg" id="side">
-          <button data-v="left">Left</button>
-          <button data-v="right">Right</button>
-        </div>
-      </div>
-      <div class="row col">
-        <div class="lbl">Phone height <span class="sub">where the phone sits next to the screen</span></div>
-        <input type="range" id="anchor" min="0.15" max="0.85" step="0.01">
-        <div class="ticks"><span>Top</span><span>Middle</span><span>Bottom</span></div>
-      </div>
-      <div class="row col">
-        <div class="lbl">Card size on the PC</div>
-        <input type="range" id="size" min="0.7" max="1.5" step="0.05">
-      </div>
-      <div class="row" id="displayRow" hidden>
-        <div class="lbl">Screen next to the phone</div>
-        <select id="display"></select>
-      </div>
-    </section>
+  <!-- The four places (nav.js): Home is the main view; Devices, History and Settings are views over it. The bar stays
+       under every view, so any place is one click from any other. -->
+  <div class="srlive" id="navSay" role="status" aria-live="polite"></div>
+  <!-- what main has to say (panel.js): over the bar, where it shows on every one of the four places -->
+  <div class="note" id="note" hidden></div>
+  <nav class="tabs" id="tabs" aria-label="Flick">
+    <button class="tab" id="tabHome" type="button" data-tab="home" aria-current="page">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5L12 4l8 6.5V19a1 1 0 0 1-1 1h-4.5v-5.5h-5V20H5a1 1 0 0 1-1-1z"/></svg><span>Home</span>
+    </button>
+    <button class="tab" id="tabDevices" type="button" data-tab="devices">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2.75" y="5.25" width="12.5" height="9" rx="1.5"/><path d="M6.75 18.25h4.5M9 14.25v4"/><rect x="16.25" y="8.25" width="5" height="10.5" rx="1.25"/><path d="M18 16.5h1.5"/></svg><span>Devices</span><i class="tabdot" id="tabDevicesDot" role="img" aria-label="sending files" hidden></i>
+    </button>
+    <button class="tab" id="tabHistory" type="button" data-tab="history">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.25"/><path d="M12 7.5V12l3 2"/></svg><span>History</span>
+    </button>
+    <button class="tab" id="tabSettings" type="button" data-tab="settings">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2.75v2.5M12 18.75v2.5M2.75 12h2.5M18.75 12h2.5M5.46 5.46l1.77 1.77M16.77 16.77l1.77 1.77M5.46 18.54l1.77-1.77M16.77 7.23l1.77-1.77"/></svg><span>Settings</span><i class="tabdot" id="tabSettingsDot" role="img" aria-label="something new" hidden></i>
+    </button>
+  </nav>
 
-    <h2>Files</h2>
-    <section class="card">
-      <div class="row">
-        <div class="lbl">Save files to</div>
-        <select id="saveDir">
-          <option value="desktop">Desktop</option>
-          <option value="downloads">Downloads</option>
-          <option value="custom">Choose folder…</option>
-        </select>
-      </div>
-      <div class="row"><div class="lbl">Open files after they arrive</div><label class="tog"><input type="checkbox" id="openAfter"><span></span></label></div>
-      <div class="row"><div class="lbl">Show transfer speed</div><label class="tog"><input type="checkbox" id="showSpeed"><span></span></label></div>
-      <div class="row"><div class="lbl">Send PC files by dragging them to the screen edge</div><label class="tog"><input type="checkbox" id="edgeSend"><span></span></label></div>
-      <div class="row"><div class="lbl"><span id="hotkeyLbl">Send selected files with Ctrl+Alt+F</span><div class="sub0" id="hotkeySub">Select files in File Explorer or on the desktop, then press Ctrl+Alt+F.</div></div><label class="tog"><input type="checkbox" id="hotkey"><span></span></label></div>
-      <div class="row"><div class="lbl">Air grab: use this PC’s camera<div class="sub0" id="airCamSub">Files from your phone land where your hand opens, and a fist picks up the files you select here. The camera turns on for a few seconds only, while Flick is open on your phone.</div></div><label class="tog"><input type="checkbox" id="airCam"><span></span></label></div>
-      <div class="row" id="sendToRow"><div class="lbl" id="sendToLbl">Add Flick to File Explorer’s Send to menu</div><label class="tog"><input type="checkbox" id="sendTo"><span></span></label></div>
-      <div class="row" id="startupRow"><div class="lbl" id="startupLbl">Start Flick with Windows</div><label class="tog"><input type="checkbox" id="startup"><span></span></label></div>
-    </section>
-    <section id="fSetBox" hidden>
-      <h2>Phone features</h2>
+  <!-- Settings: what most people change. Everything else is on its own page, Advanced settings, one click away. -->
+  <div class="wview" id="setView" tabindex="-1" role="region" aria-labelledby="setTitle" hidden>
+    <div class="whead"><h1 class="wtitle tabtitle" id="setTitle">Settings</h1></div>
+    <div class="wbody">
+      <section class="card intro" id="news" hidden>
+        <div class="intro-title">What’s new in Flick 2.1</div>
+        <ul>
+          <li>Computer to computer and phone to phone, with everything Flick does between a phone and a PC.</li>
+          <li>One Connect button: hold it on one device, allow it on the other, tap Same code.</li>
+          <li id="newsNet">No shared Wi-Fi needed: this PC can make one for a phone, and phones find each other over Bluetooth.</li>
+          <li>Every transfer at the top of this window, with how far it’s got.</li>
+        </ul>
+        <div class="intro-btns"><button class="btn" id="newsOk">Got it</button><button class="link" id="newsAll">See everything that’s new</button></div>
+      </section>
       <div class="card">
-        <div class="row"><div class="lbl">Clipboard sync<div class="sub0">Copy on one, paste on the other. Text, links and pictures.</div></div><label class="tog"><input type="checkbox" id="fClipSync"><span></span></label></div>
-        <div class="row"><div class="lbl">Clipboard history<div class="sub0">Keeps the last 20 things copied between this PC and your phones, on this PC only. Turning it off clears it.</div></div><label class="tog"><input type="checkbox" id="fClipHist"><span></span></label></div>
-        <div class="row"><div class="lbl">Open links from your phone<div class="sub0">When off, a notification asks first.</div></div><label class="tog"><input type="checkbox" id="fOpenLinks"><span></span></label></div>
-        <div class="row"><div class="lbl">Show phone notifications<div class="sub0" id="fNotifySub">As Windows notifications. Turn it on in Flick on the phone too.</div></div><label class="tog"><input type="checkbox" id="fNotify"><span></span></label></div>
+        <div class="row">
+          <label class="lbl" for="saveDir">Save files to</label>
+          <select id="saveDir" aria-describedby="saveDirSub">
+            <option value="desktop">Desktop</option>
+            <option value="downloads">Downloads</option>
+            <option value="choose">Choose folder…</option>
+          </select>
+        </div>
+        <div class="sub0 warn" id="saveDirSub" role="status" hidden></div>
+        <div class="row col">
+          <label class="lbl" for="name">Name shown on the phone</label>
+          <input type="text" id="name" maxlength="40" spellcheck="false">
+        </div>
+        <div class="row" id="startupRow"><div class="lbl" id="startupLbl">Start Flick with Windows</div><label class="tog"><input type="checkbox" id="startup" aria-labelledby="startupLbl"><span></span></label></div>
+      </div>
+      <h3>Notifications</h3>
+      <section class="card">
+        <div class="row"><div class="lbl"><span id="xfCardLbl">Show transfer progress on screen</span><div class="sub0" id="xfCardSub">A small card in the corner of the screen while files move and this window is closed. Click it to open Flick.</div></div><label class="tog"><input type="checkbox" id="xfCard" checked aria-labelledby="xfCardLbl" aria-describedby="xfCardSub"><span></span></label></div>
+        <div class="row" id="fNotifyRow" hidden><div class="lbl"><span id="fNotifyLbl">Show phone notifications</span><div class="sub0" id="fNotifySub">As Windows notifications. Turn it on in Flick on the phone too.</div></div><label class="tog"><input type="checkbox" id="fNotify" aria-labelledby="fNotifyLbl" aria-describedby="fNotifySub"><span></span></label></div>
         <div class="row col fapps" id="fAppsRow" hidden>
           <button class="fapps-head" id="fAppsHead" type="button" aria-expanded="false" aria-controls="fApps">
             <span class="lbl">Apps<span class="sub0" id="fAppsSub"></span></span>
@@ -178,51 +169,191 @@
           </button>
           <div id="fApps" hidden></div>
         </div>
-      </div>
-    </section>
-    <h2>Connections</h2>
-    <section class="card">
-      <div class="row"><div class="lbl">Wi-Fi, USB cable and phone hotspot<div class="sub0">Used by themselves, fastest first. For the fastest transfers, plug in the phone and turn on USB tethering.</div></div></div>
-      <div class="row" id="btRow"><div class="lbl">Bluetooth<div class="sub0" id="btSub">For when there’s no network. Much slower.</div></div><label class="tog"><input type="checkbox" id="bluetooth"><span></span></label></div>
-      <div class="row"><div class="lbl">Quick Share<div class="sub0" id="qsSub">Show this PC in Android’s own Quick Share menu.</div></div><label class="tog"><input type="checkbox" id="quickShare"><span></span></label></div>
-    </section>
-    <h2>Updates</h2>
-    <section class="card">
-      <div class="row"><div class="lbl">Update Flick automatically<div class="sub0">New versions come from GitHub and install when Flick isn’t busy.</div></div><label class="tog"><input type="checkbox" id="autoUpdate"><span></span></label></div>
-      <div class="row"><div class="lbl" id="verLine">Flick</div><button class="btn ghost" id="checkNow">Check now</button></div>
-    </section>
+      </section>
+      <h3>Updates</h3>
+      <section class="card">
+        <div class="row"><div class="lbl"><span id="autoUpdateLbl">Update Flick automatically</span><div class="sub0" id="autoUpdateSub">New versions come from GitHub and install when Flick isn’t busy.</div></div><label class="tog"><input type="checkbox" id="autoUpdate" aria-labelledby="autoUpdateLbl" aria-describedby="autoUpdateSub"><span></span></label></div>
+        <div class="row"><div class="lbl"><span id="verLine">Flick</span><div class="sub0" id="updSub" role="status" hidden></div><div class="sub0 upd" id="upd" hidden><span id="updText"></span> <button class="link" id="updLink" hidden></button></div></div><button class="btn ghost" id="checkNow">Check now</button></div>
+      </section>
 
-    <h2>This PC</h2>
-    <section class="card">
-      <div class="row col">
-        <div class="lbl">Name shown on the phone</div>
-        <input type="text" id="name" maxlength="40" spellcheck="false">
-      </div>
-      <div class="row col">
-        <div class="lbl">Address <span class="sub">type this on the phone if it can't find the PC</span></div>
-        <div class="mono" id="addr">…</div>
-      </div>
-    </section>
+      <button class="wentry" id="advBtn" type="button">
+        <svg class="fhico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg>
+        <span class="wtxt"><span class="wt1">Advanced settings</span><span class="wt2" id="advSub">Animations, placement, shortcuts, Air grab and connections</span></span>
+        <svg class="wchev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5L10.5 8 6 12.5"/></svg>
+      </button>
 
-    <section id="devicesCard" hidden>
-      <h2>Paired phones</h2>
-      <div class="card" id="devices"></div>
-    </section>
+      <h3>Help</h3>
+      <section class="card helpcard">
+        <button class="link" id="homeCards" type="button" hidden>Show hidden cards on Home</button>
+        <button class="link" id="tourAgain" type="button">Show the tour again</button>
+        <button class="link" id="openFolder">Open received files</button>
+        <button class="link" id="firewall" aria-controls="fwHelp">Phone can't connect? Fix it</button>
+        <div class="note fwhelp" id="fwHelp" role="status" hidden><div id="fwHelpText"></div><div class="mono" id="fwHelpCmd" hidden></div><button class="link" id="fwHelpClose">Close</button></div>
+        <button class="link" id="fbOpen">Send feedback</button>
+        <button class="link" id="ossOpen" aria-controls="ossNote" aria-expanded="false">Open-source notices</button>
+        <div class="note fwhelp oss" id="ossNote" hidden>
+          <div>Flick is free and open source. It’s made with these, each under its own license. Click one to read its license.</div>
+          <button class="link" data-lic="flick">Flick: MIT License</button>
+          <button class="link" data-lic="electron">Electron: MIT License</button>
+          <button class="link" data-lic="chromium">Chromium and the other parts of Electron</button>
+          <button class="link" data-lic="inter">Inter typeface: SIL Open Font License 1.1</button>
+          <button class="link" data-lic="saira">Saira typeface: SIL Open Font License 1.1</button>
+          <button class="link" data-lic="mediapipe">MediaPipe hand models (Air grab): Apache License 2.0</button>
+        </div>
+      </section>
 
-    <footer class="foot">
-      <button class="link" id="openFolder">Open received files</button>
-      <button class="link" id="firewall">Phone can't connect? Fix it</button>
-      <button class="link" id="fbOpen">Send feedback</button>
-      <button class="link danger" id="quit">Quit Flick</button>
-      <div class="ver" id="ver"></div>
-      <div class="ver upd" id="upd" hidden><span id="updText"></span> <button class="link" id="updLink" hidden></button></div>
-    </footer>
-  </main>
+      <footer class="foot">
+        <button class="link danger" id="quit">Quit Flick</button>
+        <div class="ver" id="ver"></div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- Advanced settings: five groups, each on its own short page (nav.js). Nothing here is needed to send a file. -->
+  <div class="wview" id="advView" tabindex="-1" role="region" aria-labelledby="advTitle" hidden>
+    <div class="whead">
+      <button class="wback" id="advBack" type="button" title="Back"><svg viewBox="0 0 16 16"><path d="M10 3.5L5.5 8 10 12.5"/></svg></button>
+      <h1 class="wtitle" id="advTitle">Advanced settings</h1>
+    </div>
+    <div class="wbody" id="advBody">
+      <div id="advList">
+        <button class="wentry advrow" type="button" data-g="look">
+          <svg class="fhico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5l2.2 5.3 5.3 2.2-5.3 2.2L12 18.5l-2.2-5.3L4.5 11l5.3-2.2z"/></svg>
+          <span class="wtxt"><span class="wt1">Look and sound</span><span class="wt2">Animations, sounds, lighter effects</span></span>
+          <svg class="wchev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5L10.5 8 6 12.5"/></svg>
+        </button>
+        <button class="wentry advrow" type="button" data-g="place">
+          <svg class="fhico" viewBox="0 0 24 24" aria-hidden="true"><rect x="2.75" y="4.75" width="13.5" height="10" rx="1.5"/><rect x="17.75" y="7.25" width="4" height="8.5" rx="1"/><path d="M7 19h5M9.5 14.75V19"/></svg>
+          <span class="wtxt"><span class="wt1">Placement</span><span class="wt2">Where the phone sits next to the screen, card size</span></span>
+          <svg class="wchev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5L10.5 8 6 12.5"/></svg>
+        </button>
+        <button class="wentry advrow" type="button" data-g="files">
+          <svg class="fhico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3.75h8l4 4V20.25H6z"/><path d="M14 3.75v4h4M9 13h6M9 16.5h4"/></svg>
+          <span class="wtxt"><span class="wt1">Files and shortcuts</span><span class="wt2">Opening files, the keyboard shortcut, Air grab, Send to menu</span></span>
+          <svg class="wchev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5L10.5 8 6 12.5"/></svg>
+        </button>
+        <button class="wentry advrow" type="button" data-g="phone" id="advRowPhone" hidden>
+          <svg class="fhico" viewBox="0 0 24 24" aria-hidden="true"><rect x="5.25" y="4.25" width="13.5" height="16.5" rx="2.25"/><path d="M9 4.25V3.5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v.75M8.75 10h6.5M8.75 13.5h6.5"/></svg>
+          <span class="wtxt"><span class="wt1">Phone features</span><span class="wt2">Clipboard sync, clipboard history, links from your phone</span></span>
+          <svg class="wchev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5L10.5 8 6 12.5"/></svg>
+        </button>
+        <button class="wentry advrow" type="button" data-g="conn">
+          <svg class="fhico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="2.1"/><path d="M8.3 8.3a5.2 5.2 0 0 0 0 7.4M15.7 8.3a5.2 5.2 0 0 1 0 7.4M5.5 5.5a9.2 9.2 0 0 0 0 13M18.5 5.5a9.2 9.2 0 0 1 0 13"/></svg>
+          <span class="wtxt"><span class="wt1">Connections</span><span class="wt2">Bluetooth, Quick Share, this PC’s address</span></span>
+          <svg class="wchev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5L10.5 8 6 12.5"/></svg>
+        </button>
+      </div>
+
+      <section class="advg" id="advLook" data-g="look" data-title="Look and sound" hidden>
+        <section class="card">
+          <div class="row"><div class="lbl"><span id="fxLbl">Animations</span><div class="sub0" id="fxSub">Files fly across the screen as they come and go. When off, a small card in the corner shows what arrived.</div></div><label class="tog"><input type="checkbox" id="fx" aria-labelledby="fxLbl" aria-describedby="fxSub"><span></span></label></div>
+        </section>
+        <div class="fxopts" id="fxOpts">
+          <section class="themes" id="themes">
+            <button class="theme" data-v="meteor">
+              <video src="../assets/themes/meteor.webm" muted loop playsinline preload="auto"></video>
+              <span class="tname">Meteor</span><span class="tdesc">Catches fire and crashes down</span>
+            </button>
+            <button class="theme" data-v="volt">
+              <video src="../assets/themes/volt.webm" muted loop playsinline preload="auto"></video>
+              <span class="tname">Volt</span><span class="tdesc">Jumps across on lightning</span>
+            </button>
+            <button class="theme" data-v="warp">
+              <video src="../assets/themes/warp.webm" muted loop playsinline preload="auto"></video>
+              <span class="tname">Warp</span><span class="tdesc">Flies out of a tunnel of light</span>
+            </button>
+            <button class="theme" data-v="glitch">
+              <video src="../assets/themes/glitch.webm" muted loop playsinline preload="auto"></video>
+              <span class="tname">Glitch</span><span class="tdesc">Skips across like a broken signal</span>
+            </button>
+            <button class="theme wide" data-v="surprise">
+              <svg class="ticon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5h3.2c1.6 0 3 .8 3.9 2.1l2.8 4.3c.9 1.3 2.3 2.1 3.9 2.1h3.2M3.5 16.5h3.2c1.6 0 3-.8 3.9-2.1M13.4 9.6c.9-1.3 2.3-2.1 3.9-2.1h3.2M18 5l2.5 2.5L18 10M18 14l2.5 2.5L18 19"/></svg>
+              <span class="ttxt"><span class="tname">Surprise me</span><span class="tdesc">A different one for each file</span></span>
+            </button>
+          </section>
+          <button class="link play" id="playFx">Play it on the screen</button>
+          <section class="card fxcard">
+            <div class="row"><div class="lbl" id="soundLbl">Sounds</div><label class="tog"><input type="checkbox" id="sound" aria-labelledby="soundLbl"><span></span></label></div>
+            <div class="row col" id="volumeRow">
+              <div class="lbl">Volume</div>
+              <input type="range" id="volume" min="0" max="1" step="0.01" aria-label="Volume">
+            </div>
+            <div class="row"><div class="lbl"><span id="reduceFxLbl">Reduce effects</span><div class="sub0" id="reduceFxSub">Lighter animations. Flick also switches to them on its own on a PC that can’t keep up.</div></div><label class="tog"><input type="checkbox" id="reduceFx" aria-labelledby="reduceFxLbl" aria-describedby="reduceFxSub"><span></span></label></div>
+          </section>
+        </div>
+      </section>
+
+      <section class="advg" data-g="place" data-title="Placement" hidden>
+        <section class="card">
+          <div class="row">
+            <div class="lbl" id="sideLbl">Phone is on the</div>
+            <div class="seg" id="side" role="group" aria-labelledby="sideLbl">
+              <button data-v="left">Left</button>
+              <button data-v="right">Right</button>
+            </div>
+          </div>
+          <div class="row col">
+            <div class="lbl"><span id="anchorLbl">Phone height</span> <span class="sub" id="anchorSub">where the phone sits next to the screen</span></div>
+            <input type="range" id="anchor" min="0.15" max="0.85" step="0.01" aria-labelledby="anchorLbl" aria-describedby="anchorSub">
+            <div class="ticks"><span>Top</span><span>Middle</span><span>Bottom</span></div>
+          </div>
+          <div class="row col" id="sizeRow">
+            <label class="lbl" for="size">Card size on the PC</label>
+            <input type="range" id="size" min="0.7" max="1.5" step="0.05">
+          </div>
+          <div class="row" id="displayRow" hidden>
+            <label class="lbl" for="display">Screen next to the phone</label>
+            <select id="display"></select>
+          </div>
+        </section>
+      </section>
+
+      <section class="advg" data-g="files" data-title="Files and shortcuts" hidden>
+        <section class="card">
+          <div class="row"><div class="lbl" id="openAfterLbl">Open files after they arrive</div><label class="tog"><input type="checkbox" id="openAfter" aria-labelledby="openAfterLbl"><span></span></label></div>
+          <div class="row"><div class="lbl" id="showSpeedLbl">Show transfer speed</div><label class="tog"><input type="checkbox" id="showSpeed" aria-labelledby="showSpeedLbl"><span></span></label></div>
+          <div class="row"><div class="lbl" id="edgeSendLbl">Send PC files by dragging them to the screen edge</div><label class="tog"><input type="checkbox" id="edgeSend" aria-labelledby="edgeSendLbl"><span></span></label></div>
+          <div class="row"><div class="lbl"><span id="hotkeyLbl">Send selected files with Ctrl+Alt+F</span><div class="sub0" id="hotkeySub">Select files in File Explorer or on the desktop, then press Ctrl+Alt+F.</div></div><label class="tog"><input type="checkbox" id="hotkey" aria-labelledby="hotkeyLbl" aria-describedby="hotkeySub"><span></span></label></div>
+          <div class="row"><div class="lbl"><span id="airCamLbl">Air grab: use this PC’s camera</span><div class="sub0" id="airCamSub">Files from your phone land where your hand opens, and a fist picks up the files you select here. The camera turns on for a few seconds only, while Flick is open on your phone.</div></div><label class="tog"><input type="checkbox" id="airCam" aria-labelledby="airCamLbl" aria-describedby="airCamSub"><span></span></label></div>
+          <div class="row" id="sendToRow"><div class="lbl" id="sendToLbl">Add Flick to File Explorer’s Send to menu</div><label class="tog"><input type="checkbox" id="sendTo" aria-labelledby="sendToLbl"><span></span></label></div>
+        </section>
+      </section>
+
+      <section class="advg" data-g="phone" data-title="Phone features" hidden>
+        <section id="fSetBox" hidden>
+          <h3 class="srlive">Phone features</h3>
+          <div class="card">
+            <div class="row"><div class="lbl"><span id="fClipSyncLbl">Clipboard sync</span><div class="sub0" id="fClipSyncSub">Copy on one, paste on the other. Text, links and pictures.</div></div><label class="tog"><input type="checkbox" id="fClipSync" aria-labelledby="fClipSyncLbl" aria-describedby="fClipSyncSub"><span></span></label></div>
+            <div class="row"><div class="lbl"><span id="fClipHistLbl">Clipboard history</span><div class="sub0" id="fClipHistSub">Keeps the last 20 things copied between this PC and your phones, on this PC only. Turning it off clears it.</div></div><label class="tog"><input type="checkbox" id="fClipHist" aria-labelledby="fClipHistLbl" aria-describedby="fClipHistSub"><span></span></label></div>
+            <div class="row"><div class="lbl"><span id="fOpenLinksLbl">Open links from your phone</span><div class="sub0" id="fOpenLinksSub">When off, a notification asks first.</div></div><label class="tog"><input type="checkbox" id="fOpenLinks" aria-labelledby="fOpenLinksLbl" aria-describedby="fOpenLinksSub"><span></span></label></div>
+          </div>
+        </section>
+      </section>
+
+      <section class="advg" data-g="conn" data-title="Connections" hidden>
+        <section class="card">
+          <div class="row"><div class="lbl">Wi-Fi, USB cable and phone hotspot<div class="sub0">Used by themselves, fastest first. For the fastest transfers, plug in the phone and turn on USB tethering.</div></div></div>
+          <div class="row" id="btRow"><div class="lbl"><span id="btLbl">Bluetooth</span><div class="sub0" id="btSub">For when there’s no network. Much slower.</div></div><label class="tog"><input type="checkbox" id="bluetooth" aria-labelledby="btLbl" aria-describedby="btSub"><span></span></label></div>
+          <div class="row"><div class="lbl"><span id="qsLbl">Quick Share</span><div class="sub0" id="qsSub">Show this PC in Android’s own Quick Share menu.</div></div><label class="tog"><input type="checkbox" id="quickShare" aria-labelledby="qsLbl" aria-describedby="qsSub"><span></span></label></div>
+        </section>
+        <h3>This PC’s address</h3>
+        <section class="card">
+          <div class="row col">
+            <div class="lbl">Address <span class="sub">type this on the phone if it can’t find the PC</span></div>
+            <div class="mono" id="addr">…</div>
+          </div>
+        </section>
+      </section>
+    </div>
+  </div>
+  <div class="srlive" id="noteLive" role="status" aria-live="polite"></div>
+  <div class="xflive" id="xfLive" role="status" aria-live="polite"></div>
+  <div class="srlive" id="bLive" role="status" aria-live="polite"></div>
 
   <div class="modal" id="pair" hidden>
-    <div class="sheet">
-      <svg class="pair-ico" viewBox="0 0 48 48"><rect x="15" y="6" width="18" height="36" rx="4"/><path d="M21 37h6"/></svg>
-      <div class="ptitle"><span id="pairName">Phone</span> wants to connect</div>
+    <div class="sheet" role="alertdialog" aria-modal="true" aria-labelledby="pairTitle" aria-describedby="pairSub">
+      <svg class="pair-ico" id="pairIco" viewBox="0 0 48 48" aria-hidden="true"><rect x="15" y="6" width="18" height="36" rx="4"/><path d="M21 37h6"/></svg>
+      <div class="ptitle" id="pairTitle"><span id="pairName">Phone</span> <span id="pairWhat">wants to connect</span></div>
       <div class="psub" id="pairSub">Allow it to send files to this PC?</div>
       <div class="pbtns">
         <button class="btn ghost" id="deny">Don't allow</button>
@@ -232,10 +363,10 @@
   </div>
 
   <div class="modal" id="qs" hidden>
-    <div class="sheet">
-      <svg class="pair-ico" viewBox="0 0 48 48"><rect x="15" y="6" width="18" height="36" rx="4"/><path d="M24 14v13M18.5 21.5L24 27l5.5-5.5"/></svg>
-      <div class="ptitle"><span id="qsFrom">A phone</span> wants to send <span id="qsWhat">a file</span></div>
-      <div class="psub">Quick Share code <b class="pin" id="qsPin">0000</b>. Accept only if the phone shows the same code.</div>
+    <div class="sheet" role="alertdialog" aria-modal="true" aria-labelledby="qsTitle" aria-describedby="qsSubText">
+      <svg class="pair-ico" viewBox="0 0 48 48" aria-hidden="true"><rect x="15" y="6" width="18" height="36" rx="4"/><path d="M24 14v13M18.5 21.5L24 27l5.5-5.5"/></svg>
+      <div class="ptitle" id="qsTitle"><span id="qsFrom">A phone</span> wants to send <span id="qsWhat">a file</span></div>
+      <div class="psub" id="qsSubText">Quick Share code <b class="pin" id="qsPin">0000</b>. Accept only if the phone shows the same code.</div>
       <div class="qslist" id="qsList"></div>
       <div class="pbtns">
         <button class="btn ghost" id="qsDeny">Decline</button>
@@ -244,10 +375,10 @@
     </div>
   </div>
 
-  <div class="wview" id="webView" tabindex="-1" hidden>
+  <div class="wview" id="webView" tabindex="-1" role="region" aria-labelledby="webTitle" hidden>
     <div class="whead">
       <button class="wback" id="webBack" type="button" title="Back (sharing continues)"><svg viewBox="0 0 16 16"><path d="M10 3.5L5.5 8 10 12.5"/></svg></button>
-      <div class="wtitle">Share with a browser</div>
+      <h1 class="wtitle" id="webTitle">Share with a browser</h1>
     </div>
     <div class="wbody" id="webBody">
       <section id="webOn">
@@ -272,7 +403,7 @@
             <div class="lbl">Or open this address in a browser on the same network</div>
             <div class="wurl"><span class="mono" id="webUrl"></span><button class="link" id="webCopy" type="button">Copy</button></div>
           </div>
-          <div class="row" id="webNetRow"><div class="lbl">Network</div><select id="webNet"></select></div>
+          <div class="row" id="webNetRow"><label class="lbl" for="webNet">Network</label><select id="webNet"></select></div>
         </div>
         <h2>Browsers</h2>
         <div class="card" id="webBrowsers"></div>
@@ -296,9 +427,25 @@
   </div>
   <div class="drop" id="webDrop" hidden><div>Drop to share with browsers</div></div>
 
+  <div class="wview" id="peerView" tabindex="-1" role="region" aria-labelledby="peerTitle" hidden>
+    <div class="whead"><h1 class="wtitle tabtitle" id="peerTitle">Devices</h1></div>
+    <div class="wbody">
+      <div class="pintro">Your phones are here, and your other computers with Flick show up when they’re on the same network as this one. Connect a device once: after that, either one can send files to the other.</div>
+      <button class="btn pconnect" id="peerConnect" type="button">Connect a device</button>
+      <div class="card" id="peerList"></div>
+      <div class="wsmall" id="peerFoot"></div>
+      <section id="devicesCard" hidden>
+        <h3>Paired phones</h3>
+        <div class="sub0 hsub">Ask each time: files from that phone wait until you accept them here.</div>
+        <div class="card" id="devices"></div>
+      </section>
+    </div>
+  </div>
+  <div class="drop" id="peerDrop" hidden><div id="peerDropText">Drop on a device to send to it</div></div>
+
   <div class="modal" id="webAsk" hidden>
-    <div class="sheet">
-      <svg class="pair-ico" viewBox="0 0 48 48"><circle cx="24" cy="24" r="17"/><path d="M7 24h34M24 7c5 5 7 11 7 17s-2 12-7 17c-5-5-7-11-7-17s2-12 7-17z"/></svg>
+    <div class="sheet" role="alertdialog" aria-modal="true" aria-labelledby="webAskTitle" aria-describedby="webAskSub">
+      <svg class="pair-ico" viewBox="0 0 48 48" aria-hidden="true"><circle cx="24" cy="24" r="17"/><path d="M7 24h34M24 7c5 5 7 11 7 17s-2 12-7 17c-5-5-7-11-7-17s2-12 7-17z"/></svg>
       <div class="ptitle" id="webAskTitle">Let a browser send and receive files?</div>
       <div class="psub" id="webAskSub"></div>
       <div class="pbtns">
@@ -308,14 +455,13 @@
     </div>
   </div>
 
-  <div class="wview" id="fHistView" tabindex="-1" hidden>
+  <div class="wview" id="fHistView" tabindex="-1" role="region" aria-labelledby="fHistTitle" hidden>
     <div class="whead">
-      <button class="wback" id="fHistBack" type="button" title="Back"><svg viewBox="0 0 16 16"><path d="M10 3.5L5.5 8 10 12.5"/></svg></button>
-      <div class="wtitle">History</div>
+      <h1 class="wtitle tabtitle" id="fHistTitle">History</h1>
       <button class="link danger fclear" id="fHistClear" type="button" hidden>Clear</button>
     </div>
     <div class="wbody" id="fHistBody">
-      <div class="fhempty" id="fHistEmpty" hidden>
+      <div class="fhempty" id="fHistEmpty" tabindex="-1" hidden>
         <svg class="pair-ico" viewBox="0 0 48 48" aria-hidden="true"><circle cx="24" cy="24" r="17"/><path d="M24 14v10l6 4"/></svg>
         <div class="ptitle">Nothing yet</div>
         <div class="psub">Files you send to your phone and receive from it show up here.</div>
@@ -326,18 +472,18 @@
   </div>
 
   <div class="modal" id="fRing" hidden>
-    <div class="sheet">
+    <div class="sheet" role="alertdialog" aria-modal="true" aria-labelledby="fRingTitle" aria-describedby="fRingSub">
       <svg class="pair-ico fring-ico" viewBox="0 0 48 48" aria-hidden="true"><rect x="15" y="8" width="18" height="32" rx="4"/><path d="M21 35h6"/><path class="w1" d="M10 18c-2 4-2 8 0 12M38 18c2 4 2 8 0 12"/><path class="w2" d="M5 14c-4 6-4 14 0 20M43 14c4 6 4 14 0 20"/></svg>
-      <div class="ptitle">Ringing <span id="fRingName">your phone</span>…</div>
+      <div class="ptitle" id="fRingTitle">Ringing <span id="fRingName">your phone</span>…</div>
       <div class="psub" id="fRingSub">It rings at full volume for 30 seconds, even on silent.</div>
       <div class="pbtns"><button class="btn" id="fRingStop" type="button">Stop</button></div>
     </div>
   </div>
 
-  <div class="wview" id="bView" tabindex="-1" hidden>
+  <div class="wview" id="bView" tabindex="-1" role="region" aria-labelledby="bTitle" hidden>
     <div class="whead">
       <button class="wback" id="bBack" type="button" title="Back"><svg viewBox="0 0 16 16"><path d="M10 3.5L5.5 8 10 12.5"/></svg></button>
-      <div class="wtitle" id="bTitle">Your phone</div>
+      <h1 class="wtitle" id="bTitle">Your phone</h1>
       <button class="wx bref" id="bRefresh" type="button" title="Refresh" aria-label="Refresh"><svg viewBox="0 0 16 16"><path d="M13 8a5 5 0 1 1-1.46-3.54M13 3v3h-3"/></svg></button>
     </div>
     <div class="btabs" id="bTabs" role="tablist" aria-label="Show">
@@ -362,7 +508,7 @@
       <div class="bseltxt"><span id="bSelText"></span><button class="link" id="bSelClear" type="button">Clear</button></div>
       <button class="btn" id="bCopy" type="button">Copy to PC</button>
     </div>
-    <div class="bjob" id="bJob" hidden role="status">
+    <div class="bjob" id="bJob" hidden>
       <div class="bjrow">
         <div class="bjtxt"><div class="bjt" id="bJobTitle"></div><div class="bjs" id="bJobSub"></div></div>
         <button class="link" id="bJobShow" type="button" hidden>Show in folder</button>
@@ -373,14 +519,14 @@
     </div>
   </div>
 
-  <div class="wview" id="cView" tabindex="-1" hidden>
+  <div class="wview" id="cView" tabindex="-1" role="region" aria-labelledby="cTitle" hidden>
     <div class="whead">
       <button class="wback" id="cBack" type="button" title="Back"><svg viewBox="0 0 16 16"><path d="M10 3.5L5.5 8 10 12.5"/></svg></button>
-      <div class="wtitle">Clipboard history</div>
+      <h1 class="wtitle" id="cTitle">Clipboard history</h1>
       <button class="link danger fclear" id="cClear" type="button" hidden>Clear</button>
     </div>
     <div class="wbody" id="cBody">
-      <div class="fhempty" id="cEmpty" hidden>
+      <div class="fhempty" id="cEmpty" tabindex="-1" hidden>
         <svg class="pair-ico" viewBox="0 0 48 48" aria-hidden="true"><rect x="11" y="9" width="26" height="32" rx="4"/><path d="M19 9V7.5A1.5 1.5 0 0 1 20.5 6h7A1.5 1.5 0 0 1 29 7.5V9M18 20h12M18 26.5h12M18 33h7"/></svg>
         <div class="ptitle">Nothing yet</div>
         <div class="psub">Text, links and pictures copied between this PC and your phone show up here.</div>
@@ -390,10 +536,10 @@
     </div>
   </div>
 
-  <div class="wview" id="fbView" tabindex="-1" hidden>
+  <div class="wview" id="fbView" tabindex="-1" role="region" aria-labelledby="fbTitle" hidden>
     <div class="whead">
       <button class="wback" id="fbBack" type="button" title="Back"><svg viewBox="0 0 16 16"><path d="M10 3.5L5.5 8 10 12.5"/></svg></button>
-      <div class="wtitle">Send feedback</div>
+      <h1 class="wtitle" id="fbTitle">Send feedback</h1>
     </div>
     <div class="wbody" id="fbBody">
       <form id="fbForm" autocomplete="off" novalidate>
@@ -412,10 +558,21 @@
       </form>
       <section class="woff" id="fbDone" hidden>
         <svg class="pair-ico" viewBox="0 0 48 48" aria-hidden="true"><circle cx="24" cy="24" r="17"/><path d="M16.5 24.5l5 5 10-11"/></svg>
-        <div class="ptitle" id="fbDoneTitle">Thanks</div>
+        <div class="ptitle" id="fbDoneTitle" tabindex="-1">Thanks</div>
         <div class="psub" id="fbDoneText"></div>
         <button class="btn" id="fbAgain" type="button">Done</button>
       </section>
+    </div>
+  </div>
+
+  <div class="modal" id="quitAsk" hidden>
+    <div class="sheet" role="alertdialog" aria-modal="true" aria-labelledby="quitAskTitle" aria-describedby="quitAskSub">
+      <div class="ptitle" id="quitAskTitle">Files are still moving. Quit anyway?</div>
+      <div class="psub" id="quitAskSub">Quitting Flick stops them.</div>
+      <div class="pbtns">
+        <button class="btn ghost" id="quitNo" type="button">Cancel</button>
+        <button class="btn" id="quitYes" type="button">Quit</button>
+      </div>
     </div>
   </div>
 
@@ -434,12 +591,38 @@
     </div>
   </div>
 
+  <!-- the first-time tour (tour.js): under any question, over everything else -->
+  <div class="tour" id="tour" hidden>
+    <div class="thole" id="tourHole" aria-hidden="true"></div>
+    <div class="tarrow" id="tourArrow" aria-hidden="true"></div>
+    <div class="tbox" id="tourBox" role="dialog" aria-modal="true" aria-labelledby="tourTitle" aria-describedby="tourText">
+      <div aria-live="polite" aria-atomic="true">
+        <div class="tcount" id="tourCount"></div>
+        <div class="ttitle" id="tourTitle"></div>
+        <div class="ttext" id="tourText"></div>
+      </div>
+      <div class="tbtns">
+        <button class="link" id="tourSkip" type="button">Skip tour</button>
+        <button class="btn ghost" id="tourFx" type="button" hidden>Turn on animations</button>
+        <span class="tgap"></span>
+        <button class="btn ghost" id="tourBack" type="button">Back</button>
+        <button class="btn" id="tourNext" type="button">Next</button>
+      </div>
+    </div>
+  </div>
+
   <script src="panel.js"></script>
+  <script src="connect.js"></script>
   <script src="share.js"></script>
+  <script src="devices.js"></script>
   <script src="features.js"></script>
   <script src="browse.js"></script>
   <script src="clips.js"></script>
   <script src="ask.js"></script>
   <script src="feedback.js"></script>
+  <script src="xfwhy.js"></script>
+  <script src="transfers.js"></script>
+  <script src="tour.js"></script>
+  <script src="nav.js"></script>
 </body>
 </html>

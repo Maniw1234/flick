@@ -36,6 +36,10 @@ final class SpeedTest {
         // a PC that vanishes mid-test would leave a write blocked for good (writes have no timeout): cut it a little
         // after the test should have ended
         final java.util.concurrent.ScheduledExecutorService cutter = Executors.newSingleThreadScheduledExecutor();
+        // the connections open now: one that fails ends the test, and the others are cut at once (they were left
+        // writing to a PC that had stopped reading, for good, once the cuts were called off with the test)
+        final List<Wire.Call> open = java.util.Collections.synchronizedList(new ArrayList<Wire.Call>());
+        final java.util.concurrent.atomic.AtomicBoolean over = new java.util.concurrent.atomic.AtomicBoolean(false);
         try {
             // up: each connection writes for ms, then says how much the PC counted
             final AtomicLong upBytes = new AtomicLong();
@@ -46,6 +50,8 @@ final class SpeedTest {
                     @Override
                     public Void call() throws Exception {
                         final Wire.Call c = Wire.Call.open(l, "POST", "/api/speed?" + auth, Wire.CHUNKED, "application/octet-stream", 15000);
+                        open.add(c);
+                        if (over.get()) { c.close(); throw new java.io.IOException("over"); }   // (the test ended meanwhile)
                         java.util.concurrent.ScheduledFuture<?> cut = cutter.schedule(new Runnable() {
                             @Override public void run() { c.close(); }
                         }, ms + 8000, java.util.concurrent.TimeUnit.MILLISECONDS);
@@ -57,7 +63,10 @@ final class SpeedTest {
                             Wire.Answer a = c.answer(4096);
                             if (a.code != 200) throw new java.io.IOException("http " + a.code);
                             upBytes.addAndGet(a.json().optLong("bytes", 0));
-                        } finally { cut.cancel(false); c.close(); }
+                        } catch (Exception e) {
+                            cutAll(open, over);
+                            throw e;
+                        } finally { cut.cancel(false); c.close(); open.remove(c); }
                         return null;
                     }
                 }));
@@ -73,6 +82,8 @@ final class SpeedTest {
                     @Override
                     public Void call() throws Exception {
                         Wire.Call c = Wire.Call.open(l, "GET", "/api/speed?" + auth + "&bytes=" + (4L << 30), Wire.NO_BODY, null, 15000);
+                        open.add(c);
+                        if (over.get()) { c.close(); throw new java.io.IOException("over"); }
                         try {
                             int[] code = new int[1];
                             long[] len = new long[1];
@@ -82,7 +93,10 @@ final class SpeedTest {
                             long end = System.nanoTime() + ms * 1000000L;
                             int r;
                             while (System.nanoTime() < end && (r = in.read(buf)) > 0) downBytes.addAndGet(r);
-                        } finally { c.close(); }
+                        } catch (Exception e) {
+                            cutAll(open, over);
+                            throw e;
+                        } finally { c.close(); open.remove(c); }
                         return null;
                     }
                 }));
@@ -91,9 +105,18 @@ final class SpeedTest {
             double downSecs = (System.nanoTime() - t1) / 1e9;
             return new long[]{(long) (upBytes.get() / upSecs), (long) (downBytes.get() / downSecs)};
         } finally {
+            cutAll(open, over);
             pool.shutdownNow();
             cutter.shutdownNow();
         }
+    }
+
+    // the test is over: what's open is cut, and what opens from now on closes at once
+    private static void cutAll(List<Wire.Call> open, java.util.concurrent.atomic.AtomicBoolean over) {
+        over.set(true);
+        List<Wire.Call> all;
+        synchronized (open) { all = new ArrayList<Wire.Call>(open); }
+        for (Wire.Call c : all) c.close();
     }
 
     /** The test against the PC pcId at host:port over via, as JSON for the page. */
@@ -105,8 +128,10 @@ final class SpeedTest {
             String device = Bg.deviceId(c);
             wifi(c, r);
             if (token.length() == 0 || device == null) { r.put("ok", false); r.put("why", "unpaired"); return r.toString(); }
-            Wire.Link l = "bluetooth".equals(via) ? new Wire.Link("127.0.0.1", port, null) : new Wire.Link(host, port, pin);
+            // (over Bluetooth: the link to that PC the page signed in over, open now; never a port that may be another app's)
+            Wire.Link l = "bluetooth".equals(via) ? BtMux.link(pcId) : new Wire.Link(host, port, pin);
             if (!"bluetooth".equals(via) && pin.length() == 0) { r.put("ok", false); r.put("why", "unpaired"); return r.toString(); }
+            if (l == null) { r.put("ok", false); r.put("why", "unreachable"); return r.toString(); }
             Transfers.hold(c, true);                     // Wi-Fi at full speed while it measures
             long[] s;
             try { s = measure(l, "device=" + Wire.enc(device) + "&token=" + Wire.enc(token), STREAMS, MS); }

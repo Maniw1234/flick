@@ -58,16 +58,29 @@ final class Ringer {
     private static final long QUIET_MS = 2 * 60 * 1000L;
     private static volatile long quietUntil;
 
-    static void start(Context c, final int sec) {
-        if (System.currentTimeMillis() < quietUntil) return;
+    /** The PC asks. False: it won't ring (the user stopped it here a moment ago: found). */
+    static boolean start(Context c, final int sec) { return start(c, sec, null, null); }
+
+    // who's looking for it: another phone (its id and name), or null (the PC). Main thread of the ringer (h) only.
+    private static String byDevice, byName;
+
+    /** The same, asked by a paired phone (device, its name): it hears when this phone is found. false: just found, so not. */
+    static boolean start(Context c, final int sec, final String device, final String name) {
+        if (System.currentTimeMillis() < quietUntil) return false;
         final Handler hh = handler(c);
         hh.post(new Runnable() {
             @Override
             public void run() {
-                try { doStart(sec); }
+                try { byDevice = device; byName = name; doStart(sec); }
                 catch (Throwable e) { Bg.warn("ring", e); try { doStop("error"); } catch (Throwable x) { /* ignore */ } }
             }
         });
+        return true;
+    }
+
+    /** The phone that started the ringing stopped it (it gave up, or found it another way). */
+    static void stopFor(Context c, final String device) {
+        handler(c).post(new Runnable() { @Override public void run() { try { if (device != null && device.equals(byDevice)) doStop("phone"); } catch (Throwable e) { Bg.warn("ring stop", e); } } });
     }
 
     /** Stops ringing (nothing if it isn't). by: "user" (Stop, or the page's tap) or "pc" (ring-stop). Any thread. */
@@ -76,6 +89,32 @@ final class Ringer {
     }
 
     static synchronized boolean ringing() { return on; }
+
+    private static final String LEFT = "ringVolume";   // (prefs) the alarm volume to put back, while ringing has it at full
+
+    /**
+     * Flick starts (any thread, not the main one): an alarm volume it raised for ringing and never put back (it was
+     * stopped while ringing) is put back now, unless it's no longer at full (the user set it since).
+     */
+    static void restoreLeft(Context c) {
+        final Context a = c.getApplicationContext();
+        final int v;
+        try { v = Bg.prefs(a).getInt(LEFT, -1); } catch (Throwable e) { return; }
+        if (v < 0) return;
+        handler(a).post(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    synchronized (Ringer.class) { if (on) return; }          // (ringing again: put back when it stops)
+                    AudioManager am = (AudioManager) app.getSystemService(Context.AUDIO_SERVICE);
+                    if (am != null && am.getStreamVolume(AudioManager.STREAM_ALARM) == am.getStreamMaxVolume(AudioManager.STREAM_ALARM)) {
+                        am.setStreamVolume(AudioManager.STREAM_ALARM, v, 0);
+                    }
+                    Bg.prefs(app).edit().remove(LEFT).apply();
+                } catch (Throwable e) { Bg.warn("ring volume", e); }
+            }
+        });
+    }
 
     // the time is up
     private static final Runnable STOP = new Runnable() { @Override public void run() { try { doStop("timeout"); } catch (Throwable e) { Bg.warn("ring stop", e); } } };
@@ -95,6 +134,9 @@ final class Ringer {
             try {
                 savedVolume = am.getStreamVolume(AudioManager.STREAM_ALARM);
                 am.setStreamVolume(AudioManager.STREAM_ALARM, am.getStreamMaxVolume(AudioManager.STREAM_ALARM), 0);
+                // written down until it's put back: a Flick stopped while ringing (force-stopped to silence it, say)
+                // puts it back the next time it starts, rather than leaving the alarms at full volume
+                Bg.prefs(app).edit().putInt(LEFT, savedVolume).apply();
             } catch (Throwable e) { savedVolume = -1; }
             try { if (Build.VERSION.SDK_INT >= 26) focus = Api26.focus(am, aa); } catch (Throwable e) { /* plays anyway */ }
         }
@@ -102,7 +144,7 @@ final class Ringer {
         if (player == null) beep();
         vibrate(aa);
         notifyRinging();
-        Page.event("ring", "on", true);
+        Page.event("ring", "on", true, "from", byName == null ? "" : byName);
     }
 
     private static void doStop(String by) {
@@ -110,6 +152,8 @@ final class Ringer {
         if (h != null) h.removeCallbacks(STOP);
         if (h != null) h.removeCallbacks(BEEP);
         synchronized (Ringer.class) { if (!on) return; on = false; }
+        final String dev = byDevice;
+        byDevice = null; byName = null;
         try { if (player != null) { player.stop(); player.release(); } } catch (Throwable e) { /* ignore */ }
         player = null;
         try { if (tone != null) tone.release(); } catch (Throwable e) { /* ignore */ }
@@ -120,6 +164,7 @@ final class Ringer {
             try { if (savedVolume >= 0) am.setStreamVolume(AudioManager.STREAM_ALARM, savedVolume, 0); } catch (Throwable e) { /* ignore */ }
             try { if (focus != null && Build.VERSION.SDK_INT >= 26) Api26.abandon(am, focus); } catch (Throwable e) { /* ignore */ }
         }
+        try { if (savedVolume >= 0) Bg.prefs(app).edit().remove(LEFT).apply(); } catch (Throwable e) { /* ignore */ }
         savedVolume = -1;
         focus = null;
         try {
@@ -128,6 +173,11 @@ final class Ringer {
         } catch (Throwable e) { /* ignore */ }
         try { if (wake != null && wake.isHeld()) wake.release(); } catch (Throwable e) { /* ignore */ }
         Page.event("ring", "on", false, "by", by);
+        // found it here: the phone that rang it hears so (over the network: once the sound stopped, and on a thread of its
+        // own, as a stalled link can take seconds)
+        if ("user".equals(by) && dev != null) {
+            Bg.run("ring found", new Runnable() { @Override public void run() { Peers.get(app).ringStopped(dev); } });
+        }
     }
 
     /** The default alarm sound, else the ringtone, else the notification sound (Android plays those for any app). */
@@ -186,7 +236,7 @@ final class Ringer {
             int icon = Features.icon(app, "ic_stat_flick", android.R.drawable.ic_lock_idle_alarm);
             Notification.Builder b = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(app, Features.CH_RING) : new Notification.Builder(app).setPriority(Notification.PRIORITY_MAX);
             b.setSmallIcon(icon)
-                    .setContentTitle("Flick: your PC is looking for this phone")
+                    .setContentTitle(byName == null ? "Flick: your PC is looking for this phone" : "Flick: " + byName + " is looking for this phone")
                     .setContentText("Tap Stop when you've found it")
                     .setCategory(Notification.CATEGORY_ALARM)
                     .setOngoing(true)

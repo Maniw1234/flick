@@ -1,4 +1,5 @@
-/* Settings › Privacy › Lock Flick. The app does the locking (lockState, setLock, lockSetup; AppLock.java): it asks for
+/* Settings › Advanced settings › Security › Lock Flick ("Security", not "Privacy": that is the privacy policy's row in
+ * Settings › Help, privacy.js). The app does the locking (lockState, setLock, lockSetup; AppLock.java): it asks for
  * the phone's fingerprint, face or PIN when Flick opens and when it comes back after more than 30 seconds away, and
  * covers the page meanwhile. Transfers and the background features keep going; the Quick Settings tiles and the
  * widget still work while Flick is locked (they send the last photo or the clipboard and show no files). Without a
@@ -9,23 +10,19 @@
   const h = X.h;
   let asking = false;                               // turning it on: the app asks for the phone's lock first
 
-  function redraw() {
-    const s = document.getElementById('settings');
-    if (s && !s.hidden && !s.classList.contains('closing')) A.renderSettings();
-  }
   A.on('native', (e) => {
     if (e.t !== 'lock-state') return;
     const was = asking;
     asking = false;
     if (e.on && was) A.toast('Flick will ask for your fingerprint, face or PIN', 2400);
     else if (e.why === 'nosecure') A.toast('Set a screen lock on this phone first', 2400);
-    redraw();
+    X.redrawSettings();
   });
 
   A.on('settings', (body) => {
     const s = A.njson('lockState') || {};
     const g = h('section', 'sgroup');
-    g.appendChild(h('h3', '', 'Privacy'));
+    g.appendChild(h('h3', '', 'Security'));
     const card = h('div', 'scard');
     const row = h('div', 'srow');
     const lab = h('div', 'sl');

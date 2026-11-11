@@ -67,7 +67,8 @@ class AcceptGate extends EventEmitter {
   answer(id, yes) {
     const a = this.asks.find((x) => x.id === id);
     if (!a) return false;
-    a.done(yes ? { yes: true } : { yes: false, why: 'declined' });
+    // (with what the question showed when the user said yes: what's saved must be that, see main.js askedFor)
+    a.done(yes ? { yes: true, shown: { name: a.name, count: a.count, names: a.names.slice() } } : { yes: false, why: 'declined' });
     return true;
   }
 

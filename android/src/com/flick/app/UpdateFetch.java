@@ -76,7 +76,11 @@ final class UpdateFetch {
      * the way the network says.
      */
     static HttpURLConnection open(URL u) throws IOException {
-        return (HttpURLConnection) (local(u.getHost()) ? u.openConnection(Proxy.NO_PROXY) : u.openConnection());
+        if (!local(u.getHost())) return (HttpURLConnection) u.openConnection();
+        // and only while the link the URL names (its key) is open at that port: one that closed may have left the port to
+        // another app, which would get the request and the token in it (see TlsProxy.Gate.own)
+        TlsProxy.Gate.own(u);
+        return (HttpURLConnection) u.openConnection(Proxy.NO_PROXY);
     }
 
     /** host is this phone itself (127.x.x.x, localhost, ::1). */

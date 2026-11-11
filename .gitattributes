@@ -1,0 +1,24 @@
+# Line endings. The repository keeps text with LF; a checkout may have CRLF where its git is set to (Windows), except
+# where that breaks something:
+* text=auto
+
+# run by bash or sh, on Linux, a Mac, WSL or Git Bash: "#!/bin/bash\r" doesn't start
+*.sh text eol=lf
+# compared byte for byte with what a tool prints (signing/verify_apk.sh), or read line by line
+signing/*.txt text eol=lf
+*.sha256 text eol=lf
+.gitattributes text eol=lf
+
+# never text, whatever their bytes look like
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ogg binary
+*.webm binary
+*.fhm binary
+*.wasm binary
+*.apk binary
+*.aab binary

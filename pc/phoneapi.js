@@ -24,16 +24,17 @@ const ROUTES = {
   '/api/browse': 'POST',
 };
 
-/** An http(s) link a phone or the user gave, normalized, or null. */
-function cleanUrl(v) {
+/** An http(s) link a phone or the user gave, normalized, or null. max: its longest (what phones and other computers
+ * take: URL_MAX). */
+function cleanUrl(v, max = URL_MAX) {
   if (typeof v !== 'string') return null;
   const s = v.trim();
-  if (!s || s.length > URL_MAX || /[\u0000- \u007f]/.test(s)) return null;
+  if (!s || s.length > max || /[\u0000- \u007f]/.test(s)) return null;
   let u;
   try { u = new URL(s); } catch (e) { return null; }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
   if (u.username || u.password) return null;   // "https://bank.example@evil.example" reads as one site and opens another
-  return u.href.length <= URL_MAX ? u.href : null;
+  return u.href.length <= max ? u.href : null;
 }
 
 class PhoneApi {
@@ -252,6 +253,13 @@ class PhoneApi {
   // ---------- quiet uploads (POST /api/upload?quiet=1, server.js _handleUpload) ----------
   /** All of it arrived: save it like any received file (server.quietSave, set by features.js), then answer. */
   async quietDone(res, f) {
+    const [code, body, out] = await this.quietOutcome(f);
+    this.s._json(res, code, body);
+    return out;
+  }
+
+  /** quietDone's work without the answer: [status, body, {ok, why}] (a quiet transfer in parts answers its commit). */
+  async quietOutcome(f) {
     const kind = QUIET_KINDS.has(f.kind) ? f.kind : 'share';
     let r = null, err = null;
     if (this.s.quietSave) {
@@ -261,11 +269,11 @@ class PhoneApi {
     if (!r) {
       require('fs').rm(f.tmpPath, { force: true }, () => {});
       // declined on the PC ("Ask each time"), or nobody answered: the phone is told which (409 declined | timeout)
-      if (err && err.status === 409) return this.s._json(res, 409, { ok: false, error: String(err.why || 'declined') });
+      if (err && err.status === 409) return [409, { ok: false, error: String(err.why || 'declined') }, { ok: false, why: 'declined' }];
       this.s.emit('log', 'a file sent quietly could not be saved: ' + (err ? err.message : 'nothing saves it'));
-      return this.s._json(res, err ? 500 : 503, { ok: false, error: err ? 'save' : 'not ready' });
+      return [err ? 500 : 503, { ok: false, error: err ? 'save' : 'not ready' }, { ok: false, why: 'save' }];
     }
-    this.s._json(res, 200, { ok: true, tid: f.tid, name: r.name, where: r.where || '' });
+    return [200, { ok: true, tid: f.tid, name: r.name, where: r.where || '' }, { ok: true }];
   }
 
   // ---------- folder sync (sync.js) ----------
@@ -280,7 +288,8 @@ class PhoneApi {
     if (!sy) return;
     const b = await this._readJson(req, JSON_MAX);
     if (b.error) return this._refuse(req, res, b.code, b.error);
-    const r = await sy.pair(device, this.nameOf(device), b.obj.name);
+    // again: the phone makes the pair again on its own (it heard "no pair"), rather than its user adding the folder
+    const r = await sy.pair(device, this.nameOf(device), b.obj.name, b.obj.again === 1 || b.obj.again === true);
     this.s._json(res, 200, { ok: true, pair: r.id, folder: r.folder });
   }
 
@@ -288,16 +297,22 @@ class PhoneApi {
     const sy = await this._sync(req, res);
     if (!sy) return;
     const f = await sy.open(device, q.get('pair'), q.get('p'));
+    // the phone went while the file was looked up: it's closed again (nothing would ever close it)
+    if (res.destroyed) { await f.fh.close().catch(() => {}); return; }
     // a sync under way: Flick doesn't restart for an update while the phone fetches a file
     let counted = true;
     const over = () => { if (counted) { counted = false; sy.active--; } };
     sy.active++;
     res.once('close', over);
-    if (res.destroyed) over();
     this.s._cors(res);
     res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': f.size, 'X-Flick-Mtime': String(f.mtime), 'Cache-Control': 'no-store' });
     if (!f.size) { await f.fh.close().catch(() => {}); res.end(); sy.sent(device, this.nameOf(device), f); return; }
-    const rs = f.fh.createReadStream({ start: 0, end: f.size - 1, highWaterMark: 1024 * 1024 });
+    // (over Bluetooth in 64 KB reads, as a download's are: the stall watch counts reads, and a slow shared link moves 1 MB
+    // in minutes)
+    const bt = !!(req.socket && req.socket.remoteFamily === 'bluetooth');
+    const rs = f.fh.createReadStream({ start: 0, end: f.size - 1, highWaterMark: bt ? 64 * 1024 : 1024 * 1024 });
+    // a phone that stops reading (frozen app, Doze) is let go like any download: else the sync looks busy for good
+    this.s._watchDownload(res, rs);
     let n = 0;
     rs.on('data', (c) => { n += c.length; });
     rs.on('error', () => { try { res.destroy(); } catch (e) { /* ignore */ } });
@@ -313,10 +328,11 @@ class PhoneApi {
     if (!Number.isSafeInteger(mtime) || mtime < 0 || !Number.isSafeInteger(size) || size < 0) return this._refuse(req, res, 400, 'bad request');
     const clen = req.headers['content-length'];
     if (clen !== undefined && Number(clen) !== size) return this._refuse(req, res, 400, 'size');
-    if (!this.s._roomFor(size)) return this._refuse(req, res, 507, 'no space');
+    // (room on the drive of the pair's own folder, where the file is written: not the staging folder's)
+    if (!this.s._roomFor(size, sy.folderOf ? sy.folderOf(device, q.get('pair')) : null)) return this._refuse(req, res, 507, 'no space');
     const r = await sy.put(device, this.nameOf(device), q.get('pair'), q.get('p'), mtime, size, req);
-    this.s._json(res, 200, { ok: true, stored: r.stored });
+    this.s._json(res, 200, r.same ? { ok: true, stored: r.stored, same: true } : { ok: true, stored: r.stored });
   }
 }
 
-module.exports = { PhoneApi, cleanUrl, MEDIA_KEYS };
+module.exports = { PhoneApi, cleanUrl, MEDIA_KEYS, URL_MAX };

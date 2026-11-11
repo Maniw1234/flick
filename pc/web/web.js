@@ -19,7 +19,7 @@
   })();
 
   let sid = store.get(SK);
-  // connecting | pending | busy | ok | denied | expired | removed | gone | ended
+  // connecting | pending | busy | full | ok | denied | expired | removed | gone | ended
   let state = 'connecting';
   let pc = '', device = '', v = 0, where = '', isOffline = false;
   let code = '';   // while asking: the code the PC's prompt shows too
@@ -53,6 +53,18 @@
     return s;
   }
 
+  // ------------------------------------------------------------------ what screen readers are told
+  // One polite place (#say): each screen once as it comes (a countdown isn't read again every second), how the files
+  // sent went (once a pick or drop has all gone), and files the PC adds. The same words twice are still said twice.
+  let sayT = null;
+  function say(text) {
+    const el = $('say');
+    clearTimeout(sayT);
+    if (el.textContent === text) { el.textContent = ''; sayT = setTimeout(() => { el.textContent = text; }, 120); } else el.textContent = text;
+  }
+  let lastSaid = '';
+  function sayScreen(key, text) { if (key !== lastSaid) { lastSaid = key; say(text); } }
+
   // ------------------------------------------------------------------ screens
   let denyUntil = 0, denyT = null;
   function denyWait(sec) {
@@ -61,7 +73,9 @@
     if (sec > 0) denyT = setInterval(() => { if (state !== 'denied' || Date.now() >= denyUntil + 1000) clearInterval(denyT); render(); }, 1000);
   }
 
-  function msg(kind, title, text, btn, shownCode) {
+  // key: what makes it a new screen to be read out (by default its words)
+  function msg(kind, title, text, btn, shownCode, key) {
+    sayScreen(key || title + '|' + (text || '') + '|' + (shownCode || ''), title + '. ' + (shownCode ? 'Code ' + shownCode.split('').join(' ') + '. ' : '') + (text || ''));
     $('main').hidden = true;
     $('msg').hidden = false;
     $('msg').className = 'msg ' + kind;
@@ -80,7 +94,9 @@
     $('dot').classList.toggle('on', state === 'ok' && !isOffline);
     const sub = $('sub');
     $('banner').hidden = !(isOffline && state === 'ok');
-    $('banner').textContent = 'Can’t reach ' + P() + '. Trying again…';
+    // (written only when it changes: a live region, rewritten with the same words at each news from the PC)
+    const bt = 'Can’t reach ' + P() + '. Trying again…';
+    if ($('banner').textContent !== bt) $('banner').textContent = bt;
     if (isOffline && state !== 'ok' && !/^(denied|expired|removed|gone|ended)$/.test(state)) {
       sub.textContent = 'Not connected';
       return msg('bad', 'Can’t reach ' + P(), 'Make sure ' + thisDevice() + ' is on the same Wi-Fi or network as the PC. Trying again…');
@@ -96,11 +112,14 @@
       case 'busy':
         sub.textContent = 'Waiting for ' + P();
         return msg('wait', P() + ' is busy', 'Another device is asking to connect right now. Trying again in a moment…');
+      case 'full':
+        sub.textContent = 'Waiting for ' + P();
+        return msg('wait', 'Too many browsers on ' + P(), 'Too many browsers are connected to ' + P() + '. On ' + P() + ', disconnect one in Share with a browser: this page then asks again by itself.');
       case 'denied': {
         sub.textContent = 'Not connected';
         const left = Math.ceil((denyUntil - Date.now()) / 1000);
         return msg('bad', P() + ' didn’t allow ' + thisDevice(), left > 0 ? 'You can ask again in ' + left + (left === 1 ? ' second.' : ' seconds.') : 'You can ask again.',
-          { label: 'Ask again', disabled: left > 0, run: rejoin });
+          { label: 'Ask again', disabled: left > 0, run: rejoin }, null, 'denied|' + P() + '|' + (left > 0));
       }
       case 'expired':
         sub.textContent = 'Not connected';
@@ -116,6 +135,7 @@
       case 'ok':
       default:
         sub.textContent = 'Connected to ' + P();
+        sayScreen('ok|' + P(), 'Connected to ' + P() + '.');
         $('msg').hidden = true;
         $('main').hidden = false;
         $('where').hidden = !where;
@@ -129,7 +149,7 @@
   let retryT = null;
   async function join() {
     clearTimeout(retryT);
-    if (state !== 'busy') { state = 'connecting'; render(); }
+    if (state !== 'busy' && state !== 'full') { state = 'connecting'; render(); }
     let r;
     try { r = await call('join', { method: 'POST', json: { cid, touch: navigator.maxTouchPoints || 0 } }); } catch (e) { r = null; }
     if (!r) { offline(true); retryT = setTimeout(join, 3000); return; }
@@ -144,8 +164,8 @@
       return poll();
     }
     if (b.state === 'denied') { state = 'denied'; denyWait(b.wait || 0); return render(); }
-    // another device is being asked right now (or a hiccup): ask again shortly
-    state = 'busy'; render();
+    // another device is being asked right now, every place is taken (or a hiccup): ask again shortly
+    state = b.state === 'full' ? 'full' : 'busy'; render();
     retryT = setTimeout(join, 3000);
   }
 
@@ -211,10 +231,14 @@
     } else dropQueue();
     render();
   }
+  // why a file can't go now that this page isn't connected
+  function notConnected() {
+    return state === 'ended' ? 'Sharing has ended' : state === 'removed' ? 'Disconnected by ' + P() : 'Not connected';
+  }
   // no longer connected: files still waiting their turn won't go
   function dropQueue() {
-    const why = state === 'ended' ? 'Sharing has ended' : 'Not connected';
-    for (const it of queue.splice(0)) set(it, 'failed', why);
+    const why = notConnected();
+    for (const it of queue.splice(0)) if (it.state === 'waiting') set(it, 'failed', why);
   }
 
   // ------------------------------------------------------------------ files from the PC
@@ -252,6 +276,8 @@
       if (known && !known.has(f.id)) r.li.classList.add('new');
       ul.appendChild(r.li);
     }
+    const added = known ? files.filter((f) => !known.has(f.id)) : [];
+    if (added.length) say(P() + ' shared ' + (added.length === 1 ? added[0].name : added.length + ' files') + '.');
     known = new Set(files.map((f) => f.id));
     $('downsEmpty').hidden = files.length > 0;
   }
@@ -260,6 +286,7 @@
   const queue = [];
   let running = 0;
   const AT_ONCE = 2;
+  const BATCH_MAX = 10000;        // the most one batch holds on the PC (webshare.js _batch)
   const CHECK = 'M5 12.5l4.5 4.5L19 7.5';
 
   function addFiles(list) {
@@ -272,26 +299,34 @@
       const bar = document.createElement('span'); bar.className = 'bar';
       const fill = document.createElement('i'); bar.appendChild(fill);
       r.li.appendChild(st); r.li.appendChild(bar);
-      const it = { file, li: r.li, sz: r.sz, st, fill, state: '', batch: '' };
+      const it = { file, li: r.li, sz: r.sz, st, fill, state: '', batch: '', group: null, part: null };
       set(it, 'waiting');
       return it;
     });
+    const group = { items };
+    for (const it of items) it.group = group;
     const frag = document.createDocumentFragment();
     for (const it of items) frag.appendChild(it.li);
     $('ups').insertBefore(frag, $('ups').firstChild);
-    startBatch(items);
+    // The PC shows a batch as one card. A batch is asked for when its first file is about to go, not before: one asked
+    // for long before (a pick while another big one is still going) is closed on the PC after a minute without files,
+    // and each of its files then arrived as a batch of its own (its own card and "saved", opened there if it opens
+    // files as they arrive). For the same reason a pick of more than BATCH_MAX files goes as several batches.
+    for (let i = 0; i < items.length; i += BATCH_MAX) {
+      const part = { items: items.slice(i, i + BATCH_MAX), asked: null };
+      for (const it of part.items) { it.part = part; queue.push(it); }
+    }
+    pump();
   }
 
-  async function startBatch(items) {
-    let batch = '';
+  // the batch's id ('' if there's none: each file then goes on its own)
+  async function askBatch(part) {
     try {
-      const r = await call('batch', { method: 'POST', json: { count: items.length, bytes: items.reduce((n, it) => n + it.file.size, 0) } });
-      if (r.status === 507) { for (const it of items) set(it, 'failed', 'Not enough free space on ' + P()); return; }
-      if (r.status === 404) { for (const it of items) set(it, 'failed', 'Sharing has ended'); nudge(); return; }
-      if (r.body && r.body.batch) batch = r.body.batch;
-    } catch (e) { /* each file says for itself what happened */ }
-    for (const it of items) { it.batch = batch; queue.push(it); }
-    pump();
+      const r = await call('batch', { method: 'POST', json: { count: part.items.length, bytes: part.items.reduce((n, it) => n + it.file.size, 0) } });
+      const why = r.status === 507 ? 'Not enough free space on ' + P() : r.status === 404 ? 'Sharing has ended' : '';
+      if (why) { for (const it of part.items) if (it.state === 'waiting') set(it, 'failed', why); if (r.status === 404) nudge(); return ''; }
+      return (r.body && r.body.batch) || '';
+    } catch (e) { return ''; }      // (each file says for itself what happened)
   }
 
   function pump() {
@@ -299,8 +334,19 @@
       const it = queue.shift();
       if (it.state !== 'waiting') continue;
       running++;
-      send(it).then(() => { running--; pump(); });
+      go(it).then(() => { running--; pump(); });
     }
+  }
+
+  async function go(it) {
+    const part = it.part;
+    if (part) {
+      if (!part.asked) part.asked = askBatch(part);
+      const batch = await part.asked;
+      if (it.state !== 'waiting') return;
+      it.batch = batch;
+    }
+    return send(it);
   }
 
   function send(it) {
@@ -320,7 +366,7 @@
       x.onerror = () => {
         // the PC may have just stopped sharing: wait a moment for that news so the file says why
         nudge();
-        setTimeout(() => { set(it, 'failed', state === 'ok' ? 'Connection lost' : state === 'ended' ? 'Sharing has ended' : 'Not connected'); resolve(); }, 500);
+        setTimeout(() => { set(it, 'failed', state === 'ok' ? 'Connection lost' : notConnected()); resolve(); }, 500);
       };
       x.onabort = () => { set(it, 'failed', 'Stopped'); resolve(); };
       x.send(it.file);
@@ -330,14 +376,28 @@
   function reason(status, b) {
     const e = b && b.error;
     if (status === 507 || e === 'no space') return 'Not enough free space on ' + P();
+    if (e === 'removed') return 'Disconnected by ' + P();                // (Disconnect on the PC: sharing goes on)
     if (status === 404 || status === 410 || e === 'ended') return 'Sharing has ended';
     if (status === 403) return 'Not connected';
     if (e === 'save') return 'Couldn’t save it on ' + P();
     return 'Didn’t go through';
   }
 
+  // a pick or drop has all gone (sent or not): said once, for all of it
+  function sayGroup(g) {
+    if (!g || g.said || g.items.some((i) => i.state !== 'done' && i.state !== 'failed')) return;
+    g.said = true;
+    const ok = g.items.filter((i) => i.state === 'done'), bad = g.items.filter((i) => i.state === 'failed');
+    const one = (i) => i.file.name || 'file';
+    const parts = [];
+    if (ok.length) parts.push((ok.length === 1 ? one(ok[0]) : ok.length + ' files') + ' sent to ' + P() + '.');
+    if (bad.length) parts.push((bad.length === 1 ? one(bad[0]) : bad.length + ' files') + ' didn’t go through: ' + (bad[0].why || 'Didn’t go through') + '.');
+    say(parts.join(' '));
+  }
+
   function set(it, st, x) {
     it.state = st;
+    it.why = st === 'failed' ? x || '' : '';
     it.li.className = 'item ' + st;
     const size = fmt(it.file.size);
     if (st === 'waiting') {
@@ -355,14 +415,17 @@
     } else if (st === 'failed') {
       it.sz.textContent = x || 'Didn’t go through';
       it.st.textContent = '';
-      if (state === 'ok' && !/ended|space/.test(x || '')) {
+      // Retry, unless sharing has ended or the PC has no room: what went wrong decides, not whether the news of a
+      // Disconnect came before the file's own answer. (The list is only shown while connected, as after Connect again.)
+      if (!/^(Sharing has ended|Not enough free space)/.test(x || '')) {
         const b = document.createElement('button');
         b.className = 'pill'; b.type = 'button'; b.textContent = 'Retry';
         b.setAttribute('aria-label', 'Send ' + (it.file.name || 'file') + ' again');
-        b.onclick = () => { it.batch = ''; set(it, 'waiting'); queue.push(it); pump(); };
+        b.onclick = () => { it.batch = ''; it.part = null; it.group = { items: [it] }; set(it, 'waiting'); queue.push(it); pump(); };
         it.st.appendChild(b);
       }
     }
+    if (st === 'done' || st === 'failed') sayGroup(it.group);
   }
 
   $('pick').addEventListener('change', (e) => { addFiles(e.target.files); e.target.value = ''; });

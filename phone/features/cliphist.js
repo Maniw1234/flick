@@ -52,9 +52,19 @@
     box.appendChild(clear);
   }
 
+  // at most n characters, cut between two (an emoji cut in half showed as "�")
+  function cut(s, n) {
+    let c;
+    try { c = Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(s), (g) => g.segment); } catch (x) { c = Array.from(s); }
+    return c.length > n ? c.slice(0, n - 1).join('') + '…' : s;
+  }
+  const SEEN = /[^\s\p{Z}\p{Cc}\p{Cf}\u034F\u115F\u1160\u2800\u3164\uFFA0]/u;   // something to see
   function title(e) {
     if (e.kind === 'image') return 'Picture' + (+e.w > 0 && +e.h > 0 ? ' · ' + e.w + ' × ' + e.h : '');
-    return String(e.preview || '');
+    const p = String(e.preview || '');
+    // only blanks or invisible characters (an empty table cell, a tab, a zero-width space): the app names it so; one
+    // kept before it did still gets words a row, TalkBack and the menu can say
+    return SEEN.test(p) ? p : 'Blank text';
   }
 
   function row(e) {
@@ -67,12 +77,12 @@
     else ic.appendChild(A.svgEl(KIND[e.kind] || KIND.text));
     const tx = h('span', 'fctx');
     tx.appendChild(X.nm('b', e.kind === 'image' ? '' : 'two', title(e)));
-    const who = (e.dir === 'in' ? 'From ' : 'To ') + (e.pcName || X.pcName());
+    const who = (e.dir === 'in' ? 'From ' : 'To ') + (X.clean(e.pcName) || X.pcName());
     tx.appendChild(h('small', '', (e.kind === 'link' ? 'Link · ' : '') + who + ' · ' + A.fmtWhen(+e.time || Date.now())));
     main.append(ic, tx);
     X.press(main, () => { if (!early()) copy(e); }, () => more(e));
     const send = h('button', 'fcsend');
-    send.setAttribute('aria-label', 'Send to ' + X.pcName());
+    send.setAttribute('aria-label', X.sendLabel('Send to ') + ': ' + cut(title(e), 60));   // (which one: 20 rows said the same)
     send.appendChild(A.svgEl(A.icons.send));
     send.onclick = () => { if (!early()) sendTo(e); };
     r.append(main, send);
@@ -89,6 +99,7 @@
   // over this page's link when it's up (the PC confirms nothing, like any clipboard sent from here); otherwise the
   // app reaches the PC itself and says how it went
   function sendTo(e) {
+    if (!X.sendPc()) { X.toConnect(); return; }      // (no PC paired, or not any more: Connect)
     if (A.st.connected && A.linkAuthed() && X.newPc()) {
       const c = A.njson('clipHistoryGet', String(e.id));
       if (!c) { A.toast('That’s no longer in the clipboard history', 2200); render(); return; }
@@ -105,9 +116,9 @@
   }
 
   function more(e) {
-    A.openSheet(title(e).slice(0, 80), [
+    A.openSheet(cut(title(e), 80), [
       { label: 'Copy', icon: 'keep', run: () => copy(e) },
-      { label: 'Send to ' + X.pcName(), icon: 'send', run: () => sendTo(e) },
+      { label: X.sendLabel('Send to '), icon: 'send', run: () => sendTo(e) },
       A.has('clipHistoryRemove') ? { label: 'Remove from history', icon: 'trash', danger: true, run: () => { A.nc('clipHistoryRemove', String(e.id)); A.toast('Removed from clipboard history', 1600); } } : null,
     ]);
   }

@@ -7,7 +7,12 @@
 // Electron 44's clipboard (main process) is asynchronous and works like the web's: readText / writeText / has, and
 // read / write with ClipboardItem (pictures come out as image/png). Older Electrons were synchronous with readImage /
 // writeImage; both are handled. Looks and writes run one at a time, so a phone's clip can't cross a look in flight.
+// Each read has a time limit (clipfiles.js ask: a program that never answers would otherwise hold every look, and
+// every clip from a phone queued behind it, for good); a look that meets one ends there, seeing nothing new. On Linux
+// the looks after it read the X server directly meanwhile (clipfiles.js, clipx11.js).
 const crypto = require('crypto');
+const { ask, filesOn } = require('./clipfiles');
+const WAIT = 'ECLIPWAIT';
 
 // What password managers put next to a copied password so clipboard tools leave it alone (Windows' own clipboard
 // history and cloud clipboard skip it; so does Flick): never sent to a phone. Then macOS' mark, and Linux's (KDE's).
@@ -21,7 +26,9 @@ const sha = (b) => crypto.createHash('sha1').update(b).digest('hex');
 function isLink(t) {
   const s = String(t || '').trim();
   if (!s || s.length > 4096 || /\s/.test(s)) return false;
-  try { const u = new URL(s); return u.protocol === 'http:' || u.protocol === 'https:'; } catch (e) { return false; }
+  // (not one with a name before the host: "https://bank.example@evil.example" reads as one site and opens another;
+  // phoneapi.js cleanUrl refuses it, and so do the phone and its page)
+  try { const u = new URL(s); return (u.protocol === 'http:' || u.protocol === 'https:') && !u.username && !u.password; } catch (e) { return false; }
 }
 
 // an older Electron's picture (a NativeImage): its size and pixels (every 4th row of a large one: enough to notice a
@@ -62,6 +69,8 @@ class ClipWatch {
     this.sent = 0;
     this.q = Promise.resolve();
     this.looking = false;
+    this.based = false;         // where looking starts from was taken (see _baseline)
+    this.unanswered = false;    // the clipboard didn't answer the last look in time
     this.usable = typeof this.cb.readText === 'function';
     this.modern = typeof this.cb.read === 'function' && typeof this.cb.write === 'function' && !!this.CI;
   }
@@ -79,7 +88,8 @@ class ClipWatch {
   start() {
     if (this.timer || !this.usable) return;
     this.timer = setInterval(() => this.look(), this.every);
-    this._serial(() => this._baseline());
+    this.based = false;
+    this._serial(() => this.tick());
   }
 
   stop() { clearInterval(this.timer); this.timer = null; }
@@ -91,42 +101,45 @@ class ClipWatch {
     return this._serial(() => this.tick()).catch(() => {}).then(() => { this.looking = false; });
   }
 
-  async _text() { try { return String((await this.cb.readText()) || ''); } catch (e) { return ''; } }
+  // a read of the clipboard, in its time (a picture's bytes can take the program that has it a while to make)
+  _ask(f, ms) { return ask(this.cb, f, ms || 2000); }
+
+  async _text() { try { return String((await this._ask((c) => c.readText(), 5000)) || ''); } catch (e) { if (e && e.code === WAIT) throw e; return ''; } }
 
   // the picture on the clipboard: { fp, png() -> Buffer (≤ 6 MB) | null }, or null
   async _image() {
     try {
       if (this.modern) {
-        if (typeof this.cb.has === 'function' && !(await this.cb.has('image/png'))) return null;
-        for (const it of (await this.cb.read()) || []) {
+        if (typeof this.cb.has === 'function' && !(await this._ask((c) => c.has('image/png')))) return null;
+        for (const it of (await this._ask((c) => c.read())) || []) {
           if (!(it.types || []).includes('image/png')) continue;
-          const b = await it.getType('image/png');
+          const b = await this._ask(() => it.getType('image/png'), 15000);
           const png = Buffer.isBuffer(b) ? b : Buffer.from(await b.arrayBuffer());
-          return png.length ? { fp: sha(png), png: () => this._fit(png) } : null;
+          return png.length ? { fp: sha(png), png: (max) => this._fit(png, max) } : null;
         }
         return null;
       }
       const f = typeof this.cb.availableFormats === 'function' ? this.cb.availableFormats() : [];
       if (!f.some((x) => /^image\//i.test(x)) || typeof this.cb.readImage !== 'function') return null;
       const img = this.cb.readImage();
-      return img && !img.isEmpty() ? { fp: imageFp(img), png: () => this._fitImage(img) } : null;
-    } catch (e) { return null; }
+      return img && !img.isEmpty() ? { fp: imageFp(img), png: (max) => this._fitImage(img, max) } : null;
+    } catch (e) { if (e && e.code === WAIT) throw e; return null; }
   }
 
   // Is there a picture on the clipboard? Cheap: no bytes are read.
   async _hasImage() {
     try {
-      if (this.modern) return typeof this.cb.has === 'function' ? !!(await this.cb.has('image/png')) : true;
+      if (this.modern) return typeof this.cb.has === 'function' ? !!(await this._ask((c) => c.has('image/png'))) : true;
       const f = typeof this.cb.availableFormats === 'function' ? this.cb.availableFormats() : [];
       return f.some((x) => /^image\//i.test(x));
-    } catch (e) { return false; }
+    } catch (e) { if (e && e.code === WAIT) throw e; return false; }
   }
 
   // The picture, read (timed: see _imgEvery)
   async _readImage() {
-    const t0 = Date.now();
+    const t0 = performance.now();
     const im = await this._image();
-    this.imgAt = Date.now();
+    this.imgAt = performance.now();
     this.imgCost = this.imgAt - t0;
     return im;
   }
@@ -135,12 +148,27 @@ class ClipWatch {
   // cheaper tells): reading one can mean encoding a whole screenshot as PNG, so the more it cost, the rarer, up to 5 s
   _imgEvery() { return Math.min(5000, Math.max(this.every, this.imgCost * 20)); }
 
+  // Are there files copied in a file manager on the clipboard? (only this clipboard's own list of them counts)
+  async _files() {
+    if (!this.modern || typeof this.cb.has !== 'function') return false;
+    try { return (await filesOn(this.cb)).length > 0; } catch (e) { if (e && e.code === WAIT) throw e; return false; }
+  }
+
   async _private() {
     if (typeof this.cb.has !== 'function') return false;
     for (const f of PRIVATE_FORMATS) {
-      try { if (await this.cb.has(f)) return true; } catch (e) { /* a format this clipboard can't ask about */ }
+      try { if (await this._ask((c) => c.has(f))) return true; } catch (e) { if (e && e.code === WAIT) throw e; /* a format this clipboard can't ask about */ }
     }
     return false;
+  }
+
+  // The clipboard answered a look, or didn't (said once each way). A look it didn't answer leaves the next answered one
+  // to start afresh: what's on the clipboard then is where it starts from, not sent (it may be what was there before).
+  _answered(ok) {
+    if (!ok) this.based = false;
+    if (ok === !this.unanswered) return;
+    this.unanswered = !ok;
+    this.log(ok ? 'clipboard: answering again' : 'clipboard: not answering (a program that has it doesn’t reply): nothing copied here goes to the phone meanwhile');
   }
 
   _setLink(text) {
@@ -154,9 +182,19 @@ class ClipWatch {
     this.last.text = text ? sha(text) : '';
     this.wasWanted = !!this.wanted();
     if (this.wasWanted) { const im = await this._readImage(); this.last.img = im ? im.fp : ''; this.imgHad = !!im; }
+    this.based = true;
   }
 
+  /** One look: what's new on the clipboard goes to the phone (the first, or the first after one that wasn't answered,
+   * only notes what's there). */
   async tick() {
+    try {
+      if (this.based) await this._tick(); else await this._baseline();
+      this._answered(true);
+    } catch (e) { if (e && e.code === WAIT) this._answered(false); else throw e; }
+  }
+
+  async _tick() {
     const text = await this._text();
     this._setLink(text);
     const want = !!this.wanted();
@@ -170,7 +208,7 @@ class ClipWatch {
     // copy), or it's been a while (see _imgEvery). Otherwise it's taken to be the same one.
     let im = null, ifp = '';
     const has = await this._hasImage();
-    if (has && (textNew || !this.imgHad || Date.now() - this.imgAt >= this._imgEvery())) {
+    if (has && (textNew || !this.imgHad || performance.now() - this.imgAt >= this._imgEvery())) {
       im = await this._readImage();
       ifp = im ? im.fp : '';
     } else if (has) ifp = this.last.img;
@@ -180,6 +218,9 @@ class ClipWatch {
     this.last.img = ifp;
     // new text wins when both changed at once (Office copies a picture of the cells along with their text)
     if (textNew && text) {
+      // (files copied in a file manager come with text of their own, their paths or the file manager's own words, as
+      // Nautilus's "x-special/nautilus-clipboard copy file:///…": not text the user copied. Ctrl+Alt+F sends files.)
+      if (await this._files()) return;
       if (Buffer.byteLength(text, 'utf8') <= TEXT_MAX && this.send({ t: 'clip', kind: 'text', text })) this.sent++;
       return;
     }
@@ -189,18 +230,18 @@ class ClipWatch {
     }
   }
 
-  // PNG of at most 6 MB: a picture too large for that (a 4K screenshot) is sent smaller
-  _fit(png) {
-    if (png.length <= PNG_MAX) return png;
+  // PNG of at most 6 MB (or max): a picture too large for that (a 4K screenshot) is sent smaller
+  _fit(png, max = PNG_MAX) {
+    if (png.length <= max) return png;
     if (!this.ni) { this.log('clipboard picture too large to send'); return null; }
-    return this._fitImage(this.ni.createFromBuffer(png));
+    return this._fitImage(this.ni.createFromBuffer(png), max);
   }
 
-  _fitImage(img) {
+  _fitImage(img, max = PNG_MAX) {
     let im = img;
     for (let i = 0; i < 5 && im && !im.isEmpty(); i++) {
       const png = im.toPNG();
-      if (png.length <= PNG_MAX) return png;
+      if (png.length <= max) return png;
       const { width, height } = im.getSize();
       im = im.resize({ width: Math.max(1, Math.round(width * 0.7)), height: Math.max(1, Math.round(height * 0.7)) });
     }
@@ -221,12 +262,16 @@ class ClipWatch {
       if (!im || im.isEmpty()) return false;
       this.cb.writeImage(im);
     } else return false;
-    const t = await this._text();
-    this.last.text = t ? sha(t) : '';
-    this._setLink(t);
-    const im = kind === 'text' ? null : await this._readImage();
-    this.imgHad = !!im;
-    this.last.img = im ? im.fp : '';
+    // (read back as the next look will see it. A clipboard not answering reads: the next look that's answered starts
+    // afresh, so what was just put there isn't sent back)
+    try {
+      const t = await this._text();
+      this.last.text = t ? sha(t) : '';
+      this._setLink(t);
+      const im = kind === 'text' ? null : await this._readImage();
+      this.imgHad = !!im;
+      this.last.img = im ? im.fp : '';
+    } catch (e) { if (e && e.code === WAIT) this.based = false; else throw e; }
     return true;
   }
 }

@@ -4,17 +4,29 @@
 #toast { z-index: 85; }
 
 /* ---------------- full pages: History, Synced folders (like Settings) ---------------- */
-.fpage { position: fixed; inset: 0; z-index: 66; background: #000; display: flex; flex-direction: column; animation: slidein .26s cubic-bezier(.2,.9,.25,1); }
+.fpage { position: fixed; top: 0; right: 0; bottom: 0; left: 0; inset: 0; z-index: 66; background: #000; display: flex; flex-direction: column; animation: slidein .26s cubic-bezier(.2,.9,.25,1); }
 .fpage.closing { animation: slideout .2s ease forwards; }
+.fshield { position: fixed; top: 0; right: 0; bottom: 0; left: 0; inset: 0; z-index: 65; }   /* (a moment after a page closes: under it, above Settings and the rest; core.js) */
 .fhdr { display: flex; align-items: center; gap: 4px; padding: calc(var(--top) + 8px) 16px 4px; flex: none; }
-.ftitle { flex: 1; min-width: 0; margin: 0; font-size: 30px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ftitle { flex: 1; min-width: 0; margin: 0; font-size: calc(30px * var(--hz, 1)); font-weight: 700; letter-spacing: -0.02em; line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fact { flex: none; height: 34px; padding: 0 14px; border-radius: 17px; background: rgba(255,255,255,0.1); color: #fff; font-size: 14px; font-weight: 650; }
 .fact:active { background: rgba(255,255,255,0.18); }
 .fact:disabled { opacity: .35; }
 .fbody { flex: 1; overflow-y: auto; padding: 0 16px calc(var(--bottom) + 28px); -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
 .fpage :focus-visible, .fring :focus-visible, #sheet .fkey:focus-visible, #fPickBar :focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 .frow .fmain:focus-visible, .frow .fmore:focus-visible { outline-offset: -3px; border-radius: 14px; }   /* inside the card */
-@media (max-width: 380px) { .ftitle { font-size: 25px; } }
+@media (max-width: 380px) { .ftitle { font-size: calc(25px * var(--hz, 1)); } }
+/* Large text (Android's font size, 125% and up: app.js sets html.bigtext; --hz keeps the biggest headings from growing as
+   much as the rest): a page's title takes two lines beside its action, and a row's name has the row's width, its time or
+   its buttons under it. Beside them, "Synced fol…", "Galax…" and "IMG_…" were all that showed at 200%. */
+.bigtext .ftitle { white-space: normal; overflow-wrap: break-word; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.bigtext .ftx .ftop { flex-wrap: wrap; row-gap: 2px; }
+.bigtext .ftx small { white-space: normal; word-break: break-word; overflow-wrap: anywhere; }   /* ("Synced 1 hour a…") */
+.bigtext .ftx .ftop b { flex-basis: 100%; white-space: normal; word-break: break-word; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.bigtext .fphrow > .frow { flex-wrap: wrap; }
+.bigtext .fphrow > .frow > .fmain { flex-basis: 100%; }
+.bigtext .fphrow > .frow > .fmain ~ * { margin-bottom: 10px; }
+.bigtext .fphrow > .frow > .fmain + * { margin-left: 66px; }
 
 /* list rows (History, Synced folders) inside app.css's .scard */
 .frow { display: flex; align-items: center; position: relative; }
@@ -51,6 +63,7 @@
 .fempty .fbig { margin-top: 20px; }
 .fnote { margin-top: 16px; padding: 12px 16px; border-radius: 14px; background: #1c1c1e; color: #e5e5ea; font-size: 14px; font-weight: 550; line-height: 1.4; }
 .ffoot { margin-top: 18px; text-align: center; }
+#fSync .ftx small.fstate.fbad { white-space: normal; overflow: visible; text-overflow: clip; }   /* (why a folder couldn't sync, in full) */
 .fbig { height: 46px; padding: 0 22px 0 18px; border-radius: 23px; background: #fff; color: #000; font-size: 15.5px; font-weight: 650; display: inline-flex; align-items: center; gap: 8px; }
 .fbig:active { transform: scale(.97); }
 .fbig svg { width: 20px; height: 20px; }
@@ -66,6 +79,9 @@
 .fremote { padding: 0 16px 10px; }
 .fknote { text-align: center; color: #8e8e93; font-size: 13.5px; line-height: 1.4; margin: -2px 12px 14px; text-wrap: balance; }
 .fknote.warn { color: #e5e5ea; }
+.stitle .flhost { display: block; white-space: normal; word-break: break-word; overflow-wrap: anywhere; }
+.stitle.flhead, .bigtext .stitle.flhead { display: block; -webkit-line-clamp: none; overflow: visible; white-space: normal; }
+.fknote.flsub { font-size: 12.5px; margin: -4px 20px 10px; word-break: break-word; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .fkeys { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .fkey { height: 86px; border-radius: 20px; background: rgba(255,255,255,0.08); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px;
   color: #f2f2f7; touch-action: manipulation; transition: transform .12s ease, background .12s ease; }
@@ -75,7 +91,9 @@
 .fkey.main { background: #fff; color: #000; }
 .fkey.main span { color: #3a3a3c; }
 .fkey.main:active, .fkey.main.down { background: #d1d1d6; }
-.fkey:disabled { opacity: .3; transform: none; }
+.fkey:disabled, .fkey[aria-disabled="true"] { opacity: .3; transform: none; }
+.fkey[aria-disabled="true"]:active { background: rgba(255,255,255,0.08); }   /* (off: a press shows nothing) */
+.fkey.main[aria-disabled="true"]:active { background: #fff; }
 
 /* ---------------- folder-pick mode (file browser): "Use this folder" ---------------- */
 .fpick { position: absolute; left: 14px; right: 14px; bottom: calc(var(--bottom) + 14px); z-index: 6; animation: up .3s cubic-bezier(.2,.9,.25,1); }
@@ -92,6 +110,7 @@
   display: flex; flex-direction: column; align-items: center; justify-content: center; }
 .fpgo b { font-size: 16px; font-weight: 700; line-height: 1.15; }
 .fpgo small { max-width: 100%; margin-top: 1px; font-size: 12px; font-weight: 600; color: #48484a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bigtext .fpgo { height: auto; min-height: 52px; padding-top: 7px; padding-bottom: 7px; }   /* (its two lines at large text) */
 .fpgo:active { transform: scale(.98); }
 .fpgo:disabled { background: rgba(58,58,62,0.92); color: #c7c7cc; backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); transform: none; }
 body.fpicking #toolbar { display: none !important; }
@@ -100,7 +119,7 @@ body.fpicking .card:not(.folder) { opacity: .3; pointer-events: none; }
 body.fpicking #scroller { padding-bottom: calc(var(--bottom) + 130px); }
 
 /* ---------------- ringing: "Your PC is looking for this phone" ---------------- */
-.fring { position: fixed; inset: 0; z-index: 95; background: #000; overflow: hidden; display: flex; flex-direction: column; align-items: center;
+.fring { position: fixed; top: 0; right: 0; bottom: 0; left: 0; inset: 0; z-index: 95; background: #000; overflow: hidden; display: flex; flex-direction: column; align-items: center;
   padding: calc(var(--top) + 24px) 24px calc(var(--bottom) + 26px); text-align: center; animation: fadein .25s ease; }
 .fring.closing { animation: fadeout .24s ease forwards; }
 .frglow { position: absolute; left: 50%; top: 36%; width: 150vmin; height: 150vmin; margin: -75vmin 0 0 -75vmin; border-radius: 50%; pointer-events: none;
@@ -108,7 +127,7 @@ body.fpicking #scroller { padding-bottom: calc(var(--bottom) + 130px); }
 @keyframes fbreathe { 50% { opacity: .2; transform: scale(.92); } }
 .frbody { position: relative; flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; }
 .frpulse { position: relative; width: 120px; height: 120px; display: grid; place-items: center; margin-bottom: 44px; }
-.frpulse i { position: absolute; inset: 0; border-radius: 50%; border: 2px solid var(--ring); opacity: 0; animation: fpulse 2.4s cubic-bezier(.2,.6,.3,1) infinite; }
+.frpulse i { position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; border-radius: 50%; border: 2px solid var(--ring); opacity: 0; animation: fpulse 2.4s cubic-bezier(.2,.6,.3,1) infinite; }
 .frpulse i:nth-child(2) { animation-delay: .8s; }
 .frpulse i:nth-child(3) { animation-delay: 1.6s; }
 @keyframes fpulse { 0% { transform: scale(.7); opacity: .9; } 100% { transform: scale(2.1); opacity: 0; } }
@@ -121,21 +140,56 @@ body.fpicking #scroller { padding-bottom: calc(var(--bottom) + 130px); }
 .frstop { position: relative; flex: none; width: 100%; max-width: 380px; height: 66px; border-radius: 33px; background: #fff; color: #000;
   font-size: 21px; font-weight: 750; letter-spacing: -0.01em; box-shadow: 0 10px 44px var(--ring-glow); }
 .frstop:active { transform: scale(.97); }
+/* a short window (the phone sideways, split screen): smaller, so that Stop stays on the screen (it was half off it) */
+@media (max-height: 560px) {
+  .fring { padding-top: calc(var(--top) + 12px); padding-bottom: calc(var(--bottom) + 14px); }
+  .frpulse, .frphone { width: 72px; height: 72px; }
+  .frpulse { margin-bottom: 16px; }
+  .frphone svg { width: 38px; height: 38px; }
+  .frt { font-size: 22px; }
+  .frs { margin-top: 6px; font-size: 14px; }
+  .frstop { height: 54px; font-size: 19px; }
+}
 @media (prefers-reduced-motion: reduce) {
   .frglow, .frphone, .frpulse i { animation: none; }
   .frpulse i:first-child { opacity: .5; transform: scale(1.35); }
 }
 
 /* Transfers (features/transfers.js) */
-.fxbar { display: block; height: 3px; margin-top: 8px; border-radius: 2px; background: rgba(255,255,255,0.12); overflow: hidden; }
-.fxbar i { display: block; height: 100%; background: #fff; transform-origin: 0 50%; transition: transform .35s ease; }
+/* (how far, a fill that glides and is never longer than the bar: rounded itself, not clipped by the bar. Gliding inside a
+   rounded clip, it was drawn again with everything around it at every frame, for each transfer moving: with many, most
+   of the page's work) */
+.fxbar { display: block; height: 3px; margin-top: 8px; border-radius: 2px; background: rgba(255,255,255,0.12); }
+.fxbar i { display: block; height: 100%; border-radius: 2px; background: #fff; transform-origin: 0 50%; transition: transform .35s ease; }
 .fxpaused .fxbar i, .fxwaiting .fxbar i { background: #8e8e93; }
+/* the size isn't known yet: a piece of the bar slides across (a transform: nothing is laid out again) */
+.fxbar.ind { overflow: hidden; }
+.fxbar.ind i { width: 40%; border-radius: 0; animation: fxind 1.3s ease-in-out infinite; }
+@keyframes fxind { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+@media (prefers-reduced-motion: reduce) { .fxbar.ind i { animation: none; opacity: .45; } }
+
+/* Settings › Transfers (transfers.js): what moves now, at the top */
+.fmvset .scard .frow + .srow::before, .fmvset .scard .srow + .frow::before { content: ''; position: absolute; left: 16px; right: 0; top: 0; height: 0.5px; background: rgba(255,255,255,0.1); }
+.fmvset .srow.fmvnone .sl b { color: #8e8e93; font-weight: 500; }
+.ftx .fbit.fname { white-space: normal; word-break: break-word; overflow-wrap: anywhere; }   /* (a device's long name wraps, two lines at most) */
+/* the Transfers page: a device's or a file's long name takes one line at most, cut at its end, so how far, how fast and
+   the time left stay in sight under it (a long name took both lines a row has); why one failed shows in full */
+#fXfers .ftx small.fwrap { -webkit-line-clamp: 3; }
+#fXfers .ftx .fbit.fname:not(.fwhy) { display: inline-flex; max-width: calc(100% - 1.2em); vertical-align: top; white-space: pre; }
+#fXfers .ftx .fbit.fname:not(.fwhy) bdi { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#fXfers .ftx small.fwrap.fbad { display: block; overflow: visible; }
+#fXfers .ffar .fxbar i { transition: none; animation-play-state: paused; }   /* (a row out of sight: its bar jumps, nothing slides) */
+.fmvrow .fmain { min-height: 64px; padding-left: 16px; }
+.fmvrow .ftx small { white-space: nowrap; }
+.fmvrow .ftx small.fwrap { -webkit-line-clamp: 3; }   /* (how far stands beside the name: a long device name may take three) */
+.fmvstop { flex: none; height: 34px; padding: 0 14px; margin: 0 12px 0 4px; border-radius: 17px; background: rgba(255,255,255,0.1); color: #fff; font-size: 14.5px; font-weight: 650; }
+.fmvstop:active { transform: scale(.96); background: rgba(255,255,255,0.16); }
 .ftx small.fbad { color: #ff6961; }
 #count.busy { cursor: pointer; }
 
 /* ---------------- clipboard history (inside the sheet) ---------------- */
 .fclips .fknote { margin: -2px 16px 10px; }
-.fcl { max-height: min(56vh, 480px); overflow-y: auto; overscroll-behavior: contain; margin: 0 10px; border-radius: 16px; background: rgba(255,255,255,0.05); }
+.fcl { max-height: 56vh; max-height: min(56vh, 480px); overflow-y: auto; overscroll-behavior: contain; margin: 0 10px; border-radius: 16px; background: rgba(255,255,255,0.05); }
 .fcrow { display: flex; align-items: center; position: relative; }
 .fcrow + .fcrow::before { content: ''; position: absolute; left: 66px; right: 0; top: 0; height: 0.5px; background: rgba(255,255,255,0.1); }
 .fcmain { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; min-height: 62px; padding: 9px 4px 9px 12px; text-align: left; }
@@ -145,7 +199,7 @@ body.fpicking #scroller { padding-bottom: calc(var(--bottom) + 130px); }
 .fcic img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .fctx { flex: 1; min-width: 0; }
 .fctx b { display: block; font-size: 15px; font-weight: 600; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
-.fctx b.two { white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.fctx b.two { white-space: normal; word-break: break-word; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .fctx small { display: block; margin-top: 3px; font-size: 12.5px; line-height: 1.3; color: #8e8e93; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fcsend { flex: none; width: 46px; height: 46px; margin-right: 4px; border-radius: 23px; display: grid; place-items: center; color: #d1d1d6; }
 .fcsend:active { background: rgba(255,255,255,0.08); }
@@ -164,10 +218,10 @@ body.fpicking #scroller { padding-bottom: calc(var(--bottom) + 130px); }
 .fbseg { display: flex; }
 .fbseg button { flex: 1; padding: 9px 6px; font-size: 15px; }
 .fblbl { display: block; margin: 20px 4px 7px; font-size: 14px; font-weight: 600; color: #8e8e93; }
-.fblbl small { font-size: 13px; font-weight: 500; color: #636366; }
+.fblbl small { font-size: 13px; font-weight: 500; color: #8e8e93; }
 .fbin { display: block; width: 100%; margin: 0; padding: 12px 14px; border-radius: 14px; border: 1px solid transparent; background: #1c1c1e; color: #fff;
   font: inherit; font-size: 16px; line-height: 1.4; outline: none; resize: none; user-select: text; -webkit-user-select: text; }
-.fbin::placeholder { color: #636366; }
+.fbin::placeholder { color: #8e8e93; }   /* (the secondary grey: #636366 read at 2.8:1 on the field) */
 .fbin:focus { border-color: rgba(255,255,255,0.55); }
 textarea.fbin { min-height: 148px; }
 .fbchk { position: relative; display: flex; align-items: flex-start; gap: 12px; margin-top: 20px; padding: 0 4px; font-size: 16px; font-weight: 550; line-height: 1.3; }
@@ -178,7 +232,7 @@ textarea.fbin { min-height: 148px; }
 .fbchk input:focus-visible + .fbbox { outline: 2px solid #fff; outline-offset: 2px; }
 .fbct small { display: block; margin-top: 3px; font-size: 13px; font-weight: 500; color: #8e8e93; }
 .fbdev { margin: 9px 0 0 38px; padding: 10px 12px; border-radius: 12px; background: #1c1c1e; color: #aeaeb2; font-size: 13px; line-height: 1.4;
-  white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+  white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
 .fbdev.off { opacity: .35; }
 .fbcrash { max-height: 168px; overflow-y: auto; font-family: ui-monospace, 'Roboto Mono', monospace; font-size: 11.5px; line-height: 1.45; tab-size: 2; }
 .fbsend { display: flex; width: 100%; justify-content: center; margin-top: 26px; }
@@ -188,32 +242,38 @@ textarea.fbin { min-height: 148px; }
 .fbdone { padding: 0 30px; }
 
 /* ---------------- preview: a file full screen (above the file browser, below pages and sheets) ---------------- */
-.fpv { position: fixed; inset: 0; z-index: 64; overflow: hidden; touch-action: none; color: #fff; }
+.fpv { position: fixed; top: 0; right: 0; bottom: 0; left: 0; inset: 0; z-index: 64; overflow: hidden; overflow: clip; touch-action: none; color: #fff; }   /* (clip: it can't be scrolled
+   sideways onto the files beside the current one, preview.js) */
 .fpv :focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
-.pvbg { position: absolute; inset: 0; background: #000; }
-.pvtrack, .pvslide, .pvz { position: absolute; inset: 0; }
-.pvslide { overflow: hidden; will-change: transform; }
+.pvbg { position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; background: #000; }
+.pvtrack, .pvslide, .pvz { position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; }
+.pvslide { overflow: hidden; overflow: clip; will-change: transform; }
 .pvz { transform-origin: 50% 50%; will-change: transform; }
 .pvz.tw { transition: transform .26s cubic-bezier(.2,.9,.25,1), opacity .22s ease; }
 .pvz.fly { transition: transform .3s cubic-bezier(.5,0,.8,.45), opacity .3s ease-in; }
-.pvimg, .pvvid { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }
+.pvimg, .pvvid { position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; }
 .pvplay { position: absolute; left: 50%; top: 50%; width: 72px; height: 72px; margin: -36px 0 0 -36px; border-radius: 50%; display: grid; place-items: center; pointer-events: none;
   background: rgba(0,0,0,0.45); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); transition: opacity .2s, transform .2s; }
 .pvplay svg { width: 34px; height: 34px; margin-left: 3px; }
 .pvslide.playing .pvplay { opacity: 0; transform: scale(.85); }
 .pvslide.bad .pvplay { opacity: .35; }
-.pvdoc { position: absolute; left: 50%; top: 46%; width: min(64vw, 280px); transform: translate(-50%, -50%); text-align: center; }
+.pvdoc { position: absolute; left: 50%; top: 46%; width: 64vw; max-width: 280px; width: min(64vw, 280px); transform: translate(-50%, -50%); text-align: center; }
 .pvdpic { position: relative; aspect-ratio: .76; border-radius: 18px; overflow: hidden; background: #fbfbfd; display: grid; place-items: center; box-shadow: 0 20px 60px rgba(0,0,0,.6); }
 .pvdpic.app { aspect-ratio: 1; background: #1e1e22; }
-.pvdpic img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+.pvdpic img { position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
 .pvext { font-size: 30px; font-weight: 800; letter-spacing: .03em; color: #3a3a3c; }
 .pvdpic.app .pvext { color: #e5e5ea; }
-.pvdoc b { display: block; margin-top: 18px; font-size: 17px; font-weight: 650; line-height: 1.3; overflow-wrap: anywhere; }
+.pvdoc b { display: block; margin-top: 18px; font-size: 17px; font-weight: 650; line-height: 1.3; word-break: break-word; overflow-wrap: anywhere; }
+.pvdoc small { display: block; margin-top: 6px; font-size: 14px; font-weight: 550; line-height: 1.35; color: #a1a1a6; }   /* (a photo that can't be shown) */
+.pvimg.bad { visibility: hidden; }   /* (a thumbnail that didn't load: no broken picture's icon) */
 .pvtop { position: absolute; left: 0; right: 0; top: 0; display: flex; align-items: center; gap: 6px; padding: calc(var(--top) + 6px) 16px 28px 8px;
   background: linear-gradient(180deg, rgba(0,0,0,.72), rgba(0,0,0,0)); transition: opacity .2s; }
 .pvx { flex: none; width: 42px; height: 42px; border-radius: 21px; display: grid; place-items: center; }
 .pvx:active { background: rgba(255,255,255,.14); }
 .pvx svg { width: 24px; height: 24px; }
+.pvx[aria-disabled="true"] { opacity: .3; }   /* (the first file's Previous, the last one's Next) */
+.pvx[aria-disabled="true"]:active { background: none; }
+.pvnav + .pvnav { margin-right: -8px; }   /* (as far from the edge as Close is on its side) */
 .pvt { flex: 1; min-width: 0; }
 .pvt b { display: block; font-size: 16px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
 .pvt small { display: block; min-height: 15px; margin-top: 1px; font-size: 12.5px; font-weight: 550; color: #a1a1a6; font-variant-numeric: tabular-nums; }
@@ -227,6 +287,8 @@ textarea.fbin { min-height: 148px; }
 .pvsend { flex: 1; min-width: 0; height: 52px; padding: 0 20px; border-radius: 26px; background: #fff; color: #000; font-size: 16px; font-weight: 700;
   display: flex; align-items: center; justify-content: center; gap: 8px; white-space: nowrap; overflow: hidden; box-shadow: 0 10px 34px rgba(0,0,0,.55); }
 .pvsend span { overflow: hidden; text-overflow: ellipsis; }
+.bigtext .pvsend { height: auto; min-height: 52px; padding-top: 8px; padding-bottom: 8px; white-space: normal; line-height: 1.15; text-align: center; }   /* ("Send to De…" at 200%) */
+.bigtext .pvinfo { white-space: normal; }
 .pvsend svg { width: 22px; height: 22px; flex: none; }
 .pvsend.off { background: rgba(58,58,62,0.92); color: #fff; box-shadow: none; }
 .pvsend:active, .pvopen:active { transform: scale(.97); }
@@ -248,9 +310,9 @@ textarea.fbin { min-height: 148px; }
 .pvhint.go { background: #fff; color: #000; }
 
 /* ---------------- first-run walkthrough: a card with a small animated scene per step ---------------- */
-.ftips { position: fixed; inset: 0; z-index: 75; display: flex; align-items: center; justify-content: center; padding: 0 16px; animation: fadein .25s ease; }
+.ftips { position: fixed; top: 0; right: 0; bottom: 0; left: 0; inset: 0; z-index: 75; display: flex; align-items: center; justify-content: center; padding: 0 16px; animation: fadein .25s ease; }
 .ftips.closing { animation: fadeout .2s ease forwards; }
-.ftips::before { content: ''; position: absolute; inset: 0; background: rgba(0,0,0,0.74); }
+.ftips::before { content: ''; position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; background: rgba(0,0,0,0.74); }
 .ftips .tbox { position: relative; width: 100%; max-width: 400px; padding: 12px 12px 16px; border-radius: 28px; background: rgba(32,32,36,0.98); border: 0.5px solid rgba(255,255,255,0.09);
   box-shadow: 0 30px 80px rgba(0,0,0,.6); animation: pop .34s cubic-bezier(.2,1.3,.3,1); }
 .ftips .tskip { height: 46px; padding: 0 14px; border-radius: 23px; color: #a1a1a6; font-size: 15px; font-weight: 650; }
@@ -286,7 +348,7 @@ textarea.fbin { min-height: 148px; }
 .ftips .lift1 .c0 { animation: t1c0 3.2s infinite; }
 .ftips .tfly { left: 195px; top: 26px; z-index: 3; animation: t1fly 3.2s cubic-bezier(.3,.1,.3,1) infinite; }
 .ftips .tland { position: absolute; left: 50px; top: 29px; width: 31px; height: 26px; border-radius: 6px; opacity: 0; animation: t1land 3.2s infinite; }
-.ftips .tglow { position: absolute; inset: 0; background: radial-gradient(closest-side, rgba(255,255,255,.55), rgba(255,255,255,0)); opacity: 0; animation: t1glow 3.2s infinite; }
+.ftips .tglow { position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; background: radial-gradient(closest-side, rgba(255,255,255,.55), rgba(255,255,255,0)); opacity: 0; animation: t1glow 3.2s infinite; }
 .ftips .thand.h1 { left: 194px; top: 37px; animation: t1hand 3.2s cubic-bezier(.3,.1,.3,1) infinite; }
 @keyframes t1c0 { 0%, 8% { opacity: 1; } 9%, 95% { opacity: 0; } 100% { opacity: 1; } }
 @keyframes t1fly { 0%, 8% { transform: none; opacity: 1; box-shadow: none; } 18% { transform: scale(1.18); box-shadow: 0 6px 16px rgba(0,0,0,.6); }
@@ -327,7 +389,7 @@ textarea.fbin { min-height: 148px; }
 @keyframes t3cur { 0% { opacity: 0; transform: translate(10px, 12px); } 6%, 12% { opacity: 1; transform: none; } 46% { opacity: 1; transform: translate(92px, 4px); } 60%, 100% { opacity: 0; transform: translate(80px, 18px); } }
 @keyframes t3edge { 0%, 48% { opacity: 0; } 55% { opacity: 1; } 72%, 100% { opacity: 0; } }
 @keyframes t3new { 0%, 52% { opacity: 0; transform: translate(-24px, 26px) scale(.5); } 56% { opacity: 1; } 68% { opacity: 1; transform: scale(1.14); } 74%, 92% { opacity: 1; transform: none; } 100% { opacity: 0; transform: none; } }
-/* 4: ••• opens the menu, Settings is its last entry (the phone sits higher: the hand comes from below) */
+/* 4: ••• opens the menu, Settings is the last of the tiles at its top (the phone sits higher: the hand comes from below) */
 .ftips .tph.menu { top: -18px; }
 .ftips .menu .tc { opacity: .45; }
 .ftips .tbar { position: absolute; left: 6px; bottom: 8px; width: 46px; height: 16px; border-radius: 8px; background: rgba(255,255,255,.18); }
@@ -337,25 +399,37 @@ textarea.fbin { min-height: 148px; }
 .ftips .trow { display: flex; align-items: center; gap: 5px; height: 17.5px; padding: 0 5px; border-radius: 6px; }
 .ftips .tri { width: 7px; height: 7px; border-radius: 50%; border: 1.5px solid rgba(255,255,255,.7); flex: none; }
 .ftips .trl { height: 4.5px; width: 34px; border-radius: 3px; background: rgba(255,255,255,.55); }
-.ftips .trow.r1 .trl { width: 26px; } .ftips .trow.r2 .trl { width: 38px; } .ftips .trow.r3 .trl { width: 30px; }
-.ftips .trow.r3 { animation: t4row 3.4s infinite; }
+.ftips .trow.r1 .trl { width: 26px; } .ftips .trow.r2 .trl { width: 38px; }
+.ftips .ttiles { display: flex; height: 16px; margin-bottom: 1.5px; }
+.ftips .ttile { flex: 1; margin: 0 1.5px; border-radius: 5px; background: rgba(255,255,255,.14); }
+.ftips .ttile.t2 { animation: t4tile 3.4s infinite; }
 .ftips .thand.h4 { left: 151px; top: 122px; animation: t4hand 3.4s cubic-bezier(.3,.1,.3,1) infinite; }
 @keyframes t4more { 0%, 14% { background: rgba(255,255,255,.18); } 16%, 24% { background: #fff; } 30%, 100% { background: rgba(255,255,255,.18); } }
 @keyframes t4dot { 0%, 14% { background: #fff; } 16%, 24% { background: #000; } 30%, 100% { background: #fff; } }
 @keyframes t4sheet { 0%, 20% { transform: translateY(92px); } 34%, 82% { transform: none; } 92%, 100% { transform: translateY(92px); } }
-@keyframes t4row { 0%, 55% { background: transparent; } 58%, 82% { background: rgba(255,255,255,.18); } 90%, 100% { background: transparent; } }
+@keyframes t4tile { 0%, 55% { background: rgba(255,255,255,.14); } 58%, 82% { background: rgba(255,255,255,.5); } 90%, 100% { background: rgba(255,255,255,.14); } }
 @keyframes t4hand { 0% { transform: translate(10px, 30px); opacity: 0; } 8% { transform: none; opacity: 1; } 14% { transform: scale(.9); } 18%, 40% { transform: none; }
-  50% { transform: translate(-37px, 1px); } 54% { transform: translate(-37px, 1px) scale(.9); } 58%, 68% { transform: translate(-37px, 1px); opacity: 1; }
-  80%, 100% { transform: translate(-30px, 30px); opacity: 0; } }
+  50% { transform: translate(-5px, -55px); } 54% { transform: translate(-5px, -55px) scale(.9); } 58%, 68% { transform: translate(-5px, -55px); opacity: 1; }
+  80%, 100% { transform: translate(4px, -28px); opacity: 0; } }
 @media (prefers-reduced-motion: reduce) {
   .ftips .tstage * { animation-play-state: paused !important; animation-delay: -1.5s !important; }
 }
+/* a short window (the phone sideways, split screen): a smaller scene, so that the card and its buttons fit */
+@media (max-height: 460px) {
+  .ftips .tbox { padding-bottom: 12px; }
+  .ftips .tstagebox { height: 128px; }
+  .ftips .tstage { transform: scale(.66); }
+  .ftips .tstage.flip { transform: scale(-.66, .66); }
+  .ftips .tt { margin-top: 12px; font-size: 19px; }
+  .ftips .tl { min-height: 0; }
+  .ftips .tfoot { margin-top: 10px; }
+}
 
 /* ---------------- Air grab (air.js): the hand over the phone, the file it lights up, what the fist carries ---------------- */
-.airlayer { position: fixed; inset: 0; pointer-events: none; z-index: 66; overflow: hidden; }
+.airlayer { position: fixed; top: 0; right: 0; bottom: 0; left: 0; inset: 0; pointer-events: none; z-index: 66; overflow: hidden; }
 .airspot, .airheld, .aircatch { position: absolute; left: 0; top: 0; will-change: transform; }
 .airspot { width: 64px; height: 64px; margin: -32px 0 0 -32px; transition: transform .09s linear; }
-.airspot::before { content: ''; position: absolute; inset: 0; border-radius: 50%; border: 2px solid var(--ring);
+.airspot::before { content: ''; position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; border-radius: 50%; border: 2px solid var(--ring);
   background: radial-gradient(closest-side, var(--ring-glow), rgba(255,255,255,0) 72%); opacity: .8;
   box-shadow: 0 0 18px var(--ring-glow); transition: transform .16s cubic-bezier(.2,.9,.3,1), opacity .16s; }
 .airspot::after { content: ''; position: absolute; left: 50%; top: 50%; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%;
@@ -368,7 +442,7 @@ textarea.fbin { min-height: 148px; }
 .card.airhov .thumb { box-shadow: 0 0 0 2.5px var(--ring), 0 0 22px var(--ring-glow); }
 .airheld { width: 84px; height: 84px; margin: -42px 0 0 -42px; border-radius: 20px; background: #1c1c1e; display: grid; place-items: center;
   box-shadow: 0 0 0 2px var(--ring), 0 0 26px var(--ring-glow), 0 12px 30px rgba(0,0,0,.6); transition: transform .1s linear, opacity .2s; }
-.airheld img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; border-radius: 20px; }
+.airheld img { position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; width: 100%; height: 100%; object-fit: cover; border-radius: 20px; }
 .airheld b { font-size: 15px; font-weight: 800; letter-spacing: .02em; color: #e5e5ea; }
 .airheld .n { position: absolute; right: -10px; top: -10px; min-width: 28px; height: 28px; padding: 0 8px; border-radius: 14px; background: #fff; color: #000;
   font-size: 14px; font-weight: 800; display: grid; place-items: center; box-shadow: 0 4px 14px rgba(0,0,0,.45); }
@@ -377,10 +451,169 @@ textarea.fbin { min-height: 148px; }
 .airheld.thrown { transition: transform .4s cubic-bezier(.5,0,.75,.4), opacity .4s ease-in; opacity: 0; }
 .airheld.back { transition: transform .34s cubic-bezier(.2,.9,.25,1), opacity .2s .18s; opacity: 0; }
 .aircatch { width: 120px; height: 120px; margin: -60px 0 0 -60px; }
-.aircatch::before { content: ''; position: absolute; inset: 0; border-radius: 50%; border: 3px solid var(--ring); box-shadow: 0 0 24px var(--ring-glow);
+.aircatch::before { content: ''; position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; border-radius: 50%; border: 3px solid var(--ring); box-shadow: 0 0 24px var(--ring-glow);
   animation: aircatch .9s cubic-bezier(.2,.8,.3,1) forwards; }
 @keyframes aircatch { from { transform: scale(.25); opacity: 1; } to { transform: scale(1.5); opacity: 0; } }
 @media (prefers-reduced-motion: reduce) {
   .airheld.in, .airheld.thrown, .airheld.back { transition-duration: .01s; }
   .aircatch::before, .airspot.pop::before { animation: none; }
 }
+
+/* ---------------- other phones (phones.js) ---------------- */
+.fphrow { position: relative; }
+.fphrow + .fphrow::before { content: ''; position: absolute; left: 64px; right: 0; top: 0; height: 0.5px; background: rgba(255,255,255,0.1); z-index: 1; }
+.fphrow .fmain:disabled { opacity: 1; }
+.fphrow .ftx small.fbusy { color: #e5e5ea; }
+.fphrow .ftx small.fbad { white-space: normal; overflow: visible; text-overflow: clip; }   /* (why a send failed, in full) */
+.fphrow .ftx small.fcan { color: #e5e5ea; white-space: normal; overflow: visible; text-overflow: clip; }   /* (canceled there: said, not an error) */
+.fphrow .ftx small.fway { white-space: normal; overflow: visible; text-overflow: clip; }   /* (paired one way: what that means, in full) */
+.fphrow .fphpin:focus-visible { outline: 2px solid #fff; outline-offset: 3px; border-radius: 4px; }
+.fphrow .fxbar { max-width: 240px; }
+.fphpill { flex: none; height: 34px; min-width: 64px; padding: 0 16px; margin-right: 6px; border-radius: 17px; background: #fff; color: #000; font-size: 14.5px; font-weight: 650; }
+.fphpill:active { transform: scale(.96); }
+.fphpill.ghost { background: rgba(255,255,255,0.1); color: #fff; margin-right: 14px; }
+.fphpill + .fmore { margin-left: -4px; }
+/* pairing: the code under the phone's row */
+.fphcode { padding: 0 16px 16px 66px; }
+.fphcode > small, .fphcap { display: block; font-size: 13px; font-weight: 550; color: #8e8e93; }
+.fphpin { display: block; margin: 2px 0 6px; font-size: 40px; font-weight: 760; letter-spacing: 0.05em; line-height: 1.1; font-variant-numeric: tabular-nums;
+  background: var(--name); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.fphcode p { margin: 0; font-size: 14px; line-height: 1.4; color: #e5e5ea; }
+.fphcode .abtns { margin-top: 12px; }
+.fphcode .abtns button:active, .fphask .abtns button:active { transform: scale(.97); }
+/* looking, with nothing found yet */
+.fphwait { margin: 13vh auto 0; max-width: 300px; text-align: center; color: #8e8e93; }
+.fphwait .spin { display: block; width: 26px; height: 26px; border-width: 3px; margin: 0 auto 16px; }
+.fphwait b { display: block; color: #f2f2f7; font-size: 18px; font-weight: 700; }
+.fphwait p { margin: 6px 0 0; font-size: 14px; line-height: 1.45; }
+.fphnote { margin: 14px 8px 0; }
+/* a new device, any kind: the Connect screen */
+.fphconnect { display: block; width: calc(100% - 16px); max-width: 360px; height: 48px; margin: 18px auto 4px; border-radius: 24px;
+  background: rgba(255,255,255,0.1); color: #fff; font-size: 15.5px; font-weight: 650; }
+.fphconnect:active { transform: scale(.98); }
+.fphconnect:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+/* selecting: a phone button next to Send (connected to the PC) */
+.fphsel { flex: none; width: 52px; height: 52px; margin-right: 10px; border-radius: 26px; display: grid; place-items: center; color: #fff;
+  background: rgba(58,58,62,0.92); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
+.fphsel svg { width: 23px; height: 23px; }
+.fphsel:active { transform: scale(.95); }
+/* another phone asking to pair with this one: above pages and menus, below the ringing screen */
+/* (in a short window, split screen or a small phone, the box scrolls rather than its answers going off the screen) */
+.fphask { position: fixed; top: 0; right: 0; bottom: 0; left: 0; inset: 0; z-index: 80; display: flex; overflow-y: auto; overscroll-behavior: contain;
+  padding: 16px 22px; }
+/* (an old Android System WebView: env() can't fall back to the line before; app.css says more) */
+@supports (width: max(1px, 2px)) { .fphask { padding: max(16px, env(safe-area-inset-top)) 22px max(16px, env(safe-area-inset-bottom)); } }
+.fphask.closing { animation: fadeout .2s ease forwards; }
+.fphask .backdrop { position: fixed; background: rgba(0,0,0,0.62); }
+.fphask .box:focus { outline: none; }
+.fphask .box { position: relative; width: 100%; max-width: 420px; margin: auto; border-radius: 24px; padding: 22px 20px 20px; text-align: center;
+  background: rgba(36,36,40,0.98); border: 0.5px solid rgba(255,255,255,0.08); animation: pop .3s cubic-bezier(.2,1.3,.3,1); }
+@media (max-height: 520px) {
+  .fphask .fphaic { display: none; }
+  .fphask .fphpin { font-size: 38px; margin-bottom: 6px; }
+}
+@media (max-height: 400px) {
+  .fphask .box { padding: 14px 16px 12px; }
+  .fphask .atitle { font-size: 17px; }
+  .fphask .fphcap { margin-top: 8px; }
+  .fphask .fphpin { font-size: 32px; margin: 0 0 4px; }
+  .fphask .asub { font-size: 13.5px; line-height: 1.3; }
+  .fphask .abtns { margin-top: 10px; }
+}
+.fphaic { width: 56px; height: 56px; margin: 0 auto 12px; border-radius: 28px; display: grid; place-items: center; background: rgba(255,255,255,0.1); color: #f2f2f7; }
+.fphaic svg { width: 28px; height: 28px; }
+.fphask .atitle { font-size: 19px; line-height: 1.25; text-wrap: balance; word-break: break-word; overflow-wrap: anywhere; }
+.fphask .fphcap { margin-top: 16px; }
+.fphask .fphpin { font-size: 46px; margin: 2px 0 10px; }
+.fphask .asub { margin: 0 6px; text-wrap: balance; }
+.fphask .abtns { margin-top: 18px; }
+.fphask :focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+/* An Android System WebView older than Chromium 88 has no aspect-ratio: the preview's document is as tall as its width
+   makes it (min(64vw, 280px) / .76) another way; one older than 84 no gap in a row: margins give the space (app.css) */
+@supports not (aspect-ratio: 1) {
+  .pvdpic { height: 84.2vw; max-height: 368px; }
+  .pvdpic.app { height: 64vw; max-height: 280px; }
+}
+@supports not (appearance: none) {
+  .fprow > * + *, .pvbtns > * + * { margin-left: 10px; }
+  .fhdr > * + * { margin-left: 4px; }
+  .fmain > * + *, .fcmain > * + *, .fbchk > * + * { margin-left: 12px; }
+  .ftx .ftop > * + * { margin-left: 10px; }
+  .fbig > * + *, .pvsend > * + *, .pvvbar > * + * { margin-left: 8px; }
+  .pvtop > * + *, .pvhint > * + *, .ftips .tfoot > * + *, .ftips .tdots > * + * { margin-left: 6px; }
+  .ftips .trow > * + * { margin-left: 5px; }
+  .ftips .tmore > * + * { margin-left: 1.6px; }
+  .bigtext .ftx .ftop > * + * { margin-left: 0; margin-top: 2px; }   /* (large text: the time goes under the name) */
+  .srow.fcol > * + * { margin-left: 0; margin-top: 12px; }
+  .fkey > * + * { margin-top: 7px; }
+}
+
+/* ---------------- the first-time tour (tour.js): the screen dimmed, a real button lit, a box with an arrow ----------------
+   (under a question, .fphask at 80; over the menu and Settings. No inset, flex gap or :focus-visible alone: Android 9) */
+.ftour { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 76; }
+.ftour.nolight { background: rgba(0,0,0,0.72); }   /* (a step with no button to light: the light's shadow is the dimming) */
+.ftour .trhole { position: fixed; border-radius: 14px; box-shadow: 0 0 0 200vmax rgba(0,0,0,0.72); outline: 2.5px solid #fff; outline-offset: 0;
+  transition: left .22s cubic-bezier(.2,.9,.25,1), top .22s cubic-bezier(.2,.9,.25,1), width .22s cubic-bezier(.2,.9,.25,1), height .22s cubic-bezier(.2,.9,.25,1); }
+.ftour .trarrow { position: fixed; width: 20px; height: 12px; }
+.ftour .trarrow::before { content: ''; position: absolute; top: 0; right: 0; bottom: 0; left: 0; background: #fff; -webkit-clip-path: polygon(50% 100%, 0 0, 100% 0); clip-path: polygon(50% 100%, 0 0, 100% 0); }
+.ftour .trarrow.up::before { -webkit-clip-path: polygon(50% 0, 0 100%, 100% 100%); clip-path: polygon(50% 0, 0 100%, 100% 100%); }
+/* (very large text: the words scroll, the buttons stay in sight) */
+.ftour .trbox { position: fixed; left: 14px; right: 14px; max-width: 420px; margin: 0 auto; max-height: calc(100% - var(--top) - var(--bottom) - 12px);
+  display: flex; flex-direction: column; padding: 16px 16px 12px; border-radius: 20px; background: #1c1c1e; border: 2px solid #fff; color: #fff; box-shadow: 0 18px 50px rgba(0,0,0,.6); }
+.ftour .trsay { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.ftour .trbtns { flex: none; }
+.ftour .trcount { font-size: 13px; color: #a1a1a6; }
+.ftour .trtitle { margin-top: 3px; font-size: 19px; font-weight: 700; line-height: 1.25; }
+.ftour .trtext { margin-top: 6px; font-size: 15px; line-height: 1.4; color: #e5e5ea; }
+.ftour .trbtns { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; margin-top: 14px; }
+.ftour .trgap { flex: 1; }
+.ftour .trbtns button { min-height: 44px; margin-top: 4px; padding: 0 16px; border-radius: 22px; font-size: 15px; font-weight: 650; }
+.ftour .trskip { margin-left: -8px; color: #a1a1a6; }
+.ftour .trfx { background: rgba(255,255,255,.12); color: #fff; }
+.ftour .trback { margin-left: 8px; background: rgba(255,255,255,.12); color: #fff; }
+.ftour .trnext { margin-left: 8px; background: #fff; color: #000; }
+.ftour .trbtns button:active { background: rgba(255,255,255,.2); }
+.ftour .trnext:active { background: #d8d8dc; }
+.ftour button:focus { outline: 2px solid #fff; outline-offset: 2px; }
+.ftour button:focus:not(:focus-visible) { outline: none; }
+/* (the system set to light: the box is light, the light and arrow dark enough to see on it) */
+@media (prefers-color-scheme: light) {
+  .ftour .trbox { background: #fff; color: #000; border-color: #fff; }
+  .ftour .trcount { color: #6e6e73; }
+  .ftour .trtext { color: #1c1c1e; }
+  .ftour .trskip { color: #3a3a3c; }
+  .ftour .trback, .ftour .trfx { background: rgba(0,0,0,.08); color: #000; }
+  .ftour .trnext { background: #000; color: #fff; }
+  .ftour .trbtns button:active { background: rgba(0,0,0,.14); }
+  .ftour .trnext:active { background: #333; }
+  .ftour button:focus { outline-color: #000; }
+}
+@media (prefers-reduced-motion: reduce) { .ftour .trhole { transition: none; } }
+/* Settings › Advanced settings (app.js renderSettings): the button that opens it, and its sections */
+.sadv { display: flex; align-items: center; width: 100%; margin-top: 26px; min-height: 60px; padding: 12px 16px; border-radius: 16px; background: #1c1c1e; color: #fff; text-align: left; }
+.sadv .sl { flex: 1; min-width: 0; }
+.sadv .sl b { display: block; font-size: 16px; font-weight: 650; line-height: 1.25; }
+.sadv .sl small { display: block; margin-top: 3px; font-size: 13px; line-height: 1.32; color: #8e8e93; }
+.sadv .schev { width: 20px; height: 20px; margin-left: 12px; flex: none; color: #8e8e93; }
+.sadv:active { background: #2c2c2e; }
+.sadv:focus { outline: 2px solid #fff; outline-offset: 2px; }
+.sadv:focus:not(:focus-visible) { outline: none; }
+
+/* Get Flick for your PC (getpc.js), Privacy (privacy.js) and Notifications on your PC (settings.js): pages of text */
+.gp { padding: 8px 4px 0; font-size: 16px; line-height: 1.45; color: #d1d1d6; }
+.gp p { margin: 0 0 14px; }
+.gp .gpintro { font-size: 17px; color: #fff; }
+.gpsteps { margin: 6px 0 22px; padding-left: 22px; }
+.gpsteps li { margin-bottom: 14px; padding-left: 4px; }
+.gpaddr { margin-top: 8px; padding: 12px 14px; border-radius: 14px; background: #1c1c1e; color: #fff; font-size: 15.5px; font-weight: 600; -webkit-user-select: text; user-select: text; }
+.gpsend { display: flex; width: 100%; justify-content: center; margin: 6px 0 10px; }
+.gp .gpnote { font-size: 13.5px; color: #8e8e93; text-align: center; }
+.gpno { display: block; margin: 4px auto 0; }
+.pvh { margin: 22px 0 8px; font-size: 17px; font-weight: 650; color: #fff; }
+.pvl { margin: 0 0 14px; padding-left: 20px; }
+.pvl li { margin-bottom: 10px; }
+.pvl b { color: #fff; font-weight: 600; }
+
+/* Open-source notices (about.js): each part's license is a link that opens its text under it */
+.gp .onl { margin: 0 0 6px; }
+.ontext { margin: 6px 0 4px; padding: 12px; border-radius: 12px; background: rgba(255,255,255,0.06); color: #aeaeb2; font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-word; -webkit-user-select: text; user-select: text; }

@@ -29,7 +29,7 @@ import android.widget.TextView;
 import org.json.JSONObject;
 
 /**
- * "Lock Flick" (Settings › Privacy). When Flick opens, and when it comes back after more than 30 seconds in the
+ * "Lock Flick" (Settings › Advanced settings › Security). When Flick opens, and when it comes back after more than 30 seconds in the
  * background, a cover hides the page until the user unlocks it with the phone's own lock: fingerprint, face, or the
  * PIN, pattern or password (BiometricPrompt; Android 9 and 10 fall back to Android's PIN screen where their
  * BiometricPrompt can't ask for it). Only the page is covered: transfers, the background link, auto-send, folder sync,
@@ -39,13 +39,14 @@ import org.json.JSONObject;
  */
 final class AppLock {
     static final String KEY = "f:lock";                 // "1": on (SharedPreferences "flick", next to the features)
-    static final int REQ_UNLOCK = 45;
+    static final int REQ_UNLOCK = 46;                   // (its own number: MainActivity's and Page's requests are 41 to 45 and 48)
     private static final long AWAY_MS = 30000;
     private static final int ERROR_NEGATIVE_BUTTON = 13;      // BiometricConstants (not public in the SDK): "Use PIN"
 
     private final MainActivity a;
     private View cover;
-    private boolean locked, asking, enabling, quiet, switching;
+    private volatile boolean locked;                    // (read from other threads: Page.inFront)
+    private boolean asking, enabling, disabling, quiet, switching;
     private long awayAt;
     private CancellationSignal cancel;
 
@@ -123,9 +124,21 @@ final class AppLock {
         return o.toString();
     }
 
-    /** On: asks once first ("Confirm it's you"), so a lock nobody can open is never turned on. Answers "lock-state". */
+    /**
+     * On: asks once first ("Confirm it's you"), so a lock nobody can open is never turned on. Off: asks too, as unlocking
+     * Flick does, so whoever is handed the phone with Flick open can't just switch it off (a phone without a screen lock
+     * has nothing to ask for: off at once). The last tap wins over a question still open. Answers "lock-state".
+     */
     void set(boolean want) {
-        if (!want) { save(false); return; }
+        if (!want) {
+            enabling = false;
+            if (!on(a)) { report(false, null); return; }
+            if (!secure(a)) { save(false); return; }
+            disabling = true;
+            ask();
+            return;
+        }
+        disabling = false;
         if (!secure(a)) { report(false, "nosecure"); return; }
         if (on(a)) { report(true, null); return; }
         enabling = true;
@@ -172,12 +185,18 @@ final class AppLock {
         locked = false;
         hideCover();
         a.emitEvent("unlocked");
+        a.unlocked();
     }
 
     private void done(boolean ok) {
         if (enabling) {
             enabling = false;
             if (ok) save(true); else report(false, "cancelled");
+            return;
+        }
+        if (disabling) {
+            disabling = false;
+            if (ok) save(false); else report(true, "cancelled");
             return;
         }
         if (!locked) return;
@@ -189,10 +208,12 @@ final class AppLock {
     private void ask() {
         if (asking) return;
         if (!secure(a)) {                               // the screen lock was removed meanwhile: never shut anyone out
-            if (enabling) { enabling = false; report(false, "nosecure"); } else if (locked) unlock();
+            if (enabling) { enabling = false; report(false, "nosecure"); }
+            else if (disabling) { disabling = false; save(false); }
+            else if (locked) unlock();
             return;
         }
-        String title = enabling ? "Confirm it's you" : "Unlock Flick";
+        String title = enabling || disabling ? "Confirm it's you" : "Unlock Flick";
         asking = true;
         try {
             if (Build.VERSION.SDK_INT >= 30) Api30.prompt(this, title);
@@ -221,6 +242,7 @@ final class AppLock {
             Bg.warn("lock", e);
             asking = false;
             if (enabling) { enabling = false; report(false, "error"); }
+            else if (disabling) { disabling = false; save(false); }    // (nor could it ask to unlock: it holds nobody)
             else if (locked) { unlock(); a.toast("Flick couldn't ask for your screen lock"); }
         }
     }
@@ -290,9 +312,12 @@ final class AppLock {
     static final class Api28 {
         @SuppressWarnings("deprecation")
         static boolean biometric(Context c) {
+            // (by name: newer SDKs no longer have FingerprintManager to compile against; Android 9 still has it)
             try {
-                android.hardware.fingerprint.FingerprintManager f = (android.hardware.fingerprint.FingerprintManager) c.getSystemService(Context.FINGERPRINT_SERVICE);
-                return f != null && f.isHardwareDetected() && f.hasEnrolledFingerprints();
+                Object f = c.getSystemService("fingerprint");
+                if (f == null) return false;
+                return (Boolean) f.getClass().getMethod("isHardwareDetected").invoke(f)
+                        && (Boolean) f.getClass().getMethod("hasEnrolledFingerprints").invoke(f);
             } catch (Throwable e) { return false; }
         }
 
@@ -327,16 +352,26 @@ final class AppLock {
         cover.requestFocus();
         if (a.web != null) {
             a.web.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+            // nor with a keyboard (Bluetooth or USB): Tab and the arrow keys move the focus to any view in the window that
+            // takes it, covered or not, and the page would then take typing and Enter
+            if (webFocus < 0) webFocus = a.web.getDescendantFocusability();
+            a.web.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+            a.web.setFocusable(false);
             a.web.clearFocus();
         }
     }
+
+    private int webFocus = -1;                          // the page's own descendant focusability, while covered
 
     private void hideCover() {
         if (cover != null) cover.setVisibility(View.GONE);
         if (a.web != null) {
             a.web.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_AUTO);
+            if (webFocus >= 0) a.web.setDescendantFocusability(webFocus);
+            a.web.setFocusableInTouchMode(true);         // (and focusable, as a WebView is)
             a.web.requestFocus();
         }
+        webFocus = -1;
     }
 
     private View build() {

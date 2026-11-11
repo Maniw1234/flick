@@ -54,14 +54,17 @@ final class Have {
      * "none": the files are simply sent.
      */
     static Set<Integer> check(Wire.Link l, String auth, List<File> files, List<String> names) {
-        return check(l, auth, files, names, 0, null);
+        Set<Integer> have = check(l, auth, files, names, 0, null, null);
+        return have != null ? have : new HashSet<Integer>();
     }
 
     /**
      * The same, also asking whether the PC has room for bytes (the whole send): full[0] is set when it hasn't (it
-     * answers 507), so the send can say so before any of it goes.
+     * answers 507), so the send can say so before any of it goes. stop: (may be null) the send's Cutter: its Cancel or
+     * Pause ends the question at once. Null when the PC didn't answer (cut, stopped, gone quiet): the
+     * send asks again next time instead of taking that for "none there".
      */
-    static Set<Integer> check(Wire.Link l, String auth, List<File> files, List<String> names, long bytes, boolean[] full) {
+    static Set<Integer> check(Wire.Link l, String auth, List<File> files, List<String> names, long bytes, boolean[] full, Wire.Cutter stop) {
         Set<Integer> have = new HashSet<Integer>();
         if (files.isEmpty() && bytes <= 0) return have;
         try {
@@ -83,8 +86,11 @@ final class Have {
             // files the list names (a PC from 1.1.0 says nothing until it's done, so a kept connection is given up after a
             // few silent seconds and the list asked about once more; later ones begin the answer within 2 s)
             int n = list.length();
-            Wire.Answer a = Wire.postJson(l, "/api/have?" + auth + (bytes > 0 ? "&bytes=" + bytes : ""), body.toString(),
-                    (int) Math.min(600000L, 30000L + 100L * n));
+            Wire.Answer a;
+            try {
+                a = Wire.postJson(l, "/api/have?" + auth + (bytes > 0 ? "&bytes=" + bytes : ""), body.toString(),
+                        (int) Math.min(600000L, 30000L + 100L * n), stop);
+            } catch (IOException e) { return null; }
             if (a.code == 507 && full != null) full[0] = true;
             if (a.code != 200) return have;
             JSONObject got = a.json().optJSONObject("have");
@@ -96,7 +102,7 @@ final class Have {
                 try { mine = fingerprint(files.get(i)); } catch (IOException e) { continue; }
                 for (int k = 0; k < fps.length(); k++) if (mine.equals(fps.optString(k))) { have.add(i); break; }
             }
-        } catch (Throwable e) { /* asking failed: send them all */ }
+        } catch (Throwable e) { /* the answer can't be read: send them all */ }
         return have;
     }
 }

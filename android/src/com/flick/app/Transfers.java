@@ -33,7 +33,7 @@ import java.util.regex.Pattern;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** Moves bytes between the phone and the PC over plain HTTP on the local network. */
+/** Moves bytes between the phone and the PC: straight to the PC, encrypted (Wire), or through one of this phone's relays. */
 final class Transfers {
     interface Emitter { void emit(JSONObject o); }
 
@@ -72,6 +72,8 @@ final class Transfers {
     }
 
     private void event(String t, String key, String id, Object a, Object b, Object c) {
+        // (the same figures for what's moving: the notification, Settings › Transfers)
+        if (("up".equals(t) || "down".equals(t)) && a instanceof Long && b instanceof Long) Moving.update(("up".equals(t) ? "pc-out:" : "pc-in:") + id, (Long) a, (Long) b);
         try {
             JSONObject o = new JSONObject();
             o.put("t", t);
@@ -152,7 +154,7 @@ final class Transfers {
     static String withoutParallel(String url) { return url.replaceAll("&parallel=\\d+", "").replaceAll("\\?parallel=\\d+&?", "?"); }
 
     private void uploadFile(final String tid, final String path, final String id, final String url) {
-        final AtomicBoolean abort = new AtomicBoolean(false);
+        final AtomicBoolean abort = new AtomicBoolean(false), stopped = new AtomicBoolean(false);
         AtomicBoolean prev = aborts.put(tid, abort);
         if (prev != null) Watchdog.abort(prev);
         boolean queued = submit(ups, new Runnable() {
@@ -170,6 +172,10 @@ final class Transfers {
                     if (path != null && !Files.allowed(f)) throw new IOException("not allowed");
                     if (f == null || !f.exists()) throw new IOException("missing file");
                     long total = f.length();
+                    // (listed as moving; its Cancel, from the notification or Settings › Transfers, cuts the connections:
+                    // with the page rebuilt meanwhile, nothing else could stop it)
+                    Moving.start(ctx, "pc-out:" + tid, "out", pref("lastPc"), pref("lastPcName"), "pc", f.getName(), 1, total);
+                    cancelable(tid, abort, stopped);
                     int parts = parallelOf(url);
                     if (parts > 1 && total >= PARALLEL_MIN) {
                         final long[] last = {0};
@@ -187,13 +193,13 @@ final class Transfers {
                     c = Parallel.open(withoutParallel(url));          // (never through a network's proxy: see Parallel.open)
                     g = Watchdog.guard(abort, c);
                     c.setConnectTimeout(5000);
-                    c.setReadTimeout(60000);
+                    c.setReadTimeout(Parallel.ANSWER_MAX_MS);              // (what's still on its way at the end: see answer)
                     c.setDoOutput(true);
                     c.setUseCaches(false);
                     c.setRequestMethod("POST");
                     c.setRequestProperty("Content-Type", "application/octet-stream");
                     c.setFixedLengthStreamingMode(total);
-                    OutputStream out = g.watch(c.getOutputStream());
+                    OutputStream out = Wire.pieces(g.watch(c.getOutputStream()));
                     in = new FileInputStream(f);
                     byte[] buf = new byte[256 * 1024];
                     long sent = 0, last = 0;
@@ -208,7 +214,7 @@ final class Transfers {
                     out.flush();
                     out.close();
                     g.idle();
-                    code = c.getResponseCode();
+                    code = Parallel.answer(c, url);
                     ok = code == 200;
                     try { InputStream r = ok ? c.getInputStream() : c.getErrorStream(); if (r != null) Library.readAll(r, 64 * 1024); } catch (Throwable e) { /* ignore */ }
                     }
@@ -219,9 +225,10 @@ final class Transfers {
                     try { if (in != null) in.close(); } catch (Throwable e) { /* ignore */ }
                     if (c != null) c.disconnect();
                     aborts.remove(tid, abort);
+                    Moving.end("pc-out:" + tid, ok, !ok && stopped.get() ? "canceled" : null);
                     busy(false);
                 }
-                event("up-done", "tid", tid, ok, code, why);
+                upDone(tid, ok, code, why, !ok && stopped.get());
             }
         });
         if (!queued) { aborts.remove(tid, abort); event("up-done", "tid", tid, false, 0, "closed"); }
@@ -229,7 +236,7 @@ final class Transfers {
 
     /** Several items and/or folders in one streamed request (see Bundle). */
     void uploadBundle(final String tid, final String itemsJson, final String url) {
-        final AtomicBoolean abort = new AtomicBoolean(false);
+        final AtomicBoolean abort = new AtomicBoolean(false), stopped = new AtomicBoolean(false);
         AtomicBoolean prev = aborts.put(tid, abort);
         if (prev != null) Watchdog.abort(prev);
         boolean queued = submit(ups, new Runnable() {
@@ -244,6 +251,8 @@ final class Transfers {
                 try {
                     JSONArray arr = new JSONArray(itemsJson);
                     Bundle b = new Bundle();
+                    java.util.List<String> names = new java.util.ArrayList<String>();
+                    int plain = 0;
                     for (int i = 0; i < arr.length(); i++) {
                         JSONObject it = arr.getJSONObject(i);
                         String name = it.optString("name", "");
@@ -256,7 +265,11 @@ final class Transfers {
                         }
                         if (f == null || !f.exists()) throw new IOException("missing " + name);
                         b.add(f, name, abort);
+                        names.add(name.length() > 0 ? name : f.getName());
+                        if (!f.isDirectory()) plain++;
                     }
+                    Moving.start(ctx, "pc-out:" + tid, "out", pref("lastPc"), pref("lastPcName"), "pc", Moving.what(names, arr.length(), plain), b.files, b.bytes);
+                    cancelable(tid, abort, stopped);
                     int ways = parallelOf(url);
                     if (ways > 1 && b.bytes >= PARALLEL_MIN && b.files >= 2) {
                         // several files: dealt out over a few connections at once, like one large file's parts
@@ -274,13 +287,13 @@ final class Transfers {
                     c = Parallel.open(withoutParallel(url) + "&files=" + b.files + "&bytes=" + b.bytes);
                     g = Watchdog.guard(abort, c);
                     c.setConnectTimeout(5000);
-                    c.setReadTimeout(120000);
+                    c.setReadTimeout(Parallel.ANSWER_MAX_MS);
                     c.setDoOutput(true);
                     c.setUseCaches(false);
                     c.setRequestMethod("POST");
                     c.setRequestProperty("Content-Type", "application/x-flick-bundle");
                     c.setChunkedStreamingMode(256 * 1024);
-                    OutputStream out = new BufferedOutputStream(g.watch(c.getOutputStream()), 256 * 1024);
+                    OutputStream out = new BufferedOutputStream(Wire.pieces(g.watch(c.getOutputStream())), 256 * 1024);
                     final long[] last = {0};
                     b.write(out, abort, new Bundle.Progress() {
                         @Override
@@ -291,7 +304,7 @@ final class Transfers {
                     });
                     out.close();
                     g.idle();
-                    code = c.getResponseCode();
+                    code = Parallel.answer(c, url);
                     ok = code == 200;
                     try { InputStream r = ok ? c.getInputStream() : c.getErrorStream(); if (r != null) Library.readAll(r, 64 * 1024); } catch (Throwable e) { /* ignore */ }
                     }
@@ -301,13 +314,34 @@ final class Transfers {
                     if (g != null) g.close();
                     if (c != null) c.disconnect();
                     aborts.remove(tid, abort);
+                    Moving.end("pc-out:" + tid, ok, !ok && stopped.get() ? "canceled" : null);
                     busy(false);
                 }
-                event("up-done", "tid", tid, ok, code, why);
+                upDone(tid, ok, code, why, !ok && stopped.get());
             }
         });
         if (!queued) { aborts.remove(tid, abort); event("up-done", "tid", tid, false, 0, "closed"); }
     }
+
+    // An upload's Cancel in the notification and Settings › Transfers: it stops at once (its connections cut)
+    private static void cancelable(String tid, final AtomicBoolean abort, final AtomicBoolean stopped) {
+        Moving.onCancel("pc-out:" + tid, new Runnable() { @Override public void run() { stopped.set(true); Watchdog.abort(abort); } });
+    }
+
+    // canceled from the transfer list: the page puts its cards back quietly (no retry, no "couldn't send"), as for a send
+    // of the app's own
+    private void upDone(String tid, boolean ok, int code, String why, boolean canceled) {
+        if (!canceled) { event("up-done", "tid", tid, ok, code, why); return; }
+        try {
+            JSONObject o = new JSONObject();
+            o.put("t", "up-done"); o.put("tid", tid); o.put("ok", false); o.put("code", code); o.put("why", "canceled");
+            o.put("final", true); o.put("canceled", true);
+            em.emit(o);
+        } catch (Throwable e) { /* ignore */ }
+    }
+
+    // the PC the page is connected to (or was last): its id and name, as the page keeps them
+    private String pref(String k) { try { return Bg.prefs(ctx).getString("p:" + k, ""); } catch (Throwable e) { return ""; } }
 
     /** Stops an upload now: its connections are cut, so even a write the PC stopped reading ends at once. */
     void abort(String tid) {
@@ -316,6 +350,9 @@ final class Transfers {
     }
 
     void download(final String fid, final String rawUrl, final String name, final String sizeHint, final String mime) {
+        // the PC it comes from, as it's asked for: the page may switch to another PC while it waits its turn or comes,
+        // and History named that one
+        final String pcId = pref("lastPc"), pcName = pref("lastPcName");
         boolean queued = submit(downs, new Runnable() {
             @Override
             public void run() {
@@ -326,10 +363,16 @@ final class Transfers {
                 Watchdog.Guard g = null;
                 String why = null;
                 final String url = withoutParallel(rawUrl);
+                long hint = 0;
+                try { hint = Long.parseLong(sizeHint); } catch (Throwable e) { /* unknown */ }
+                // listed as moving (its notification, Settings › Transfers); its Cancel cuts the connections, and what
+                // arrived of it goes
+                final String key = "pc-in:" + fid;
+                final AtomicBoolean abort = new AtomicBoolean(false), stopped = new AtomicBoolean(false);
+                Moving.start(ctx, key, "in", pcId, pcName, "pc", name, 1, hint > 0 ? hint : -1);
+                Moving.onCancel(key, new Runnable() { @Override public void run() { stopped.set(true); Watchdog.abort(abort); } });
                 busy(true);
                 try {
-                    long hint = 0;
-                    try { hint = Long.parseLong(sizeHint); } catch (Throwable e) { /* unknown */ }
                     int ways = parallelOf(rawUrl);
                     // straight to the PC when the page's URL is an encrypted link's (or Bluetooth's) local port
                     Object[] direct = Wire.direct(url);
@@ -348,8 +391,8 @@ final class Transfers {
                                     synchronized (last) { if (now - last[0] > 120 || done == tot) { last[0] = now; event("down", "fid", fid, done, tot, null); } }
                                 }
                             };
-                            if (direct != null) Parallel.downloadDirect((Wire.Link) direct[0], (String) direct[1], dest.part, hint, ways > 1 ? Math.max(ways, 4) : 1, prog);
-                            else Parallel.download(url, dest.part, hint, ways, prog);
+                            if (direct != null) Parallel.downloadDirect((Wire.Link) direct[0], (String) direct[1], dest.part, hint, ways > 1 ? Math.max(ways, 4) : 1, prog, abort);
+                            else Parallel.download(url, dest.part, hint, ways, prog, abort);
                         }
                         catch (Throwable e) { dest.cancel(); throw e; }
                         File saved = dest.finish();
@@ -365,17 +408,19 @@ final class Transfers {
                         int[] code = new int[1];
                         long[] len = new long[1];
                         wc = Wire.Call.fetch((Wire.Link) direct[0], (String) direct[1], null, 60000, code, len, null);
-                        g = Watchdog.guard(null, wc);            // no abort for downloads; it still ends one that stalls
+                        g = Watchdog.guard(abort, wc);           // (its Cancel, or one that stalls, ends it)
+                        if (code[0] == 409) Parallel.changed(409, wc.body(len[0]));
                         if (code[0] != 200) throw new IOException("http " + code[0]);
                         total = len[0];
                         in = g.watch(wc.body(total));
                     } else {
                         c = Parallel.open(url);
-                        g = Watchdog.guard(null, c);             // no abort for downloads; it still ends one that stalls
+                        g = Watchdog.guard(abort, c);            // (its Cancel, or one that stalls, ends it)
                         c.setConnectTimeout(5000);
                         c.setReadTimeout(60000);
                         c.setUseCaches(false);
                         int code = c.getResponseCode();
+                        if (code == 409) Parallel.changed(409, c.getErrorStream());
                         if (code != 200) throw new IOException("http " + code);
                         total = c.getContentLengthLong();
                         in = g.watch(c.getInputStream());
@@ -386,7 +431,7 @@ final class Transfers {
                         public boolean onBytes(long got) {
                             long now = SystemClock.uptimeMillis();
                             if (now - last > 120) { last = now; event("down", "fid", fid, got, total, null); }
-                            return true;
+                            return !stopped.get();
                         }
                     };
                     try {
@@ -402,7 +447,8 @@ final class Transfers {
                                     byte[] buf = new byte[256 * 1024];
                                     long got = 0;
                                     int n;
-                                    while ((n = in.read(buf)) > 0) { out.write(buf, 0, n); got += n; prog.onBytes(got); }
+                                    // (stopped: as Library.importStream ends; its connection isn't always cut by then)
+                                    while ((n = in.read(buf)) > 0) { out.write(buf, 0, n); got += n; if (!prog.onBytes(got)) throw new IOException("aborted"); }
                                 } finally { out.close(); }
                                 g.idle();
                                 saved = dest.finish();
@@ -428,35 +474,67 @@ final class Transfers {
                     if (g != null) g.close();
                     if (c != null) c.disconnect();
                     if (wc != null) wc.close();
+                    boolean space = why != null && (why.contains("ENOSPC") || why.contains("No space"));
+                    // (changed: saved again on the PC while it came; what arrived is gone and it isn't fetched again)
+                    boolean changed = !ok && !stopped.get() && "changed".equals(why);
+                    Moving.end(key, ok, ok ? null : stopped.get() ? "canceled" : space ? "Not enough space on this phone"
+                            : changed ? name + " changed on the PC. Send it again." : "It didn’t all arrive");
                     busy(false);
                 }
-                event("down-done", "fid", fid, ok, item, why);
+                if (ok && item != null) inHistory(item, pcId, pcName);
+                // (stopped here: the page says so, rather than that it couldn't receive it)
+                event("down-done", "fid", fid, ok, item, !ok && stopped.get() ? "stopped" : why);
             }
         });
         if (!queued) event("down-done", "fid", fid, false, null, "closed");
+    }
+
+    // A file from the PC goes into History here, not by the page: when Android ended the page's renderer with Flick in
+    // the background (the activity made again), the page never heard of the file, and History missed it
+    private void inHistory(JSONObject item, String pc, String pcName) {
+        try {
+            if (Bg.history(ctx).add(historyEntry(item, pc, pcName)) != null) Page.historyChanged();
+        } catch (Throwable e) { Bg.warn("history", e); }
+    }
+
+    /** History's entry for a file that arrived from the PC (item: as the page is told of it), as the page wrote it. */
+    static JSONObject historyEntry(JSONObject item, String pc, String pcName) throws org.json.JSONException {
+        JSONObject e = new JSONObject();
+        e.put("dir", "in");
+        String n = item.optString("name", "");
+        e.put("name", n.length() > 0 ? n : "File");
+        e.put("size", Math.max(0, item.optLong("size", 0)));
+        e.put("time", System.currentTimeMillis());
+        e.put("pc", pc == null ? "" : pc);
+        e.put("pcName", pcName == null ? "" : pcName);
+        e.put("how", "pc");
+        e.put("ok", true);
+        String path = item.optString("path", ""), id = item.optString("id", "");
+        if (path.length() > 0) e.put("path", path); else if (id.length() > 0) e.put("libId", id);
+        String kind = item.optString("kind", "");
+        if (kind.length() > 0) e.put("kind", kind);
+        return e;
     }
 
     /** Copy a file into the phone's public Pictures / Movies / Music / Download folders. */
     @TargetApi(29)
     static final class PublicSave {
         static String save(Context ctx, File f, String name, String mime) throws IOException {
-            ContentResolver cr = ctx.getContentResolver();
             String m = mime == null ? "application/octet-stream" : mime;
-            Uri coll;
-            String rel, label;
-            if (m.startsWith("image/")) {
-                coll = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
-                rel = Environment.DIRECTORY_PICTURES + "/Flick"; label = "Pictures";
-            } else if (m.startsWith("video/")) {
-                coll = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
-                rel = Environment.DIRECTORY_MOVIES + "/Flick"; label = "Movies";
-            } else if (m.startsWith("audio/")) {
-                coll = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
-                rel = Environment.DIRECTORY_MUSIC + "/Flick"; label = "Music";
-            } else {
-                coll = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY);
-                rel = Environment.DIRECTORY_DOWNLOADS + "/Flick"; label = "Downloads";
-            }
+            if (m.startsWith("image/")) return copy(ctx, f, name, m, MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), Environment.DIRECTORY_PICTURES + "/Flick", "Pictures");
+            if (m.startsWith("video/")) return copy(ctx, f, name, m, MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), Environment.DIRECTORY_MOVIES + "/Flick", "Movies");
+            if (m.startsWith("audio/")) return copy(ctx, f, name, m, MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), Environment.DIRECTORY_MUSIC + "/Flick", "Music");
+            return copy(ctx, f, name, m, MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), Environment.DIRECTORY_DOWNLOADS + "/Flick", "Downloads");
+        }
+
+        /** A file of a folder from another phone, into Download/Flick/<sub> (sub: its folder there, "Trip/day 1"). */
+        static String saveIn(Context ctx, File f, String name, String mime, String sub) throws IOException {
+            return copy(ctx, f, name, mime == null ? "application/octet-stream" : mime, MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
+                Environment.DIRECTORY_DOWNLOADS + "/Flick/" + sub, "Downloads");
+        }
+
+        private static String copy(Context ctx, File f, String name, String m, Uri coll, String rel, String label) throws IOException {
+            ContentResolver cr = ctx.getContentResolver();
             ContentValues v = new ContentValues();
             v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
             v.put(MediaStore.MediaColumns.MIME_TYPE, m);
@@ -464,15 +542,26 @@ final class Transfers {
             v.put(MediaStore.MediaColumns.IS_PENDING, 1);
             Uri u = cr.insert(coll, v);
             if (u == null) throw new IOException("insert failed");
-            OutputStream out = cr.openOutputStream(u);
-            InputStream in = new FileInputStream(f);
+            boolean ok = false;
             try {
-                byte[] buf = new byte[256 * 1024];
-                int n;
-                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                OutputStream out = cr.openOutputStream(u);
+                if (out == null) throw new IOException("can't write");
+                try {
+                    InputStream in = new FileInputStream(f);
+                    try {
+                        byte[] buf = new byte[256 * 1024];
+                        int n;
+                        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                    } finally {
+                        in.close();
+                    }
+                } finally {
+                    out.close();
+                }
+                ok = true;
             } finally {
-                in.close();
-                if (out != null) out.close();
+                // a copy that didn't finish isn't left behind half-written
+                if (!ok) { try { cr.delete(u, null, null); } catch (Throwable e) { /* Android clears it later */ } }
             }
             ContentValues done = new ContentValues();
             done.put(MediaStore.MediaColumns.IS_PENDING, 0);
@@ -487,4 +576,21 @@ final class Transfers {
      * page's own (so neither stops the other's). Calls come in pairs (on, then off); any thread.
      */
     static void hold(Context c, boolean on) { new Transfers(c, null, null).busy(on); }
+
+    // Other phones looking for this one (Peers) find it while Flick is on screen: many Wi-Fi chips drop the broadcasts
+    // they ask with unless an app asks for them. (A paired phone is reached at its address anyway.)
+    private static WifiManager.MulticastLock multicast;
+    static void multicast(Context c, boolean on) {
+        synchronized (BUSY) {
+            try {
+                if (on) {
+                    if (multicast == null) {
+                        WifiManager wm = (WifiManager) c.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                        if (wm != null) { multicast = wm.createMulticastLock("flick-peers"); multicast.setReferenceCounted(false); }
+                    }
+                    if (multicast != null && !multicast.isHeld()) multicast.acquire();
+                } else if (multicast != null && multicast.isHeld()) multicast.release();
+            } catch (Throwable e) { /* found at its address still */ }
+        }
+    }
 }

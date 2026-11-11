@@ -54,11 +54,41 @@ final class Bundle {
 
     static final int MANIFEST_MAX = 192 * 1024;
 
+    // A receiver takes paths 64 folders deep (pc/bundle.js, PeerServer): a picked folder's subfolders are taken this deep
+    // (their files are 64 deep), and deeper ones are left out (deep).
+    static final int MAX_DEPTH = 62;
+    // In one send to another device (as pc/peerlink.js; a receiver takes 200,000 entries): past these the rest is left
+    // out (more), and said. Set by the sender that says so (maxFiles, maxDirs); none otherwise.
+    static final int MAX_FILES = 100000, MAX_DIRS = 50000;
+    int maxFiles = Integer.MAX_VALUE, maxDirs = Integer.MAX_VALUE;
+
     final List<Entry> entries = new ArrayList<Entry>();
     final List<String> roots = new ArrayList<String>();
+    volatile String now;                     // the file being written (its path in here): "the file going now"
     private final Set<String> rootKeys = new HashSet<String>();
     long bytes = 0;
     int files = 0;
+    boolean deep;                   // folders too deep to be taken were left out
+    boolean more;                   // past MAX_FILES (or MAX_DIRS): what's after was left out
+    // a file that got shorter since it was picked is left out (counted in skipped), not the whole send: set by the
+    // sender that says so (one still being written, a log growing, goes as it was when picked either way)
+    boolean skipShrunk;
+    private int dirs = 0;
+    volatile int skipped;           // files the last write() left out: they couldn't be read any more
+    // which ones (their paths in here), kept by a sender whose send carries on over several write()s (Outbox: a write
+    // carrying on doesn't go back to those before it); one that goes after all is taken out again
+    Set<String> leftOut;
+
+    /** A file that got shorter while it was being sent (what was said it holds didn't all go). */
+    static final class Changed extends IOException {
+        private static final long serialVersionUID = 1L;
+        Changed(String m) { super(m); }
+    }
+    /** A file that couldn't be read while it was being sent. */
+    static final class Unreadable extends IOException {
+        private static final long serialVersionUID = 1L;
+        Unreadable(String m) { super(m); }
+    }
     long manifestBytes = -1;        // a stream of a striped bundle announces the whole bundle's totals
     int manifestFiles = -1;
 
@@ -93,31 +123,41 @@ final class Bundle {
 
     /** A top-level file or folder; folders go in whole, skipping hidden names the way the file browser does. */
     void add(File f, String name, AtomicBoolean abort) throws IOException {
+        if (more || files >= maxFiles) { more = true; return; }           // (past what one send takes: said)
         String top = clean(name != null && name.length() > 0 ? name : f.getName());
         BasicFileAttributes at = look(f);
         boolean dir = at != null && at.isDirectory();
+        // gone since it was picked: not named in what's sent (another item would go under its name)
+        if (!dir && (at == null || !at.isRegularFile())) throw new IOException("missing " + top);
         // two picks with the same name (e.g. two "Camera" folders) must not merge on the PC
         String unique = top;
         int i = 2;
         while (!rootKeys.add(unique.toLowerCase(Locale.ROOT))) unique = numbered(top, i++, dir);
         roots.add(unique);
         if (dir) walk(f, at, unique, new HashSet<String>(), 0, abort);
-        else if (at != null && at.isRegularFile()) file(new Entry(unique, f, false, at));
-        else throw new IOException("missing " + top);
+        else file(new Entry(unique, f, false, at));
     }
 
-    private void file(Entry e) { entries.add(e); bytes += e.size; files++; }
+    private void file(Entry e) {
+        if (files >= maxFiles) { more = true; return; }
+        entries.add(e); bytes += e.size; files++;
+    }
 
     private void walk(File d, BasicFileAttributes at, String rel, Set<String> seen, int depth, AtomicBoolean abort) throws IOException {
         if (abort != null && abort.get()) throw new IOException("aborted");
-        if (depth > 48 || !seen.add(d.getCanonicalPath())) return;      // symlink loops, absurd nesting
+        if (depth > MAX_DEPTH) { deep = true; return; }                   // (said: see deep)
+        if (more) return;
+        if (dirs >= maxDirs) { more = true; return; }
+        if (!seen.add(d.getCanonicalPath())) return;                      // symlink loops
         entries.add(new Entry(rel, d, true, at));
+        dirs++;
         File[] kids = d.listFiles();
         if (kids == null) return;
         Arrays.sort(kids, new Comparator<File>() {
             @Override public int compare(File a, File b) { return a.getName().compareToIgnoreCase(b.getName()); }
         });
         for (File k : kids) {
+            if (more) return;
             String n = k.getName();
             if (n.startsWith(".")) continue;
             BasicFileAttributes ka = look(k);
@@ -125,6 +165,12 @@ final class Bundle {
             if (ka.isDirectory()) walk(k, ka, rel + "/" + clean(n), seen, depth + 1, abort);
             else if (ka.isRegularFile()) file(new Entry(rel + "/" + clean(n), k, false, ka));
         }
+    }
+
+    private void left(Entry e) {
+        skipped++;
+        Set<String> lo = leftOut;
+        if (lo != null) lo.add(e.rel);
     }
 
     static String clean(String n) {
@@ -169,6 +215,7 @@ final class Bundle {
         block(o, m.append("]}").toString());
         byte[] buf = new byte[256 * 1024];
         long sent = 0;
+        skipped = 0;
         for (int i = Math.max(0, skip); i < entries.size(); i++) {
             Entry e = entries.get(i);
             if (abort != null && abort.get()) throw new IOException("aborted");
@@ -180,15 +227,21 @@ final class Bundle {
                 if (at > 0) skipFully(in, at);
             } catch (IOException x) {
                 if (at > 0) throw new ResumeLost(e.rel);
-                continue;                                                                 // unreadable: leave it out
+                left(e);
+                continue;                                                                 // unreadable: left out (counted)
             }
             try {
+                if (skipShrunk && at == 0 && e.file.length() < e.size) { left(e); continue; }   // (in is closed below)
+                Set<String> lo = leftOut;
+                if (lo != null) lo.remove(e.rel);
                 block(o, "{\"p\":" + quote(e.rel) + ",\"s\":" + e.size + ",\"m\":" + e.mtime + ",\"i\":" + i + "}");
+                now = e.rel;
                 long left = e.size - at;
                 while (left > 0) {
                     if (abort != null && abort.get()) throw new IOException("aborted");
-                    int n = in.read(buf, 0, (int) Math.min(buf.length, left));
-                    if (n < 0) throw new IOException("changed while sending: " + e.rel);
+                    int n;
+                    try { n = in.read(buf, 0, (int) Math.min(buf.length, left)); } catch (IOException x) { throw new Unreadable("can't be read: " + e.rel); }
+                    if (n < 0) throw new Changed("changed while sending: " + e.rel);
                     o.write(buf, 0, n);
                     left -= n;
                     sent += n;

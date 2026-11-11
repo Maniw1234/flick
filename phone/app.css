@@ -1,7 +1,7 @@
 @font-face { font-family: 'Inter'; src: url('fonts/InterVariable.woff2') format('woff2'); font-weight: 100 900; font-display: block; }
-:root { --top: 28px; --bottom: 16px; --corner: 34px; --side: right; }
-/* the animations' colours (chosen on the PC or in the ••• menu); the edge glow takes the colours of the one a card
-   flies with (data-look: Surprise me picks one for each) */
+:root { --top: 28px; --bottom: 16px; --corner: 34px; }
+/* the animations' colours (chosen on the PC or in Settings › Advanced settings); the edge glow takes the colours of the
+   one a card flies with (data-look: Surprise me picks one for each) */
 body, body[data-theme="meteor"] {
   --spin: conic-gradient(from 0deg, #fff3e0, #ffc27a 14%, #ff6a1f 28%, #fff1dc 44%, #ffb05c 60%, #e2410c 76%, #fff3e0);
   --name: linear-gradient(90deg, #ffd29a, #ff8a3d); --ring: #ff9a3d; --ring-glow: rgba(255,140,50,0.85);
@@ -44,37 +44,46 @@ html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #000;
 button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
 img { -webkit-user-drag: none; user-select: none; pointer-events: none; }
 
-.screen { position: fixed; inset: 0; opacity: 0; pointer-events: none; transition: opacity .35s ease, transform .45s cubic-bezier(.2,.8,.2,1); }
+.screen { position: fixed; top: 0; right: 0; bottom: 0; left: 0; inset: 0; opacity: 0; pointer-events: none; transition: opacity .35s ease, transform .45s cubic-bezier(.2,.8,.2,1); }
 .screen.on { opacity: 1; pointer-events: auto; }
 #main { transform: scale(.965); }
 #main.on { transform: none; }
+/* a phone that connects to its PC by itself opens on its files (index.html), whatever is drawn first; app.js takes over */
+html.files #pair { opacity: 0; pointer-events: none; }
+html.files #main { opacity: 1; pointer-events: auto; transform: none; }
 
 /* ---------------- neon glow ---------------- */
-#glow { position: fixed; inset: 0; pointer-events: none; z-index: 20; opacity: 0; transition: opacity .5s ease; --gw: 6px; --gb: 18px; }
+#glow { position: fixed; top: 0; right: 0; bottom: 0; left: 0; inset: 0; pointer-events: none; z-index: 20; opacity: 0; transition: opacity .5s ease; --gw: 6px; --gb: 18px; }
 #glow.on { opacity: 1; }
-#glow .gwrap { position: absolute; inset: 0; filter: blur(var(--gb)); opacity: .95; }
-#glow .gmask { position: absolute; inset: 0; border-radius: var(--corner); padding: var(--gw); overflow: hidden;
+#glow .gwrap { position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; filter: blur(var(--gb)); opacity: .95; }
+#glow .gmask { position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; border-radius: var(--corner); padding: var(--gw); overflow: hidden;
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; }
 #glow .gmask.thin { padding: 2px; opacity: .95; }
 #glow .gspin { position: absolute; left: 50%; top: 50%; width: 200vmax; height: 200vmax; margin: -100vmax 0 0 -100vmax; will-change: transform;
   background: var(--spin); }
+/* (a conic gradient is newer than Android 9's WebView, Chromium 69: there the glow turns in the animation's colour and
+   white, rather than not showing at all) */
+@supports not (background: conic-gradient(#000, #fff)) {
+  #glow .gspin { background: linear-gradient(90deg, var(--ring), #fff 50%, var(--ring)); }
+}
 
 /* ---------------- pairing ---------------- */
 #pair { display: flex; flex-direction: column; align-items: center; z-index: 10; }
 .ptext { margin-top: calc(var(--top) + 26vh); text-align: center; padding: 0 28px; }
 .l1 { font-size: 17px; font-weight: 500; color: #f2f2f7; letter-spacing: -0.01em; }
-.l2 { margin-top: 4px; font-size: 25px; font-weight: 750; letter-spacing: -0.02em; line-height: 1.15;
+.l2 { margin-top: 4px; font-size: calc(25px * var(--hz, 1)); font-weight: 750; letter-spacing: -0.02em; line-height: 1.15;
   background: var(--name); -webkit-background-clip: text; background-clip: text; color: transparent; min-height: 29px; }
 .l2.searching { background: none; color: #8e8e93; -webkit-text-fill-color: #8e8e93; font-size: 21px; font-weight: 600; animation: breathe 1.6s ease-in-out infinite; }
 @keyframes breathe { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .l2.searching { animation: none; } }
 .l3 { margin-top: 6px; font-size: 13px; color: #8e8e93; font-weight: 500; }
 #connect { position: absolute; left: 50%; top: 61%; width: 92px; height: 92px; margin: -46px 0 0 -46px; border-radius: 50%;
   background: #fff; color: #3a3a3c; box-shadow: 0 0 0 0 rgba(255,255,255,0.25), 0 10px 40px rgba(255,45,120,0.25);
   transition: transform .25s cubic-bezier(.2,1.4,.3,1), box-shadow .3s, opacity .3s; touch-action: none; }
-#connect:disabled { opacity: .35; }
+#connect[aria-disabled="true"] { opacity: .35; }
 #connect.down { transform: scale(.9); }
-#connect .ico { position: absolute; inset: 22px; width: 48px; height: 48px; transition: transform .3s; }
-#connect .ring { position: absolute; inset: -9px; width: 110px; height: 110px; transform: rotate(-90deg); overflow: visible; }
+#connect .ico { position: absolute; top: 22px; right: 22px; bottom: 22px; left: 22px; inset: 22px; width: 48px; height: 48px; transition: transform .3s; }
+#connect .ring { position: absolute; top: -9px; right: -9px; bottom: -9px; left: -9px; inset: -9px; width: 110px; height: 110px; transform: rotate(-90deg); overflow: visible; }
 #connect .ring circle { fill: none; stroke-width: 4; }
 #connect .ring .track { stroke: rgba(255,255,255,0.0); }
 #connect .ring .arc { stroke: var(--ring); stroke-linecap: round; stroke-dasharray: 289; stroke-dashoffset: 289; filter: drop-shadow(0 0 6px var(--ring-glow)); }
@@ -85,49 +94,81 @@ img { -webkit-user-drag: none; user-select: none; pointer-events: none; }
 .phint a { color: #e5e5ea; text-decoration: underline; }
 .phint button.pok { margin-top: 10px; padding: 10px 26px; border-radius: 20px; background: #fff; color: #1c1c1e; font-size: 15px; font-weight: 650; }
 .phint button.pok:active { background: #d1d1d6; }
+/* Same code / Different code, once the other device allowed it */
+.phint .pbtns { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+.phint button.pok.ghost { background: rgba(255,255,255,0.12); color: #fff; }
+.phint button.pok.ghost:active { background: rgba(255,255,255,0.2); }
 .plinks { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
 .plink { padding: 9px 14px; border-radius: 18px; background: rgba(255,255,255,0.08); color: #d1d1d6; font-size: 13px; font-weight: 550; }
+.phint .hintgo { display: block; margin: 12px auto 0; max-width: 100%; color: #fff; }
+.phint .hintpc { display: block; margin-top: 8px; opacity: .72; font-size: .92em; }
+.phint .hintsay { display: block; margin-top: 12px; color: #e5e5ea; font-weight: 550; }   /* (what to turn on, with nothing to tap for it) */
 .plink:active { background: rgba(255,255,255,0.16); }
 /* a short window (split screen, a phone on its side): the text, the button and the hint below follow one another
    (placed by the screen's height, the button covered the text and the pairing code) */
 @media (max-height: 560px) {
   #pair { overflow-y: auto; overscroll-behavior: contain; }
   .ptext { margin-top: calc(var(--top) + 3vh); }
+  body.ubar .ptext { margin-top: calc(var(--top) + 16px + var(--ubh, 56px)); }   /* (under the USB bar: it covered the lines) */
   #connect { position: relative; flex: none; left: auto; top: auto; margin: 22px 0 14px; }
   .pfoot { position: static; flex: none; margin-top: auto; padding-bottom: calc(var(--bottom) + 16px); }
 }
+/* a small phone: the same, the text and the button in the middle of the room the hint leaves (at 640 px the longest
+   hint, nothing found, reached up over the button) */
+@media (min-height: 561px) and (max-height: 700px) {
+  #pair { overflow-y: auto; overscroll-behavior: contain; padding-top: var(--top); }
+  body.ubar #pair { padding-top: calc(var(--top) + 16px + var(--ubh, 56px)); }
+  .ptext { margin-top: auto; }
+  #connect { position: relative; flex: none; left: auto; top: auto; margin: 22px 0 14px; }
+  .pfoot { position: static; flex: none; margin-top: auto; padding-bottom: calc(var(--bottom) + 16px); }
+}
+/* large text (app.js: Android's font size at 125% or more): the same, on any phone (the lines grew down over the button,
+   and the hint and its buttons up over it) */
+.bigtext #pair { overflow-y: auto; overscroll-behavior: contain; padding-top: var(--top); }
+.bigtext body.ubar #pair { padding-top: calc(var(--top) + 16px + var(--ubh, 56px)); }
+.bigtext .ptext { margin-top: auto; }
+.bigtext #connect { position: relative; flex: none; left: auto; top: auto; margin: 22px 0 14px; }
+.bigtext .pfoot { position: static; flex: none; margin-top: auto; padding-bottom: calc(var(--bottom) + 16px); }
 
 /* ---------------- header (file manager) ---------------- */
 :root { --hdr: 104px; }
 #hdr { position: absolute; left: 0; right: 0; top: 0; z-index: 4; padding: calc(var(--top) + 6px) 0 10px;
   background: linear-gradient(180deg, rgba(0,0,0,0.92) 0%, rgba(0,0,0,0.78) 70%, rgba(0,0,0,0) 100%);
   backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
-.hrow { display: flex; align-items: center; gap: 4px; padding: 0 16px; height: 44px; }
+.hrow { display: flex; align-items: center; gap: 4px; padding: 0 16px; min-height: 44px; }   /* (min: it grows with large text) */
 .hback { width: 36px; height: 36px; margin-left: -8px; border-radius: 18px; display: grid; place-items: center; color: #fff; flex: none; }
 .hback:active { background: rgba(255,255,255,0.12); }
 .hback svg { width: 24px; height: 24px; }
 .htext { min-width: 0; flex: 1; }
-.htitle { font-size: 26px; font-weight: 760; letter-spacing: -0.025em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.1; text-align: left; }
+.htitle { font-size: calc(26px * var(--hz, 1)); font-weight: 760; letter-spacing: -0.025em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.1; text-align: left; }
 .hsub { font-size: 12px; color: #8e8e93; font-weight: 550; margin-top: 1px; min-height: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.chips { display: flex; gap: 8px; overflow-x: auto; padding: 8px 16px 2px; scrollbar-width: none; touch-action: pan-x; }
+.chips { display: flex; gap: 8px; overflow-x: auto; padding: 8px 16px 10px; margin-bottom: -8px; scrollbar-width: none; touch-action: pan-x; }   /* (room below for the tabs' tap area, given back: nothing moves) */
 .chips::-webkit-scrollbar { display: none; }
-.chip { flex: none; height: 32px; padding: 0 14px; border-radius: 16px; background: rgba(255,255,255,0.09); color: #e5e5ea; font-size: 13.5px; font-weight: 620; white-space: nowrap; transition: background .2s, color .2s; }
+.chip { flex: none; min-height: 32px; padding: 4px 14px; border-radius: 16px; background: rgba(255,255,255,0.09); color: #e5e5ea; font-size: 13.5px; font-weight: 620; white-space: nowrap; transition: background .2s, color .2s; }
 .chip.on { background: #fff; color: #000; }
 .chip:active { transform: scale(.96); }
 
 /* ---------------- grid ---------------- */
-#scroller { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch;
-  padding: calc(var(--top) + var(--hdr) + 4px) 0 calc(var(--bottom) + 110px); touch-action: pan-y; scrollbar-width: none; }
+#scroller { position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch;
+  padding: calc(var(--top) + var(--hdr) + 4px) 0 calc(var(--bottom) + var(--tbh, 48px) + 62px); touch-action: pan-y; scrollbar-width: none; }
+/* (An Android System WebView older than Chromium 79 has no min() or max(); one older than 87 no inset, 88 aspect-ratio,
+   84 gap in a row: each comes after a plainer way to say it, or in an @supports, so such a phone still shows every
+   screen. A value with var() in it can't fall back to the line before: an old engine drops it only when it's used) */
+@supports (width: max(1px, 2px)) {
+  #scroller { padding-bottom: calc(var(--bottom) + max(110px, var(--tbh, 48px) + 62px)); }
+}
 .card.folder .thumb { background: linear-gradient(155deg, #2a2a30, #1b1b20); display: grid; place-items: center; }
-.card.folder .thumb svg { width: 46%; height: auto; }
+.card.folder .thumb svg:not(.prog) { width: 46%; height: auto; }   /* (its progress ring keeps its own size) */
 .card .thumb.app { background: #1e1e22; }
 .card .dur { position: absolute; right: 8px; bottom: 7px; font-size: 11.5px; font-weight: 700; text-shadow: 0 1px 4px rgba(0,0,0,.85); }
-#perm { position: absolute; left: 22px; right: 22px; top: calc(var(--top) + var(--hdr) + 40px); text-align: center; padding: 26px 22px 24px;
+/* (the permission card and the empty view are in the files' flow, where they were: so they scroll up above the toolbar and
+   the update card, as the files do; placed over the files, Allow access and Try again could be left under them) */
+#perm { position: relative; margin: 36px 22px 0; text-align: center; padding: 26px 22px 24px;
   border-radius: 24px; background: rgba(255,255,255,0.06); border: 0.5px solid rgba(255,255,255,0.1); }
 #perm .picon { width: 64px; height: 64px; margin: 0 auto 10px; color: #fff; }
 .ptitle2 { font-size: 20px; font-weight: 760; letter-spacing: -0.02em; }
 .psub2 { margin-top: 8px; color: #c7c7cc; font-size: 14px; line-height: 1.45; }
-#permBtn { margin-top: 18px; height: 46px; padding: 0 26px; border-radius: 23px; font-weight: 650; font-size: 15.5px; background: #fff; color: #000; }
+#permBtn { margin-top: 18px; min-height: 46px; padding: 6px 26px; border-radius: 23px; font-weight: 650; font-size: 15.5px; background: #fff; color: #000; }
 #permBtn:active { transform: scale(.97); }
 .spin { display: inline-block; width: 10px; height: 10px; border-radius: 50%; border: 2px solid rgba(255,255,255,.25); border-top-color: #fff; animation: rot .7s linear infinite; vertical-align: -1px; margin-right: 6px; }
 @keyframes rot { to { transform: rotate(360deg); } }
@@ -147,10 +188,11 @@ img { -webkit-user-drag: none; user-select: none; pointer-events: none; }
 .playb { position: absolute; left: 50%; top: 50%; width: 40px; height: 40px; margin: -20px 0 0 -20px; border-radius: 50%; background: rgba(0,0,0,0.5); }
 .playb::after { content: ''; position: absolute; left: 15px; top: 11px; border-left: 14px solid #fff; border-top: 9px solid transparent; border-bottom: 9px solid transparent; }
 .dur { position: absolute; right: 7px; bottom: 7px; font-size: 11px; font-weight: 650; text-shadow: 0 1px 3px rgba(0,0,0,.8); }
-.card .meta { position: relative; padding: 7px 26px 0 2px; height: 46px; transition: opacity .2s; }
+.card .meta { position: relative; padding: 7px 26px 0 2px; height: var(--meta, 46px); transition: opacity .2s; }
 /* (names take their own direction, dir=auto: a right-to-left one stays on the left like the rest, and is cut at its end) */
-.card .name { font-size: 13px; font-weight: 650; letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; color: #fff; text-align: left; }
+.card .name { font-size: 13px; font-weight: 650; letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #fff; text-align: left; }
 .card .info { margin-top: 2px; font-size: 11.5px; color: #8e8e93; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#grid:not(.list) .card .info { margin-right: -24px; }   /* (⋯ is beside the name: under it the size and date have its width too) */
 .card .more { position: absolute; right: -4px; top: 3px; width: 30px; height: 26px; color: #8e8e93; display: grid; place-items: center; }
 .card .more svg { width: 18px; height: 18px; }
 .card.lifted .thumb { visibility: hidden; }
@@ -163,11 +205,14 @@ img { -webkit-user-drag: none; user-select: none; pointer-events: none; }
 .card.err .thumb { animation: shake .45s; box-shadow: 0 0 0 2px #ff453a; }
 @keyframes shake { 20% { transform: translateX(-7px); } 40% { transform: translateX(6px); } 60% { transform: translateX(-4px); } 80% { transform: translateX(2px); } }
 
-#empty { position: absolute; left: 0; right: 0; top: 30vh; text-align: center; padding: 0 40px; color: #8e8e93; }
+#empty { position: relative; margin-top: calc(30vh - var(--top) - var(--hdr) - 4px); text-align: center; padding: 0 40px; color: #8e8e93; }
+@supports (width: max(1px, 2px)) { #empty { margin-top: max(16px, calc(30vh - var(--top) - var(--hdr) - 4px)); } }
 #empty .eicon { width: 64px; height: 64px; margin: 0 auto 10px; color: #48484a; }
 #empty .etitle { color: #f2f2f7; font-weight: 700; font-size: 18px; }
 #empty .esub { margin-top: 6px; font-size: 14px; line-height: 1.45; }
 #empty b { color: #e5e5ea; }
+#empty .eretry { margin-top: 14px; min-height: 40px; padding: 8px 22px; border-radius: 20px; background: rgba(255,255,255,0.12); color: #fff; font-size: 15px; font-weight: 650; }
+#empty .eretry:active { background: rgba(255,255,255,0.2); }
 
 /* ---------------- toolbar ---------------- */
 /* (a long count, "Waiting for <a long PC name>…", is shortened: it pushed the ••• button off the screen) */
@@ -182,46 +227,95 @@ img { -webkit-user-drag: none; user-select: none; pointer-events: none; }
 .cdot { position: absolute; right: 6px; top: 8px; width: 7px; height: 7px; border-radius: 50%; background: #8e8e93; box-shadow: 0 0 0 2px rgba(44,44,48,1); }
 .cdot.on { background: #34c759; }
 .count { font-size: 13.5px; font-weight: 600; color: #e5e5ea; margin-left: 6px; white-space: nowrap; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.bigtext .pill { height: auto; min-height: 48px; padding-top: 4px; padding-bottom: 4px; }
+.bigtext .count { white-space: normal; line-height: 1.1; word-break: break-word; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .round { flex: none; width: 48px; height: 48px; border-radius: 24px; display: grid; place-items: center; color: #f2f2f7; }
 .round svg { width: 26px; height: 26px; }
 
 /* ---------------- drag / effects ---------------- */
-#dragLayer { position: fixed; inset: 0; pointer-events: none; z-index: 30; }
+#dragLayer { position: fixed; top: 0; right: 0; bottom: 0; left: 0; inset: 0; pointer-events: none; z-index: 30; }
 .float { position: absolute; left: 0; top: 0; border-radius: 14px; overflow: hidden; transform-origin: 50% 50%; will-change: transform;
   box-shadow: 0 22px 50px rgba(0,0,0,0.55), 0 4px 12px rgba(0,0,0,0.35); background: #1c1c1e; }
 .float.doc { background: #fbfbfd; }
 .float img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.float .prog { position: absolute; right: 8px; top: 8px; width: 28px; height: 28px; }
 #edgeGlow { position: fixed; top: 0; left: 0; width: 160px; height: 360px; pointer-events: none; z-index: 25; opacity: 0; will-change: transform, opacity; }
-#edgeGlow .e1 { position: absolute; inset: 0; border-radius: 50%; background: radial-gradient(closest-side, var(--edge1), var(--edge2) 38%, var(--edge3) 64%, rgba(255,255,255,0) 100%); filter: blur(10px); }
-#edgeGlow .e2 { position: absolute; inset: 22% 34%; border-radius: 50%; background: radial-gradient(closest-side, #fff, rgba(255,255,255,0)); filter: blur(5px); }
-#flash { position: fixed; inset: 0; pointer-events: none; z-index: 40; opacity: 0; background: var(--flash); }
+#edgeGlow .e1 { position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; border-radius: 50%; background: radial-gradient(closest-side, var(--edge1), var(--edge2) 38%, var(--edge3) 64%, rgba(255,255,255,0) 100%); filter: blur(10px); }
+#edgeGlow .e2 { position: absolute; top: 22%; right: 34%; bottom: 22%; left: 34%; inset: 22% 34%; border-radius: 50%; background: radial-gradient(closest-side, #fff, rgba(255,255,255,0)); filter: blur(5px); }
+#flash { position: fixed; top: 0; right: 0; bottom: 0; left: 0; inset: 0; pointer-events: none; z-index: 40; opacity: 0; background: var(--flash); }
 
 #toast { position: fixed; left: 50%; top: calc(var(--top) + 10px); transform: translate(-50%, -16px); opacity: 0; z-index: 60; pointer-events: none;
   background: rgba(44,44,48,0.92); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 0.5px solid rgba(255,255,255,0.1);
-  padding: 10px 16px; border-radius: 20px; font-size: 13.5px; font-weight: 600; width: max-content; max-width: min(92vw, 440px); text-align: center;
-  overflow-wrap: anywhere; transition: opacity .25s, transform .35s cubic-bezier(.2,1.3,.3,1); }   /* (a long one wraps: it was cut off mid-sentence) */
+  padding: 10px 16px; border-radius: 20px; font-size: 13.5px; font-weight: 600; width: max-content; max-width: 92vw; max-width: min(92vw, 440px); text-align: center;
+  word-break: break-word; overflow-wrap: anywhere; transition: opacity .25s, transform .35s cubic-bezier(.2,1.3,.3,1); }   /* (a long one wraps: it was cut off mid-sentence) */
 #toast.on { opacity: 1; transform: translate(-50%, 0); }
+/* words for a screen reader only (app.js sayQuietly): not drawn, still read */
+.vh { position: fixed; left: 0; top: 0; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; pointer-events: none; }
+/* the USB cable (app.js usbRender): what it's doing, under the status bar; a toast then shows under it */
+#usbBar { position: fixed; left: 50%; top: calc(var(--top) + 10px); transform: translateX(-50%); z-index: 61; display: flex; align-items: center; gap: 10px;
+  width: max-content; max-width: calc(100vw - 24px); max-width: min(calc(100vw - 24px), 440px); padding: 8px 8px 8px 12px; border-radius: 22px;
+  background: rgba(44,44,48,0.94); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 0.5px solid rgba(255,255,255,0.1);
+  animation: ubin .35s cubic-bezier(.2,1.3,.3,1); }
+#usbBar[hidden] { display: none; }
+@keyframes ubin { from { opacity: 0; transform: translate(-50%, -14px); } to { opacity: 1; transform: translate(-50%, 0); } }
+#usbBar .ubic { flex: none; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; background: rgba(255,255,255,0.1); }
+#usbBar .ubic svg { width: 18px; height: 18px; }
+#usbBar.ready .ubic { background: #2fb36a; color: #fff; }
+#usbBar .ubtx { display: flex; flex-direction: column; min-width: 0; padding-right: 4px; }
+#usbBar .ubtx b { font-size: 13.5px; font-weight: 650; line-height: 1.3; }
+#usbBar .ubtx small { font-size: 12px; color: rgba(255,255,255,0.68); line-height: 1.35; }
+#usbBar .ubtx small:empty { display: none; }
+#usbBar .ubgo { flex: none; border: 0; border-radius: 16px; padding: 8px 14px; font: inherit; font-size: 13px; font-weight: 650; background: #fff; color: #000; }
+#usbBar .ubx { flex: none; width: 32px; height: 32px; border: 0; border-radius: 50%; display: grid; place-items: center; background: transparent; color: rgba(255,255,255,0.7); }
+#usbBar .ubx svg { width: 18px; height: 18px; }
+body.ubar #toast { top: calc(var(--top) + 18px + var(--ubh, 56px)); }
+body.ubar #hdr { padding-top: calc(var(--top) + 16px + var(--ubh, 56px)); }   /* (the bar sits over the header's top) */
+/* large text: its words take the bar's width, Turn on and Close go under them (beside them, a word a line) */
+.bigtext #usbBar { width: calc(100vw - 24px); width: min(calc(100vw - 24px), 440px); flex-wrap: wrap; row-gap: 6px; }
+.bigtext #usbBar .ubtx { flex: 1 1 calc(100% - 44px); }
+.bigtext #usbBar .ubgo { margin-left: auto; }
+@media (prefers-reduced-motion: reduce) { #usbBar { animation: none; } }
 
 /* ---------------- sheets ---------------- */
-#sheet, #ask { position: fixed; inset: 0; z-index: 70; }
+#sheet, #ask { position: fixed; top: 0; right: 0; bottom: 0; left: 0; inset: 0; z-index: 70; }
 #sheet[hidden], #ask[hidden] { display: none; }
-.backdrop { position: absolute; inset: 0; background: rgba(0,0,0,0.5); animation: fadein .2s ease; }
+.backdrop { position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; background: rgba(0,0,0,0.5); animation: fadein .2s ease; }
 #sheet .panel { position: absolute; left: 8px; right: 8px; bottom: calc(var(--bottom) + 8px); border-radius: 24px; padding: 8px 0 8px;
   background: rgba(36,36,40,0.96); backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px); border: 0.5px solid rgba(255,255,255,0.08);
   animation: up .32s cubic-bezier(.2,.9,.25,1);
   /* a short window (split screen, a tablet or an unfolded phone sideways): it scrolls instead of going off the top */
-  max-height: calc(100% - var(--top) - var(--bottom) - 16px); overflow-y: auto; overscroll-behavior: contain; }
-#sheet.closing .panel { animation: down .22s ease forwards; }
+  max-height: calc(100% - var(--top) - var(--bottom) - 16px); overflow-y: auto; overscroll-behavior: contain;
+  max-width: 560px; margin: 0 auto; }   /* (a tablet or a phone on its side: a phone's menu in the middle, not one across the screen) */
+#sheet.closing .panel { animation: down .22s ease forwards; pointer-events: none; }   /* (a tap then lands on the backdrop: app.js sheetEat) */
 #sheet.closing .backdrop { animation: fadeout .22s ease forwards; }
 .grab { width: 38px; height: 5px; border-radius: 3px; background: rgba(255,255,255,0.22); margin: 4px auto 6px; }
 .stitle { color: #8e8e93; font-size: 13px; font-weight: 600; text-align: center; padding: 4px 20px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sitem { display: flex; align-items: center; gap: 14px; width: 100%; padding: 14px 22px; font-size: 16px; font-weight: 550; text-align: left; }
 .sitem:active { background: rgba(255,255,255,0.07); }
 .sitem svg { width: 22px; height: 22px; flex: none; color: #d1d1d6; }
+.sitem > span:not(.tag) { min-width: 0; word-break: break-word; overflow-wrap: anywhere; }   /* (a long name without spaces wraps, not the menu) */
 .sitem.danger { color: #ff453a; } .sitem.danger svg { color: #ff453a; }
-.sitem .tag { margin-left: auto; color: #8e8e93; font-size: 14px; font-weight: 500; }
-#ask .box { position: absolute; left: 22px; right: 22px; top: 26%; border-radius: 22px; padding: 20px; background: rgba(36,36,40,0.98); border: 0.5px solid rgba(255,255,255,0.08); animation: pop .3s cubic-bezier(.2,1.3,.3,1); }
+/* the ••• menu's places, side by side at its top (app.js openSheet: tile). Margins, not gap: Android 9's WebView */
+.stiles { display: flex; padding: 2px 12px 10px; margin-bottom: 4px; border-bottom: 0.5px solid rgba(255,255,255,0.08); }
+.sitem.stile { flex: 1 1 0; width: auto; min-width: 0; flex-direction: column; justify-content: center; gap: 6px; padding: 12px 4px; border-radius: 16px;
+  background: rgba(255,255,255,0.06); font-size: 13.5px; font-weight: 600; text-align: center; }
+.sitem.stile + .sitem.stile { margin-left: 8px; }
+.sitem.stile > span:not(.tag) { word-break: normal; overflow-wrap: normal; }
+.sitem.stile .tag { margin-left: 0; font-size: 11.5px; text-align: center; }
+.snote { margin: 4px 22px 6px; color: #8e8e93; font-size: 13.5px; line-height: 1.4; }   /* (a line under a menu's items: what to do when the one wanted isn't there) */
+.sitem .tag { margin-left: auto; color: #8e8e93; font-size: 14px; font-weight: 500; flex-shrink: 3; text-align: right; }   /* (it gives way first) */
+/* a long note, or large text (app.js openSheet): under the item's words, which keep the item's width (beside them the
+   words were squeezed into broken pieces: "Send / clipboar / d") */
+.sitem.stack { display: grid; grid-template-columns: 22px minmax(0, 1fr); column-gap: 14px; row-gap: 2px; align-items: center; }
+.sitem.stack > svg { grid-row: span 2; }
+.sitem.stack > span { grid-column: 2; }
+.sitem.stack .tag { margin-left: 0; text-align: left; line-height: 1.3; }
+.sitem.stack.bare { grid-template-columns: minmax(0, 1fr); }
+.sitem.stack.bare > span { grid-column: 1; }
+/* large text: a sheet's title (a file's name) on up to three lines rather than cut on one */
+.bigtext .stitle { white-space: normal; word-break: break-word; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+#ask .box { position: absolute; left: 22px; right: 22px; top: 26%; border-radius: 22px; padding: 20px; background: rgba(36,36,40,0.98); border: 0.5px solid rgba(255,255,255,0.08); animation: pop .3s cubic-bezier(.2,1.3,.3,1);
+  max-width: 420px; margin: 0 auto;   /* (as wide as the features' questions at most: on a tablet it stretched across the screen) */
+  max-height: calc(74% - var(--bottom) - 8px); overflow-y: auto; overscroll-behavior: contain; }
 .atitle { font-size: 18px; font-weight: 700; } .asub { color: #8e8e93; font-size: 13px; margin-top: 4px; line-height: 1.4; }
 #askInput { width: 100%; margin-top: 14px; padding: 13px 14px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.12); background: #121214; color: #fff; font: inherit; font-size: 17px; outline: none; user-select: text; -webkit-user-select: text; }
 #askInput:focus { border-color: #fff; }
@@ -234,7 +328,7 @@ img { -webkit-user-drag: none; user-select: none; pointer-events: none; }
 @keyframes pop { from { transform: scale(.9); opacity: 0; } }
 
 /* release effects: sparks, lightning, light, colour tears (app.js) */
-#fx { position: fixed; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 32; }
+#fx { position: fixed; top: 0; right: 0; bottom: 0; left: 0; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 32; }
 /* animation picker */
 .tsheet .titem { display: flex; align-items: center; gap: 14px; width: 100%; padding: 10px 18px; text-align: left; }
 .tsheet .titem:active { background: rgba(255,255,255,0.07); }
@@ -246,7 +340,7 @@ img { -webkit-user-drag: none; user-select: none; pointer-events: none; }
 .tsheet .titem.on .tc { border-color: #fff; background: radial-gradient(circle, #fff 0 5px, transparent 6px); }
 
 /* ---------------- multi-select ---------------- */
-.hsel { margin-left: auto; flex: none; height: 34px; padding: 0 14px; border-radius: 17px; background: rgba(255,255,255,0.1); font-size: 14px; font-weight: 650; color: #fff; }
+.hsel { margin-left: auto; flex: none; min-height: 34px; padding: 4px 14px; border-radius: 17px; background: rgba(255,255,255,0.1); font-size: 14px; font-weight: 650; color: #fff; }
 .hsel:active { background: rgba(255,255,255,0.18); }
 .card .thumb { transition: transform .24s cubic-bezier(.2,.9,.3,1), border-radius .24s; }
 body.selecting .card.sel .thumb { transform: translateZ(0) scale(.88); border-radius: 18px; }
@@ -261,13 +355,14 @@ body.selecting .card .more { visibility: hidden; }
 #selSend { flex: 1; height: 52px; border-radius: 26px; background: #fff; color: #000; font-size: 16px; font-weight: 700; display: flex; align-items: center; justify-content: center; gap: 8px;
   box-shadow: 0 10px 34px rgba(0,0,0,0.55); white-space: nowrap; overflow: hidden; padding: 0 20px; }
 #selSend span { overflow: hidden; text-overflow: ellipsis; }
+.bigtext #selSend { height: auto; min-height: 52px; padding: 8px 20px; white-space: normal; line-height: 1.15; }
 #selSend svg { width: 22px; height: 22px; flex: none; }
 #selSend:active { transform: scale(.98); }
 #selSend.off { background: rgba(58,58,62,0.92); color: #fff; backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
 /* a stack of selected items under the finger */
 .float.stackf { overflow: visible; background: none; box-shadow: none; }
 .float.stackf > .float.face { position: absolute; left: 0; top: 0; width: 100% !important; height: 100% !important; transform: none; will-change: auto; }
-.stackf .sheet { position: absolute; inset: 0; border-radius: 14px; overflow: hidden; background: #2c2c2e; box-shadow: 0 12px 30px rgba(0,0,0,0.45); }
+.stackf .sheet { position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; border-radius: 14px; overflow: hidden; background: #2c2c2e; box-shadow: 0 12px 30px rgba(0,0,0,0.45); }
 .stackf .sheet img { width: 100%; height: 100%; object-fit: cover; display: block; filter: brightness(.8); }
 .stackf .s1 { transform: translate(7px, 5px) rotate(5deg); }
 .stackf .s2 { transform: translate(-6px, 9px) rotate(-6deg); }
@@ -278,7 +373,7 @@ body.selecting .card .more { visibility: hidden; }
 .float.gathering { box-shadow: 0 10px 26px rgba(0,0,0,0.45); }
 
 /* ---------------- wireless update card ---------------- */
-#upd { position: absolute; left: 14px; right: 14px; bottom: calc(var(--bottom) + 14px + 48px + 10px); z-index: 5;
+#upd { position: absolute; left: 14px; right: 14px; bottom: calc(var(--bottom) + 24px + var(--tbh, 48px)); z-index: 5;
   display: flex; align-items: center; gap: 12px; padding: 10px 8px 10px 10px; border-radius: 22px; overflow: hidden;
   background: rgba(44,44,48,0.86); backdrop-filter: blur(24px) saturate(1.6); -webkit-backdrop-filter: blur(24px) saturate(1.6);
   border: 0.5px solid rgba(255,255,255,0.1); box-shadow: 0 10px 34px rgba(0,0,0,0.5);
@@ -289,7 +384,7 @@ body.selecting .card .more { visibility: hidden; }
 #upd .ut { font-size: 15px; font-weight: 700; letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #upd .us { margin-top: 2px; font-size: 12.5px; line-height: 1.3; font-weight: 550; color: #a1a1a6; overflow: hidden; font-variant-numeric: tabular-nums;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-#upd .ubtn { flex: none; height: 34px; padding: 0 16px; border-radius: 17px; background: #fff; color: #000; font-size: 14px; font-weight: 700; }
+#upd .ubtn { flex: none; min-height: 34px; padding: 4px 16px; border-radius: 17px; background: #fff; color: #000; font-size: 14px; font-weight: 700; }
 #upd .ubtn:active { transform: scale(.96); }
 #upd .uclose { flex: none; width: 30px; height: 30px; border-radius: 15px; display: grid; place-items: center; color: #8e8e93; margin-left: -4px; }
 #upd .uclose:active { background: rgba(255,255,255,0.1); }
@@ -298,18 +393,25 @@ body.selecting .card .more { visibility: hidden; }
 #upd .ubar i { display: block; height: 100%; width: 0; background: var(--ring); box-shadow: 0 0 10px var(--ring-glow); transition: width .2s ease-out; }
 #upd.busy .ubar { opacity: 1; }
 #upd.busy .ubtn, #upd.busy .uclose { display: none; }
-body.upd-on #scroller { padding-bottom: calc(var(--bottom) + 196px); }   /* room to scroll the last row above the card */
+body.upd-on #scroller { padding-bottom: calc(var(--bottom) + var(--tbh, 48px) + var(--updh, 62px) + 86px); }   /* room to scroll the last row above the card */
+@supports (width: max(1px, 2px)) { body.upd-on #scroller { padding-bottom: calc(var(--bottom) + max(196px, var(--tbh, 48px) + var(--updh, 62px) + 86px)); } }
+/* long words (app.js renderUpd) or large text: the card's words take its width, its button and Not now go under them */
+#upd.stack, .bigtext #upd { flex-wrap: wrap; row-gap: 8px; }
+#upd.stack .utext, .bigtext #upd .utext { flex: 1 1 calc(100% - 54px); }
+#upd.stack .ut, .bigtext #upd .ut { white-space: normal; }
+#upd.stack .us, .bigtext #upd .us { -webkit-line-clamp: 5; }
+#upd.stack .ubtn, .bigtext #upd .ubtn { margin-left: auto; }
 #moreBtn { position: relative; }
 #moreBtn.dot::after { content: ''; position: absolute; right: 10px; top: 10px; width: 8px; height: 8px; border-radius: 50%;
   background: var(--ring); box-shadow: 0 0 0 2px rgba(44,44,48,1), 0 0 8px var(--ring-glow); }
 
 /* Settings page */
-#settings { position: fixed; inset: 0; z-index: 65; background: #000; display: flex; flex-direction: column; animation: slidein .26s cubic-bezier(.2,.9,.25,1); }
+#settings { position: fixed; top: 0; right: 0; bottom: 0; left: 0; inset: 0; z-index: 65; background: #000; display: flex; flex-direction: column; animation: slidein .26s cubic-bezier(.2,.9,.25,1); }
 #settings.closing { animation: slideout .2s ease forwards; }
 @keyframes slidein { from { transform: translateX(100%); } }
 @keyframes slideout { to { transform: translateX(100%); } }
 #settings .shdr { display: flex; align-items: center; gap: 4px; padding: calc(var(--top) + 8px) 16px 4px; flex: none; }
-#settings .stitle2 { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; }
+#settings .stitle2 { font-size: calc(30px * var(--hz, 1)); font-weight: 700; letter-spacing: -0.02em; }
 .sscroll { flex: 1; overflow-y: auto; padding: 0 16px calc(var(--bottom) + 28px); -webkit-overflow-scrolling: touch; }
 .sgroup { margin-top: 22px; }
 .sgroup h3 { margin: 0 0 7px 4px; font-size: 14px; font-weight: 600; color: #8e8e93; letter-spacing: -0.005em; }
@@ -317,23 +419,47 @@ body.upd-on #scroller { padding-bottom: calc(var(--bottom) + 196px); }   /* room
 .srow { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 54px; padding: 11px 16px; text-align: left; color: #fff; position: relative; }
 .srow + .srow::before { content: ''; position: absolute; left: 16px; right: 0; top: 0; height: 0.5px; background: rgba(255,255,255,0.1); }
 button.srow:active { background: rgba(255,255,255,0.06); }
-.srow .sl { flex: 1; min-width: 0; }
+.srow .sl { flex: 1; min-width: 0; word-break: break-word; overflow-wrap: anywhere; }   /* (a long PC name wraps, not under the button) */
+/* large text: a row's button, choices or value go under its words (beside them, the words had no room) */
+.bigtext .srow.ctl { flex-wrap: wrap; row-gap: 8px; }
+.bigtext .srow.ctl .sl { flex-basis: 100%; }
+.bigtext .srow.ctl .sv { max-width: none; flex: 1 1 auto; }
 .srow .sl b { display: block; font-size: 16px; font-weight: 550; line-height: 1.25; }
 .srow .sl small { display: block; margin-top: 3px; font-size: 13px; line-height: 1.32; color: #8e8e93; }
 .srow .sv { color: #8e8e93; font-size: 15px; max-width: 45%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .srow.nav::after { content: ''; width: 8px; height: 8px; border-right: 2px solid #5a5a5f; border-top: 2px solid #5a5a5f; transform: rotate(45deg); margin-left: 2px; flex: none; }
 .sbtn { flex: none; padding: 8px 14px; border-radius: 17px; background: rgba(255,255,255,0.1); color: #fff; font-size: 15px; font-weight: 600; }
 .sbtn:active { background: rgba(255,255,255,0.18); }
-.sbtn.danger { color: #ff453a; }
+.sbtn.danger { color: #ff7b73; }   /* (lighter than the menus' red: over the button's white wash #ff453a read at 3.7:1) */
 .stog { position: relative; flex: none; width: 51px; height: 31px; }
-.stog input { position: absolute; opacity: 0; inset: 0; margin: 0; }
-.stog span { position: absolute; inset: 0; border-radius: 16px; background: #39393d; transition: background .2s; }
+.stog input { position: absolute; opacity: 0; top: 0; right: 0; bottom: 0; left: 0; inset: 0; margin: 0; }
+.stog span { position: absolute; top: 0; right: 0; bottom: 0; left: 0; inset: 0; border-radius: 16px; background: #39393d; transition: background .2s; }
 .stog span::after { content: ''; position: absolute; left: 2px; top: 2px; width: 27px; height: 27px; border-radius: 50%; background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.3); transition: transform .22s cubic-bezier(.3,1.3,.5,1); }
 .stog input:checked + span { background: #30d158; }
 .stog input:checked + span::after { transform: translateX(20px); }
+/* Tap areas of at least 48 dp (Android's minimum) around the small controls, past what's drawn: the drawn size and the
+   layout stay as they are. The header's search, sort and view buttons sit 40 px apart: the outer two reach 48 into the
+   space beside them, the middle one keeps its share, 39 px (wider, it would take taps from the other two). */
+.plink, .chip, .sbtn, .hback { position: relative; }
+.plink::before, .chip::before, .sbtn::before, .hback::before, .tb::before, .hic::before, .stog::before { content: ''; position: absolute; }
+.plink::before { top: -7px; bottom: -7px; left: 0; right: 0; }
+.chip::before { top: -7px; bottom: -9px; left: 0; right: 0; }   /* (7 above: at large text, 8 reached a pixel into Select all) */
+.sbtn::before { top: -6px; bottom: -6px; left: 0; right: 0; }
+.hback::before { top: -8px; bottom: -4px; left: -6px; right: -6px; }   /* (more above: below, the page scrolls) */
+.tb::before { top: -4px; bottom: -4px; left: -4px; right: -4px; }
+#pcBtn::before { left: -7px; right: -1px; }    /* (Connection and Add sit side by side in their pill: each takes its half of */
+#addBtn::before { left: -1px; right: -7px; }   /* the 2 px between them, and the pill's edge on its other side) */
+.hic::before { top: -7px; bottom: -3px; left: 0; right: 0; }    /* (more above: the tabs' tap area starts just below) */
+.hacts > .hic:first-child::before { left: -10px; right: -1px; }
+.hacts > .hic + .hic::before { left: -1px; }
+.hacts > .hic:last-child::before { left: -2px; right: -8px; }
+.stog::before { top: -9px; bottom: -9px; left: 0; right: 0; }
 .sseg { display: flex; flex: none; background: rgba(255,255,255,0.08); border-radius: 9px; padding: 2px; }
 .sseg button { padding: 6px 14px; border-radius: 7px; font-size: 14px; font-weight: 600; color: #c7c7cc; }
 .sseg button.on { background: #636366; color: #fff; }
+/* large text: a row of choices in Settings wraps rather than running out of its row ("Off / Screenshots / Photos") */
+.bigtext .sseg { flex-wrap: wrap; }
+.bigtext .scard .sseg button { flex: 1 1 auto; }
 
 /* ---------------- header: search, sort, grid/list ---------------- */
 .hacts { display: flex; gap: 2px; margin-left: auto; margin-right: -8px; flex: none; }
@@ -342,15 +468,19 @@ button.srow:active { background: rgba(255,255,255,0.06); }
 .hic svg { width: 22px; height: 22px; }
 .hic.dot::after { content: ''; position: absolute; right: 6px; top: 7px; width: 6px; height: 6px; border-radius: 50%; background: var(--ring); box-shadow: 0 0 6px var(--ring-glow); }
 body.selecting .hacts { display: none; }
-@media (max-width: 380px) { .htitle { font-size: 23px; } .hic { width: 34px; } }
-.hsearch { display: none; align-items: center; gap: 4px; padding: 0 16px; height: 44px; }
+@media (max-width: 380px) { .htitle { font-size: calc(23px * var(--hz, 1)); } .hic { width: 34px; } }
+/* selecting: a count too long to share its line with Select all (large text) puts Select all under it */
+body.selecting .hrow { flex-wrap: wrap; row-gap: 2px; }
+body.selecting .htext { flex: 1 1 auto; }
+.bigtext body.selecting .htext { flex-basis: calc(100% - 44px); }   /* (Cancel and the count on the first line, Select all under them) */
+.hsearch { display: none; align-items: center; gap: 4px; padding: 0 16px; min-height: 44px; }
 body.searching .hrow { display: none; }
 body.searching .hsearch { display: flex; }
 body.searching.selecting .hrow { display: flex; }      /* selecting results: the selection's own header */
 body.searching.selecting .hsearch { display: none; }
-.sfield { flex: 1; min-width: 0; height: 38px; display: flex; align-items: center; gap: 8px; padding: 0 4px 0 12px; border-radius: 19px; background: rgba(255,255,255,0.1); color: #8e8e93; }
+.sfield { flex: 1; min-width: 0; min-height: 38px; display: flex; align-items: center; gap: 8px; padding: 0 4px 0 12px; border-radius: 19px; background: rgba(255,255,255,0.1); color: #8e8e93; }
 .sfield > svg { width: 18px; height: 18px; flex: none; }
-.sfield input { flex: 1; min-width: 0; height: 100%; padding: 0; border: 0; outline: none; background: none; color: #fff; font: inherit; font-size: 16px; font-weight: 500;
+.sfield input { flex: 1; min-width: 0; padding: 0; border: 0; outline: none; background: none; color: #fff; font: inherit; font-size: 16px; font-weight: 500;
   user-select: text; -webkit-user-select: text; }
 .sfield input::placeholder { color: #8e8e93; }
 .sfield input::-webkit-search-cancel-button { -webkit-appearance: none; display: none; }
@@ -362,6 +492,10 @@ body.searching.selecting .hsearch { display: none; }
 .sorow > span { flex: 1; font-size: 16px; font-weight: 550; }
 .sorow .sseg button { min-width: 86px; padding: 8px 12px; }
 .sorow .sseg button.on { background: #fff; color: #000; }
+.bigtext .sorow { flex-wrap: wrap; row-gap: 6px; }
+.bigtext .sorow > span { flex-basis: 100%; }
+.bigtext .sorow .sseg { flex: 1 1 100%; }
+.bigtext .sorow .sseg button { flex: 1 1 0; min-width: 0; padding: 8px 6px; }
 /* pinned folders, in the tabs */
 .chip.pin { display: inline-flex; align-items: center; gap: 6px; padding-left: 11px; }
 .chip.pin svg { width: 15px; height: 15px; flex: none; color: #8fb4ff; }
@@ -369,12 +503,12 @@ body.searching.selecting .hsearch { display: none; }
 .chip.pin.on svg { color: #3a5fcc; }
 
 /* ---------------- list view: the grid's cards as rows ---------------- */
-#grid.list .card { height: 64px; display: flex; align-items: center; gap: 14px; }
-#grid.list .card::before { content: ''; position: absolute; inset: 3px -8px; border-radius: 14px; background: transparent; transition: background .15s; pointer-events: none; }
+#grid.list .card { height: var(--rowh, 64px); display: flex; align-items: center; gap: 14px; }
+#grid.list .card::before { content: ''; position: absolute; top: 3px; right: -8px; bottom: 3px; left: -8px; inset: 3px -8px; border-radius: 14px; background: transparent; transition: background .15s; pointer-events: none; }
 #grid.list .card:active::before { background: rgba(255,255,255,0.05); }
 body.selecting #grid.list .card.sel::before { background: rgba(255,255,255,0.09); }
 #grid.list .card .thumb { flex: none; width: 48px; border-radius: 11px; }
-#grid.list .card.folder .thumb svg { width: 64%; }
+#grid.list .card.folder .thumb svg:not(.prog) { width: 64%; }
 #grid.list .card .meta { flex: 1; min-width: 0; height: auto; padding: 0 34px 0 0; }
 #grid.list .card .name { font-size: 15px; font-weight: 600; text-overflow: ellipsis; }
 #grid.list .card .info { margin-top: 3px; font-size: 12.5px; }
@@ -386,3 +520,37 @@ body.selecting #grid.list .card.sel::before { background: rgba(255,255,255,0.09)
 #grid.list .card .prog { right: 10px; top: 10px; }
 #grid.list .card .check { left: 12px; top: 12px; }
 body.selecting #grid.list .card.sel .thumb { transform: translateZ(0) scale(.86); border-radius: 13px; }
+
+/* the text size (app.js readZoom): 1em tall in 100px text, never seen */
+#fzp { position: fixed; left: 0; top: 0; width: 1px; height: 1em; font-size: 100px; visibility: hidden; pointer-events: none; contain: strict; }
+/* the keyboard on a switch: its box is see-through over the drawn switch, which shows where the keyboard is */
+.stog input:focus-visible + span { outline: 2px solid #fff; outline-offset: 2px; }
+/* ...and on a file while selecting (a checkbox then) */
+#grid .card:focus-visible { outline: 2px solid #fff; outline-offset: 3px; border-radius: 16px; }
+/* An Android System WebView older than Chromium 84 leaves out gap in a row (it knows it only in a grid): the space
+   between the things in a row comes from margins there, so its buttons and words don't run together. (Unprefixed
+   appearance came in the same version: it tells such an engine.) One with a margin of its own keeps it */
+@supports not (appearance: none) {
+  .phint .pbtns > * + *, #toolbar > * + *, #usbBar > * + *:not(.ubgo), .abtns > * + * { margin-left: 10px; }
+  .plinks > * + *, .chips > * + *, .sfield > * + *, #selSend > * + * { margin-left: 8px; }
+  .hrow > * + *:not(.hacts):not(.hsel), .hsearch > * + *, #settings .shdr > * + * { margin-left: 4px; }
+  .pill > * + *:not(.count), .hacts > * + * { margin-left: 2px; }
+  .sitem > * + *:not(.tag), .tsheet .titem > * + *, #grid.list .card > * + * { margin-left: 14px; }
+  .sitem.stile > * + * { margin-left: 0; margin-top: 6px; }
+  #upd > * + *:not(.uclose):not(.ubtn):not(.ubar), #upd > .ubtn, .srow > * + *, .sorow > * + * { margin-left: 12px; }
+  .chip.pin > * + * { margin-left: 6px; }
+  /* ...and the space between the lines of a row that wraps (row-gap): each thing in it has it above, taken off the
+     row's own padding, so a row on one line is as tall as it was */
+  .bigtext #usbBar { padding-top: 2px; }
+  .bigtext #usbBar > * { margin-top: 6px; }
+  #upd.stack, .bigtext #upd { padding-top: 2px; }
+  #upd.stack > *, .bigtext #upd > * { margin-top: 8px; }
+  .bigtext .srow.ctl { padding-top: 3px; }
+  .bigtext .srow.ctl > *, .bigtext .srow.ctl.nav::after { margin-top: 8px; }
+  .bigtext .sorow { padding-top: 2px; }
+  .bigtext .sorow > * { margin-top: 6px; }
+}
+/* the keyboard's focus ring where :focus-visible isn't known (before Chromium 86): by whether a key was pressed last
+   (app.js: html.keys). Where it is known, the same ring as the two rules above draw */
+.keys .stog input:focus + span { outline: 2px solid #fff; outline-offset: 2px; }
+.keys #grid .card:focus { outline: 2px solid #fff; outline-offset: 3px; border-radius: 16px; }

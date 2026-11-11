@@ -24,6 +24,9 @@ concurrency:
 
 jobs:
   attach:
+    # the check below uses the release key in main's code (sign_release.js runs this on main): from another branch,
+    # changed code could let a wrong signature through
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -32,6 +35,8 @@ jobs:
       SIG: ${{ inputs.sig }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: Check the signature and attach it
         run: |

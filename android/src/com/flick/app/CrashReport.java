@@ -21,6 +21,7 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Pattern;
 
 /**
  * What made Flick close unexpectedly, kept so the next start can show it (CrashActivity) and the user can pass it on.
@@ -46,7 +47,7 @@ final class CrashReport {
                     e.printStackTrace(pw);
                     pw.flush();
                     FileOutputStream o = new FileOutputStream(new File(base.getFilesDir(), FILE));
-                    try { o.write(sw.toString().getBytes(StandardCharsets.UTF_8)); } finally { o.close(); }
+                    try { o.write(scrub(sw.toString()).getBytes(StandardCharsets.UTF_8)); } finally { o.close(); }
                 } catch (Throwable x) { /* nothing more can be done */ }
                 if (prev != null) prev.uncaughtException(t, e);
                 else { Process.killProcess(Process.myPid()); System.exit(10); }
@@ -67,10 +68,23 @@ final class CrashReport {
             catch (Throwable e) { /* Android's own record is a bonus */ }
         }
         if (out.length() == 0) return null;
+        String report = scrub(out.toString());
         // kept (until a newer one, or until it went with feedback) so Settings > Send feedback can offer to attach it
-        try { FileOutputStream o = new FileOutputStream(new File(c.getFilesDir(), LAST)); try { o.write(out.toString().getBytes(StandardCharsets.UTF_8)); } finally { o.close(); } }
+        try { FileOutputStream o = new FileOutputStream(new File(c.getFilesDir(), LAST)); try { o.write(report.getBytes(StandardCharsets.UTF_8)); } finally { o.close(); } }
         catch (Throwable e) { /* only feedback would have used it */ }
-        return out.toString();
+        return report;
+    }
+
+    // A report is shown, kept and maybe sent with feedback: what an exception's message can carry that isn't Flick's to
+    // pass on is left out. The query of an address (Flick's own requests carry the sign-in token there, next to file names
+    // and device ids) becomes "?…"; a token or password given by name (token=…, "token":"…", "pass":"…") keeps only its
+    // name. The stack trace itself stays as it was.
+    private static final Pattern QUERY = Pattern.compile("\\?[A-Za-z0-9_.~%-]+=[^\\s\"'<>)\\]}]*");
+    private static final Pattern SECRET = Pattern.compile("(?i)(\"?\\b(?:token|pass|password|passwd|secret)\"?\\s*[:=]\\s*\"?)[^\\s&\"',;)\\]}]+");
+
+    static String scrub(String s) {
+        if (s == null || s.length() == 0) return s;
+        return SECRET.matcher(QUERY.matcher(s).replaceAll("?…")).replaceAll("$1…");
     }
 
     private static final String LAST = "crash-last.txt";
@@ -81,7 +95,7 @@ final class CrashReport {
         File f = new File(c.getFilesDir(), LAST);
         if (!f.isFile()) return null;
         if (System.currentTimeMillis() - f.lastModified() > LAST_DAYS * 86400000L) { f.delete(); return null; }
-        String s = read(f, 64 * 1024);
+        String s = scrub(read(f, 64 * 1024));                    // (one kept by an older Flick, too)
         return s.length() > 0 ? s : null;
     }
 

@@ -155,13 +155,35 @@ final class Updater {
         } catch (Throwable e) { /* ignore */ }
     }
 
+    /**
+     * Why a download failed, for the page (app.js updWhy): a full phone is "no space" however Android words it
+     * ("write failed: ENOSPC (No space left on device)", or EDQUOT "Disk quota exceeded"), not "Couldn't reach your PC".
+     */
+    static String why(Throwable e) {
+        String w = String.valueOf(e.getMessage());
+        String l = w.toLowerCase(java.util.Locale.US);
+        return l.contains("enospc") || l.contains("no space") || l.contains("edquot") || l.contains("quota") ? "no space" : w;
+    }
+
     void fail(String why) { emit("upd-done", "ok", false, "why", why); }
 
     // ---------------------------------------------------------------- download + check
     /** sums + sig: the SHA256SUMS of the Flick release this update comes from, and its SHA256SUMS.sig. */
     void download(final String url, final long code, final long size, final String sha256, final String sums, final String sig) {
+        download(url, code, size, sha256, sums, sig, false);
+    }
+
+    /**
+     * The same; auto: Flick fetches it by itself (the user didn't ask): one from the internet (GitHub) then waits for a
+     * network without a data limit (Wi-Fi, Ethernet), and false is returned (nothing starts: the update card offers
+     * it, and the next look on such a network fetches it). One from the PC comes over the link to the PC, which uses no
+     * data plan. A download the user asks for goes on any network.
+     */
+    boolean download(final String url, final long code, final long size, final String sha256, final String sums, final String sig, boolean auto) {
+        if (Store.play(app)) return true;        // the Google Play version: Play updates it, nothing is ever fetched here
+        if (auto && !overLink(url) && metered(app)) return false;
         synchronized (this) {
-            if (busy) return;                    // a download is already running; its events reach the current page
+            if (busy) return true;               // a download is already running; its events reach the current page
             busy = true;
         }
         new Thread(new Runnable() {
@@ -194,12 +216,26 @@ final class Updater {
                     emit("upd-done", "ok", true, "code", code);
                 } catch (Throwable e) {
                     if (dest != null) { dest.delete(); releaseFile(dest).delete(); }
-                    emit("upd-done", "ok", false, "why", String.valueOf(e.getMessage()));
+                    emit("upd-done", "ok", false, "why", why(e));
                 } finally {
                     busy = false;
                 }
             }
         }, "flick-update").start();
+        return true;
+    }
+
+    /** url is the PC's (a port on this phone that leads to it): its bytes don't come over the phone's data plan. */
+    static boolean overLink(String url) {
+        try { return UpdateFetch.local(new java.net.URL(url).getHost()); } catch (Throwable e) { return false; }
+    }
+
+    /** The phone's network has a data limit (mobile data, a hotspot marked so), or can't be told: as if it had. */
+    static boolean metered(Context c) {
+        try {
+            android.net.ConnectivityManager cm = (android.net.ConnectivityManager) c.getSystemService(Context.CONNECTIVITY_SERVICE);
+            return cm == null || cm.isActiveNetworkMetered();
+        } catch (Throwable e) { return true; }
     }
 
     static void writeRelease(File apk, String sums, String sig) throws IOException {
@@ -336,6 +372,7 @@ final class Updater {
 
     // ---------------------------------------------------------------- install (UI thread)
     void install(MainActivity a) {
+        if (Store.play(app)) return;             // (the Google Play version never installs an app)
         act = a;
         final File f = ready;
         if (f == null || !f.isFile()) { emit("upd-fail", "why", "missing"); return; }

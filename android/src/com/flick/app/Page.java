@@ -1,8 +1,10 @@
 package com.flick.app;
 
 import android.Manifest;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.Build;
+import android.provider.Settings;
 
 import org.json.JSONObject;
 
@@ -26,10 +28,16 @@ final class Page {
 
     static MainActivity get() { return live.get(); }
 
-    /** The page is open and in front. */
+    /**
+     * The page is open and in front, where the user sees it: not under Lock Flick's cover. (Covered, what would show on
+     * the page goes in a notification instead: a device asking to send files would otherwise wait unseen until its
+     * question ran out.)
+     */
     static boolean inFront() {
         MainActivity a = live.get();
-        return a != null && a.isOnScreen();
+        if (a == null || !a.isOnScreen()) return false;
+        AppLock l = a.lock();
+        return l == null || !l.isLocked();
     }
 
     static void emit(String json) {
@@ -92,14 +100,23 @@ final class Page {
     }
 
     /** Android 13+: asks once to show notifications (the background link, ringing, links from the PC). */
-    static void askNotifications(final MainActivity a) {
+    static void askNotifications(final MainActivity a) { askNotifications(a, false); }
+
+    /**
+     * again: the user asked for them (Settings' Allow notifications): when Android won't show its question any more,
+     * its notification settings for Flick open instead, where they can be turned on (never a tap that does nothing).
+     */
+    static void askNotifications(final MainActivity a, final boolean again) {
         if (a == null || Build.VERSION.SDK_INT < 33) return;
         a.runOnUiThread(new Runnable() {
             @Override
             public void run() {
                 try {
-                    if (a.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                    if (a.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return;
+                    if (!a.wontAsk("notifyAsked", Manifest.permission.POST_NOTIFICATIONS)) {
                         a.requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIFY);
+                    } else if (again) {
+                        a.settings(new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, a.getPackageName()), REQ_NOTIFY);
                     }
                 } catch (Throwable e) { Bg.warn("notification permission", e); }
             }

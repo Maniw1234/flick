@@ -44,6 +44,29 @@ final class Parallel {
         Strike(String m, Throwable cause) { super(m, cause); }
     }
 
+    /**
+     * The PC said the file changed since it offered it (409 "changed": saved again there meanwhile): what arrived would
+     * be a mix of two versions, so the download stops and isn't tried again (a 2.0.0 PC never says this).
+     */
+    static final class Changed extends IOException {
+        private static final long serialVersionUID = 1L;
+        Changed() { super("changed"); }
+    }
+
+    /** Throws Changed when the PC's answer is 409 "changed" (body: up to 4 KB of it is read; the rest is left). */
+    static void changed(int code, InputStream body) throws Changed {
+        if (code != 409) return;
+        java.io.ByteArrayOutputStream b = new java.io.ByteArrayOutputStream();
+        try {
+            byte[] buf = new byte[4096];
+            int r;
+            while (body != null && b.size() < 4096 && (r = body.read(buf, 0, 4096 - b.size())) > 0) b.write(buf, 0, r);
+        } catch (Throwable e) { /* no body */ }
+        finally { try { if (body != null) body.close(); } catch (Throwable e) { /* ignore */ } }
+        try { if (new String(b.toByteArray(), "UTF-8").contains("changed")) throw new Changed(); }
+        catch (java.io.UnsupportedEncodingException e) { /* UTF-8 is always there */ }
+    }
+
     private static final ExecutorService POOL = Executors.newCachedThreadPool(new ThreadFactory() {
         @Override
         public Thread newThread(Runnable r) { Thread t = new Thread(r, "flick-part"); t.setDaemon(true); return t; }
@@ -52,12 +75,15 @@ final class Parallel {
     private Parallel() {}
 
     /**
-     * A connection to the PC (its address, or a port on this phone that leads to it), never through an HTTP proxy the
-     * network sets: Android applies one to 127.0.0.1 too unless it's excluded, and the proxy would see the pairing
-     * token in the clear (and couldn't reach the port anyway).
+     * A connection to the PC (a port on this phone that leads to it), never through an HTTP proxy the network sets:
+     * Android applies one to 127.0.0.1 too unless it's excluded, and the proxy would see the pairing token in the clear
+     * (and couldn't reach the port anyway). A plain one only while the relay the URL names is open (TlsProxy.Gate.own):
+     * the port of one that closed may be another app's by now, which would get the token and the file.
      */
     static HttpURLConnection open(String url) throws IOException {
-        return (HttpURLConnection) new URL(url).openConnection(java.net.Proxy.NO_PROXY);
+        URL u = new URL(url);
+        if ("http".equals(u.getProtocol())) TlsProxy.Gate.own(u);
+        return (HttpURLConnection) u.openConnection(java.net.Proxy.NO_PROXY);
     }
 
     /** partUrl: ".../api/part?tid=..&device=..&token=..&name=..[&verify=1]" (index, offset, parts, total and att are added). */
@@ -171,13 +197,13 @@ final class Parallel {
             c = open(url);
             g = Watchdog.guard(abort, c);
             c.setConnectTimeout(5000);
-            c.setReadTimeout(60000);
+            c.setReadTimeout(ANSWER_MAX_MS);
             c.setDoOutput(true);
             c.setUseCaches(false);
             c.setRequestMethod("POST");
             c.setRequestProperty("Content-Type", "application/octet-stream");
             c.setFixedLengthStreamingMode(len);
-            OutputStream out = g.watch(c.getOutputStream());
+            OutputStream out = Wire.pieces(g.watch(c.getOutputStream()));
             raf = new RandomAccessFile(f, "r");
             raf.seek(off);
             byte[] buf = new byte[256 * 1024];
@@ -195,7 +221,7 @@ final class Parallel {
             out.flush();
             out.close();
             g.idle();
-            int code = c.getResponseCode();
+            int code = answer(c, url);
             drain(code == 200 ? c.getInputStream() : c.getErrorStream());
             if (code != 200) throw new Strike("http " + code, null);
         } catch (IOException e) {
@@ -208,12 +234,15 @@ final class Parallel {
     }
 
     /** Fetches [0, total) of url into part as n byte ranges at once, written in place. */
-    static void download(final String url, final File part, final long total, int n, final Progress p) throws Exception {
+    static void download(final String url, final File part, final long total, int n, final Progress p) throws Exception { download(url, part, total, n, p, null); }
+
+    /** The same; abort (or null): Watchdog.abort(abort) stops it at once (its Cancel). */
+    static void download(final String url, final File part, final long total, int n, final Progress p, AtomicBoolean abort) throws Exception {
         RandomAccessFile pre = new RandomAccessFile(part, "rw");
         try { pre.setLength(total); } finally { pre.close(); }
         final long size = (total + n - 1) / n;
         final AtomicLong got = new AtomicLong();
-        final AtomicBoolean stop = new AtomicBoolean(false);
+        final AtomicBoolean stop = abort != null ? abort : new AtomicBoolean(false);
         List<Future<?>> fs = new ArrayList<Future<?>>();
         for (int i = 0; i < n; i++) {
             final long off = i * size, len = Math.max(0, Math.min(size, total - off));
@@ -239,6 +268,7 @@ final class Parallel {
                             // carries on from the bytes already written
                             c.setRequestProperty("Range", "bytes=" + (off + done) + "-" + (off + len - 1));
                             int code = c.getResponseCode();
+                            if (code == 409) changed(code, c.getErrorStream());
                             String cr = c.getHeaderField("Content-Range");
                             if (code != 206 || cr == null || !cr.endsWith("/" + total)) throw new Strike("http " + code, null);
                             InputStream in = w.watch(c.getInputStream());
@@ -261,6 +291,8 @@ final class Parallel {
                             if (done < len) throw new IOException("connection closed early");
                         } catch (IOException e) {
                             lastErr = w != null && w.ended() != null ? new Strike(w.ended(), e) : e;
+                            // changed on the PC: no range of it is fetched again, and the others stop now
+                            if (e instanceof Changed) { Watchdog.abort(stop); throw e; }
                             if (stop.get()) throw lastErr;
                             if ((done == before || lastErr instanceof Strike) && ++fails >= DOWN_FAILS) break;
                             try { Thread.sleep(300L * (fails + 1)); } catch (InterruptedException x) { throw lastErr; }
@@ -283,12 +315,15 @@ final class Parallel {
      * The same over Wire, straight to the PC (no local proxy in between): [0, total) of target on l into part, as n byte
      * ranges at once, each carrying on from what it wrote when it breaks.
      */
-    static void downloadDirect(final Wire.Link l, final String target, final File part, final long total, int n, final Progress p) throws Exception {
+    static void downloadDirect(final Wire.Link l, final String target, final File part, final long total, int n, final Progress p) throws Exception { downloadDirect(l, target, part, total, n, p, null); }
+
+    /** The same; abort (or null): Watchdog.abort(abort) stops it at once (its Cancel). */
+    static void downloadDirect(final Wire.Link l, final String target, final File part, final long total, int n, final Progress p, AtomicBoolean abort) throws Exception {
         RandomAccessFile pre = new RandomAccessFile(part, "rw");
         try { pre.setLength(total); } finally { pre.close(); }
         final long size = (total + n - 1) / n;
         final AtomicLong got = new AtomicLong();
-        final AtomicBoolean stop = new AtomicBoolean(false);
+        final AtomicBoolean stop = abort != null ? abort : new AtomicBoolean(false);
         List<Future<?>> fs = new ArrayList<Future<?>>();
         for (int i = 0; i < n; i++) {
             final long off = i * size, len = Math.max(0, Math.min(size, total - off));
@@ -313,6 +348,7 @@ final class Parallel {
                             // end, the range leaves its connection for the next request
                             c = Wire.Call.fetch(l, target, "Range: bytes=" + (off + done) + "-" + (off + len - 1) + "\r\n", 60000, code, clen, cr);
                             w = Watchdog.guard(stop, c);
+                            if (code[0] == 409) changed(409, c.body(clen[0]));
                             if (code[0] != 206 || cr[0] == null || !cr[0].endsWith("/" + total)) throw new Strike("http " + code[0], null);
                             InputStream in = w.watch(c.body(clen[0]));
                             raf = new RandomAccessFile(part, "rw");
@@ -331,6 +367,8 @@ final class Parallel {
                             if (done < len) throw new IOException("connection closed early");
                         } catch (IOException e) {
                             lastErr = w != null && w.ended() != null ? new Strike(w.ended(), e) : e;
+                            // changed on the PC: no range of it is fetched again, and the others stop now
+                            if (e instanceof Changed) { Watchdog.abort(stop); throw e; }
                             if (stop.get()) throw lastErr;
                             if ((done == before || lastErr instanceof Strike) && ++fails >= DOWN_FAILS) break;
                             try { Thread.sleep(300L * (fails + 1)); } catch (InterruptedException x) { throw lastErr; }
@@ -408,17 +446,17 @@ final class Parallel {
             c = open(url);
             g = Watchdog.guard(abort, c);
             c.setConnectTimeout(5000);
-            c.setReadTimeout(120000);
+            c.setReadTimeout(ANSWER_MAX_MS);
             c.setDoOutput(true);
             c.setUseCaches(false);
             c.setRequestMethod("POST");
             c.setRequestProperty("Content-Type", "application/x-flick-bundle");
             c.setChunkedStreamingMode(256 * 1024);
-            OutputStream out = new BufferedOutputStream(g.watch(c.getOutputStream()), 256 * 1024);
+            OutputStream out = new BufferedOutputStream(Wire.pieces(g.watch(c.getOutputStream())), 256 * 1024);
             b.write(out, abort, prog);
             out.close();
             g.idle();
-            int code = c.getResponseCode();
+            int code = answer(c, url);
             drain(code == 200 ? c.getInputStream() : c.getErrorStream());
             if (code != 200) throw new Strike("http " + code, null);
         } catch (IOException e) {
@@ -429,13 +467,76 @@ final class Parallel {
         }
     }
 
+    static volatile int WAIT_MS = 5000;               // how often a PC not answering yet is asked whether it's there
+    static volatile int QUIET_MS = 60000;             // a PC that doesn't answer that long is given up
+    static volatile long ALIVE_MS = 10 * 60000L;      // the longest wait for an answer from a PC that's there
+    // the read timeout of a request whose answer is waited for with answer() (set before it opens: Android's takes no
+    // change later)
+    static final int ANSWER_MAX_MS = (int) (10 * 60000L + 60000);
+
+    /**
+     * The PC's answer (its status) to c, whose body went through a local port (the page's encrypted link, Bluetooth's):
+     * waited for as long as the PC is there (asked every few seconds over another connection, GET /api/hello), up to
+     * ALIVE_MS, where a fixed time from the last write gave up on a slow link still delivering (what was written can be
+     * on its way for minutes: the buffers of both hops hold megabytes), and the file went again. A PC that answers
+     * nothing for QUIET_MS ends it (a body that stops coming is closed by the PC itself). c's read timeout must be
+     * ANSWER_MAX_MS.
+     */
+    static int answer(final HttpURLConnection c, String url) throws IOException {
+        final String hello = helloOf(url);
+        if (hello == null) return c.getResponseCode();             // (nothing to ask: the read timeout decides)
+        final AtomicBoolean over = new AtomicBoolean();
+        Future<?> w = POOL.submit(new Runnable() {
+            @Override
+            public void run() {
+                long t0 = mono(), since = t0;
+                while (!over.get()) {
+                    try { Thread.sleep(WAIT_MS); } catch (InterruptedException e) { return; }
+                    if (over.get()) return;
+                    if (mono() - t0 < ALIVE_MS && alive(hello)) since = mono();
+                    else if (mono() - since >= QUIET_MS) { if (!over.get()) c.disconnect(); return; }
+                }
+            }
+        });
+        try { return c.getResponseCode(); } finally { over.set(true); w.cancel(true); }
+    }
+
+    /** The PC's hello where a request's url goes (all of it before "/api/": the local port, and any prefix it has), or null. */
+    static String helloOf(String url) {
+        int i = url == null ? -1 : url.indexOf("/api/");
+        return i > 0 ? url.substring(0, i) + "/api/hello" : null;
+    }
+
+    /** The PC answers (a short request on a connection of its own). */
+    private static boolean alive(String hello) {
+        HttpURLConnection h = null;
+        try {
+            h = open(hello);
+            h.setConnectTimeout(5000);
+            h.setReadTimeout(15000);
+            h.setUseCaches(false);
+            int code = h.getResponseCode();
+            drain(code == 200 ? h.getInputStream() : h.getErrorStream());
+            return code == 200;
+        } catch (Throwable e) {
+            return false;
+        } finally {
+            if (h != null) h.disconnect();
+        }
+    }
+
+    private static long mono() { return System.nanoTime() / 1000000L; }
+
     private static void finish(List<Future<?>> fs, AtomicBoolean stop) throws Exception {
         Exception failed = null;
         for (Future<?> f : fs) {
             try { f.get(); }
             catch (ExecutionException e) {
-                // one part failed for good: the others stop now (their connections are cut, not left to finish)
-                if (failed == null) { failed = e.getCause() instanceof Exception ? (Exception) e.getCause() : e; Watchdog.abort(stop); }
+                Exception x = e.getCause() instanceof Exception ? (Exception) e.getCause() : e;
+                // one part failed for good: the others stop now (their connections are cut, not left to finish); the
+                // file having changed on the PC is the reason given, not the others' "aborted"
+                if (failed == null || (x instanceof Changed && !(failed instanceof Changed))) failed = x;
+                Watchdog.abort(stop);
             }
         }
         if (failed != null) throw failed;

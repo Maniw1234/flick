@@ -63,9 +63,18 @@ public class ActionActivity extends Activity {
                 // taken now, while this has focus; an image in it is read and converted off the main thread
                 final ClipData cd = Clip.grab(this);
                 final Actions.Report say = toast;
-                Bg.send("send clipboard", new Runnable() {
-                    @Override public void run() { Actions.sendClipboard(app, Clip.describe(app, cd, true), say); }
+                // counted as a transfer while Flick is still in front, as a photo is: once this is gone Flick is in the
+                // background, where Android 14 soon stops an app's own threads and Android 15 cuts its network, so a send
+                // that takes a while (a picture, a PC that moved, a phone over Bluetooth) stalled until Flick was opened
+                final Runnable over = cd != null && cd.getItemCount() > 0 ? Actions.hold(app) : null;
+                boolean started = Bg.send("send clipboard", new Runnable() {
+                    @Override public void run() {
+                        boolean handed = false;
+                        try { Actions.sendClipboard(app, Clip.describe(app, cd, true), over, say); handed = true; }
+                        finally { if (!handed && over != null) over.run(); }
+                    }
                 });
+                if (!started && over != null) over.run();
             } else {
                 // counted as a transfer while Flick is still in front: it keeps running once this is gone
                 Transfers.hold(app, true);

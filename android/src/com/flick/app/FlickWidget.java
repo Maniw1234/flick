@@ -8,9 +8,9 @@ import android.content.Context;
 import android.widget.RemoteViews;
 
 /**
- * Home-screen widget with two buttons, "Last photo" and "Clipboard": each sends that to the paired PC through
- * ActionActivity. Layout res/layout/widget_flick.xml, provider info res/xml/widget_flick_info.xml (no R class: found by
- * name).
+ * Home-screen widget with two buttons, "Last photo" and "Clipboard": each sends that where one-tap sends go (the paired
+ * PC, or the phone picked on the page) through ActionActivity. Layout res/layout/widget_flick.xml, provider info
+ * res/xml/widget_flick_info.xml (no R class: found by name).
  */
 public class FlickWidget extends AppWidgetProvider {
     @Override
@@ -21,10 +21,10 @@ public class FlickWidget extends AppWidgetProvider {
     }
 
     static RemoteViews views(Context c) {
-        String pkg = c.getPackageName();
-        RemoteViews v = new RemoteViews(pkg, c.getResources().getIdentifier("widget_flick", "layout", pkg));
-        v.setOnClickPendingIntent(c.getResources().getIdentifier("w_photo", "id", pkg), pending(c, "photo", 31));
-        v.setOnClickPendingIntent(c.getResources().getIdentifier("w_clip", "id", pkg), pending(c, "clip", 32));
+        String res = Features.resPackage(c);       // (not the app's package in the Google Play version)
+        RemoteViews v = new RemoteViews(c.getPackageName(), c.getResources().getIdentifier("widget_flick", "layout", res));
+        v.setOnClickPendingIntent(c.getResources().getIdentifier("w_photo", "id", res), pending(c, "photo", 31));
+        v.setOnClickPendingIntent(c.getResources().getIdentifier("w_clip", "id", res), pending(c, "clip", 32));
         return v;
     }
 

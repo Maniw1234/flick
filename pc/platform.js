@@ -28,7 +28,7 @@ function quarantine(file, all) {
   execFile('/usr/bin/xattr', ['-w'].concat(all ? ['-r'] : [], ['com.apple.quarantine', value, file]), { timeout: 60000 }, () => {});
 }
 
-/** The name the user gave this Mac ("Mani's MacBook Air", as AirDrop shows it), or '' */
+/** The name the user gave this Mac ("Alex's MacBook Air", as AirDrop shows it), or '' */
 function macName() {
   return new Promise((resolve) => {
     execFile('/usr/sbin/scutil', ['--get', 'ComputerName'], { timeout: 4000 }, (err, out) => resolve(err ? '' : String(out || '').trim()));
@@ -36,7 +36,7 @@ function macName() {
 }
 
 // ------------------------------------------------------------ Linux
-/** The account's full name ("Mani Weinstein": the GECOS field up to its first comma), or '' */
+/** The account's full name ("Alex Morgan": the GECOS field up to its first comma), or '' */
 function fullName(user) {
   return new Promise((resolve) => {
     execFile('getent', ['passwd', String(user)], { timeout: 4000 }, (err, out) => {
@@ -118,7 +118,11 @@ function linuxEntries(o) {
   });
   const auto = path.join(configHome(), 'autostart', 'flick.desktop');
   if (o.startup) writeIfChanged(auto, entry(['Exec=' + exec + ' --hidden', 'X-GNOME-Autostart-enabled=true']), log);
-  else fs.rm(auto, { force: true }, () => {});
+  // (removed at once, as it's written at once: turned off and on again quickly, a removal still on its way in the
+  // background found the entry the "on" had kept, and deleted it)
+  else {
+    try { fs.rmSync(auto, { force: true }); } catch (e) { log('autostart/flick.desktop: ' + e.message); }
+  }
 }
 
 /**
@@ -135,7 +139,11 @@ function relaunch(args) {
 }
 
 // ------------------------------------------------------------ "Phone can't connect?"
-/** What to say (and the settings page to open) when the phone can't reach this computer: { text, url? } */
+/**
+ * What to say (and the settings page to open) when the phone can't reach this computer: { text, cmd?, url? }.
+ * ports: { tcp, udp }; tcp: the port, or [first, last]: every port Flick may listen on (it takes the next one when its
+ * own is taken, which can happen on one start and not the next: a rule for one port would let phones in on some days only)
+ */
 function connectHelp(ports) {
   if (IS_MAC) {
     return {
@@ -144,9 +152,12 @@ function connectHelp(ports) {
       url: 'x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork',
     };
   }
+  // (cmd: the command to type, on a line of its own to copy)
+  const [first, last] = [].concat(ports.tcp);
+  const range = last > first;
   return {
-    text: 'If a firewall is on, it has to let the phone in: TCP port ' + ports.tcp + ' and UDP port ' + ports.udp +
-      '. With ufw: sudo ufw allow ' + ports.tcp + '/tcp && sudo ufw allow ' + ports.udp + '/udp',
+    text: 'If a firewall is on, it has to let the phone in: TCP ' + (range ? 'ports ' + first + ' to ' + last : 'port ' + first) + ' and UDP port ' + ports.udp + '. With ufw:',
+    cmd: 'sudo ufw allow ' + first + (range ? ':' + last : '') + '/tcp && sudo ufw allow ' + ports.udp + '/udp',
   };
 }
 

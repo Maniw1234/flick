@@ -1,0 +1,71 @@
+/* Connect (connect.js): hold it here, Allow on the other device */
+.cn { display: flex; align-items: flex-start; gap: 14px; padding: 12px 14px; margin-top: 8px; }
+.cn.flash { animation: cnflash .9s ease-out; }
+@keyframes cnflash { 0% { box-shadow: inset 0 0 0 2px var(--accent); } 100% { box-shadow: inset 0 0 0 2px transparent; } }
+.cnbtn { position: relative; flex: none; width: 56px; height: 56px; border-radius: 50%; border: 0; padding: 0; cursor: pointer;
+  background: rgba(255,255,255,0.08); color: var(--text); display: grid; place-items: center; touch-action: none;
+  transition: transform .12s cubic-bezier(.2,.8,.2,1), background .15s; }
+.cnbtn:not([aria-disabled="true"]):hover { background: rgba(255,255,255,0.12); }
+.cnbtn.down { transform: scale(.94); background: rgba(255,255,255,0.14); }
+/* (while it asks: not disabled, so the keyboard stays on it) */
+.cnbtn[aria-disabled="true"] { cursor: default; opacity: .55; }
+.cnbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.cnring { position: absolute; inset: 0; width: 56px; height: 56px; transform: rotate(-90deg); pointer-events: none; }
+.cnring circle { fill: none; stroke-width: 3; }
+.cnring .trk { stroke: rgba(255,255,255,0.12); }
+.cnring .arc { stroke: var(--accent); stroke-linecap: round; stroke-dasharray: 131.95; stroke-dashoffset: 131.95; }
+.cnbtn.busy .cnring .trk { stroke: var(--accent); stroke-dasharray: 18 14; animation: cnspin 1.4s linear infinite; transform-origin: 24px 24px; }
+@keyframes cnspin { to { stroke-dashoffset: -64; } }
+.cnico { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+.cnico circle { fill: currentColor; stroke: none; }
+.cntxt { flex: 1; min-width: 0; padding-top: 2px; }
+/* (read out with Connect, not shown) */
+.cnhow { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.cnt1 { font-size: 14px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+.cnt2 { margin-top: 3px; color: var(--sub); line-height: 1.4; overflow-wrap: anywhere; }
+.cn[data-phase="failed"] .cnt2 { color: #ffb4a8; }
+.cn[data-phase="done"] .cnt1::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); margin-right: 8px; vertical-align: 1px; }
+.cnbody:empty { display: none; }
+.cnbody { margin-top: 8px; }
+.cnpin { display: block; font-size: 30px; font-weight: 700; letter-spacing: .06em; font-variant-numeric: tabular-nums; line-height: 1.15; margin: 2px 0 2px; }
+.cnlist { display: flex; flex-direction: column; gap: 4px; }
+.cnitem { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; border: 0; border-radius: 6px; padding: 8px 10px;
+  background: rgba(255,255,255,0.06); cursor: pointer; }
+.cnitem:hover { background: rgba(255,255,255,0.1); }
+.cnic { flex: none; width: 20px; height: 20px; }
+.cnic svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
+.cnname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cntag { flex: none; font-size: 11.5px; color: var(--accent); }
+.cncancel { margin-top: 6px; padding: 2px 0; }
+/* allowed there: Same code / Different code */
+.cnbtns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+/* a phone on another Wi-Fi: this PC's own network, and the code its camera joins from */
+.cnhot { margin-top: 2px; }
+.cnhotwhy { margin-top: 4px; color: var(--sub); font-size: 12px; line-height: 1.4; }
+.cnqr { width: 184px; height: 184px; border-radius: 10px; background: #fff; display: grid; place-items: center; margin: 4px 0 6px; }
+.cnqr svg { display: block; shape-rendering: crispEdges; }
+.cnqr path { fill: #000; }
+.cnwifi { color: var(--sub); line-height: 1.45; overflow-wrap: anywhere; }
+.cnwifi b { color: var(--text); font-weight: 600; }
+/* that network, still on after Connect for a phone connected over it */
+.cnhoton { color: var(--sub); line-height: 1.45; overflow-wrap: anywhere; }
+.cnhoton b { color: var(--text); font-weight: 600; }
+.cnhotoff { padding: 0; }
+/* Can't find your phone?: the ways, as plain choices; then small links */
+.cnways { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; }
+.cnway { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; text-align: left; border: 0; border-radius: 8px; padding: 9px 12px;
+  background: rgba(255,255,255,0.06); cursor: pointer; }
+.cnway:hover { background: rgba(255,255,255,0.1); }
+.cnw1 { font-weight: 600; }
+.cnw2 { color: var(--sub); font-size: 12px; line-height: 1.4; }
+.cnhow2 { color: var(--sub); font-size: 12.5px; line-height: 1.45; padding: 2px 12px 4px; }
+.cnmore { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 8px; }
+.cnmore .link, .cnscan { padding: 2px 0; }
+.cnaddr { flex-basis: 100%; margin: -2px 0 2px; overflow-wrap: anywhere; }
+.cnscan { display: block; margin-bottom: 4px; }
+@media (prefers-reduced-motion: reduce) { .cnbtn.busy .cnring .trk { animation: none; } .cn.flash { animation: none; } }
+
+/* the send row: where sends from here go (the phone in use, or another computer) */
+.sendto { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.sendto label { color: var(--sub); }
+.sendto select { flex: 1; min-width: 0; }

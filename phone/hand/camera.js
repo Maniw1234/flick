@@ -8,7 +8,8 @@
 //     size: 320,                              // the frames' long side (a PC's hand is farther away: 640)
 //     reader: false,                          // frames straight from the camera's track (the PC's hidden window)
 //     onResult(r) {},                         // r: { hand, g, w, h, t } for every frame the tracker looked at
-//     onState(s, detail) {},                  // 'starting' | 'on' | 'off' | 'denied' | 'nocamera' | 'error'
+//     onState(s, detail) {},                  // 'starting' | 'on' | 'off' | 'denied' | 'nocamera' | 'error' (detail
+//                                             // 'tracker: ...' when the hand tracker couldn't start, not the camera)
 //   });
 //   await cam.start(); ... cam.stop();
 //
@@ -71,6 +72,10 @@
           w.onerror = (e) => { clearTimeout(t); rej(new Error((e && e.message) || 'worker error')); };
           const list = Object.values(files).filter((b) => b && b.byteLength);
           w.postMessage({ t: 'init', files }, list);
+        }).catch((err) => {
+          // a tracker that didn't start is let go: every later try made another, each keeping the models it was sent
+          try { w.terminate(); } catch (e) { /* ignore */ }
+          throw err;
         });
         // closed meanwhile (close()): not wanted any more
         if (this.ready !== p) { try { w.terminate(); } catch (e) { /* ignore */ } throw new Error('closed'); }
@@ -106,7 +111,8 @@
       try {
         await this._worker();
       } catch (err) {
-        if (current()) { this.on = false; this.state('error', String((err && err.message) || err)); }
+        // (said as the tracker's: the camera itself is fine, and a phone said it was busy)
+        if (current()) { this.on = false; this.state('error', 'tracker: ' + String((err && err.message) || err)); }
         return false;
       }
       if (!current()) return false;
@@ -176,6 +182,11 @@
       this.gen = (this.gen || 0) + 1;
       this.want = null;
       clearTimeout(this.timer);
+      // the frame the tracker still has is not waited for (its answer is let go): turned off and on again at once, Air
+      // grab waited for it, or after close() for the 3 s a frame is given, before it sent the next one
+      this.inflight = 0;
+      this.busy = false;
+      clearTimeout(this.busyT);
       this._release();
       if (this.worker) this.worker.postMessage({ t: 'reset' });
       this.state('off');

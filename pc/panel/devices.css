@@ -1,0 +1,41 @@
+/* Devices (devices.js): Flick on other computers nearby, pairing with the code, sending to them */
+
+.pintro { margin: 4px 2px 12px; color: var(--sub); font-size: 12.5px; line-height: 1.45; }
+#peerList:empty { display: none; }
+.prow { align-items: flex-start; padding: 12px 0; transition: background .12s; border-radius: 6px; }
+.prow.over { background: rgba(76,194,255,0.14); box-shadow: inset 0 0 0 2px var(--accent); }
+.pico { flex: none; width: 34px; height: 34px; border-radius: 8px; background: rgba(255,255,255,0.06); display: grid; place-items: center; margin-top: 1px; }
+.pico svg { width: 20px; height: 20px; fill: none; stroke: var(--text); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; opacity: .85; }
+.prow .wmain { display: flex; flex-direction: column; gap: 2px; }
+.prow .d { white-space: normal; line-height: 1.4; }
+.prow .d.bad { color: #ff99a4; }
+.pacts { flex: none; display: flex; align-items: center; gap: 8px; order: 3; }
+.prow .pico { order: 1; }
+.prow .wmain { order: 2; }
+.pacts .btn { padding: 5px 14px; font-size: 12.5px; }
+.plinks { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin-top: 4px; font-size: 12px; }
+.plinks .link { padding: 0; font-size: 12px; }
+.plinks select { padding: 2px 6px; font-size: 12px; }
+.pcode { margin-top: 6px; padding: 10px 12px; border-radius: 6px; background: rgba(255,255,255,0.06); line-height: 1.45; font-size: 12.5px; }
+.pcode .pin { font-size: 17px; font-weight: 600; display: block; margin: 2px 0 4px; }
+.pcode .pbtns2 { display: flex; gap: 8px; margin-top: 8px; }
+.pcode .btn { padding: 5px 14px; font-size: 12.5px; }
+.pbar { height: 4px; border-radius: 2px; background: rgba(255,255,255,0.12); overflow: hidden; margin: 6px 0 2px; }
+.pbar > div { height: 100%; width: 0; background: var(--accent); transition: width .2s linear; }
+.pbar.busy > div { width: 30%; animation: pslide 1.1s ease-in-out infinite alternate; }
+@keyframes pslide { from { transform: translateX(-10%); } to { transform: translateX(240%); } }
+@media (prefers-reduced-motion: reduce) { .pbar.busy > div { animation: none; width: 100%; opacity: .5; } }
+.pwait { display: flex; align-items: center; gap: 10px; padding: 18px 4px; color: var(--sub); font-size: 12.5px; line-height: 1.45; }
+.pspin { flex: none; width: 16px; height: 16px; border-radius: 50%; border: 2px solid rgba(255,255,255,0.18); border-top-color: var(--accent); animation: pspin .9s linear infinite; }
+@keyframes pspin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .pspin { animation: none; } }
+/* the hint while files are dragged over the list: a strip at the bottom, so the devices to drop on stay in plain view */
+#peerDrop { inset: auto 8px 8px; height: 44px; border-style: solid; background: rgba(20,20,20,0.94); font-size: 13px; }
+.prow .pin:focus-visible, .prow [data-k="wait"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+
+/* Connect a device (connect.js), from Devices */
+.pconnect { display: block; margin: 0 0 12px; }
+@media (forced-colors: active) {
+  .pbar { forced-color-adjust: none; background: Canvas; box-shadow: inset 0 0 0 1px GrayText; }
+  .pbar > div { background: Highlight; }
+}

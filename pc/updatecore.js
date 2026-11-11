@@ -63,11 +63,40 @@ function readCurrent(root) {
   } catch (e) { return null; }
 }
 
+// A folder's own entries on disk (POSIX: until then a power cut can undo a rename or lose a new file's name). Windows
+// can't open a folder to do it (and what it renames is on disk once that returns).
+function syncDirSync(dir) {
+  if (process.platform === 'win32') return;
+  let fd = null;
+  try { fd = fs.openSync(dir, 'r'); fs.fsyncSync(fd); } catch (e) { /* a file system that can't: as it is */ } finally { if (fd !== null) try { fs.closeSync(fd); } catch (e) { /* ignore */ } }
+}
+async function syncDir(dir) {
+  if (process.platform === 'win32') return;
+  let fh = null;
+  try { fh = await fs.promises.open(dir, 'r'); await fh.sync(); } catch (e) { /* as above */ } finally { if (fh) await fh.close().catch(() => {}); }
+}
+// a small file written whole and on disk before it's used
+function writeSyncedSync(file, data) {
+  const fd = fs.openSync(file, 'w');
+  try { fs.writeSync(fd, data); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+}
+
+/**
+ * On disk before this returns, whole (durable: the update's files with it, see installFiles). A power cut just after an
+ * update was made ready must never leave Flick pointed at a version whose files never reached the disk: such a copy
+ * starts as nothing at all (an empty main.js is no error), three times, before it's skipped. The count of tries each
+ * start writes is flushed too: where a rename that wasn't flushed comes back after a power cut as an empty file (NTFS,
+ * XFS), the next start couldn't read current.json, would run the installed version and tidy the update away. (A small
+ * file: a few ms at most, and only when a downloaded version starts.) Not written when it says that already.
+ */
 function writeCurrent(root, c) {
+  const file = path.join(root, 'current.json'), text = JSON.stringify(c);
+  try { if (fs.readFileSync(file, 'utf8') === text) return; } catch (e) { /* not there, or can't be read: written */ }
   fs.mkdirSync(root, { recursive: true });
   const tmp = path.join(root, 'current.json.tmp');
-  fs.writeFileSync(tmp, JSON.stringify(c));
-  fs.renameSync(tmp, path.join(root, 'current.json'));
+  writeSyncedSync(tmp, text);
+  fs.renameSync(tmp, file);
+  syncDirSync(root);
 }
 
 function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
@@ -126,8 +155,52 @@ function readProof(dir, version, keys) {
 
 function writeProof(dir, p) {
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'SHA256SUMS'), p.sums);
-  fs.writeFileSync(path.join(dir, 'SHA256SUMS.sig'), p.sig);
+  writeSyncedSync(path.join(dir, 'SHA256SUMS'), p.sums);
+  writeSyncedSync(path.join(dir, 'SHA256SUMS.sig'), p.sig);
+  syncDirSync(dir);
+}
+
+/**
+ * Any program the user runs can write in the update folder, and Flick runs what's there at its next start, with what the
+ * user allowed Flick alone (its firewall rule, a Mac's camera): so a downloaded version is started only if it is still
+ * what Flick's release key signed. Its signed SHA256SUMS names the bundle's sha256, the bundle kept with it has it, and
+ * every file in the folder is the bundle's own, byte for byte, with nothing added (a file "x" beside "x.js" would be
+ * loaded in its place). Returns null when it is, else what isn't.
+ */
+function checkUpdate(dir, version, keys) {
+  const proof = readProof(dir, version, keys);
+  if (!proof) return 'no signed SHA256SUMS';
+  const zipName = bundleName(version);
+  const sum = proof.list.get(zipName);
+  if (!sum) return 'its bundle isn\'t in SHA256SUMS';
+  let entries;
+  try {
+    const zip = fs.readFileSync(path.join(dir, zipName));
+    if (sha256(zip) !== sum) return 'its bundle isn\'t the signed one';
+    entries = new Map(zipEntries(zip).map((e) => [e.name, e]));
+  } catch (e) { return 'its bundle: ' + e.message; }
+  const own = new Set(['SHA256SUMS', 'SHA256SUMS.sig', zipName]);
+  let found = 0;
+  const walk = (d, rel) => {
+    for (const ent of fs.readdirSync(d, { withFileTypes: true })) {
+      const name = rel + ent.name;
+      if (ent.isDirectory()) { const why = walk(path.join(d, ent.name), name + '/'); if (why) return why; continue; }
+      if (!rel && own.has(name)) continue;
+      // (what Finder or Explorer leave in a folder someone looked into: nothing ever loads them)
+      if (/^(\.DS_Store|Thumbs\.db|desktop\.ini)$/i.test(ent.name) && !entries.has(name) && ent.isFile()) continue;
+      const e = entries.get(name);
+      if (!e || !ent.isFile()) return 'not in its bundle: ' + name;
+      const data = e.method === 0 ? e.raw : zlib.inflateRawSync(e.raw, { maxOutputLength: MAX_ENTRY });
+      if (!data.equals(fs.readFileSync(path.join(d, ent.name)))) return 'changed: ' + name;
+      found++;
+    }
+    return null;
+  };
+  try {
+    const why = walk(dir, '');
+    if (why) return why;
+  } catch (e) { return e.message; }
+  return found === entries.size ? null : 'files missing';
 }
 
 /**
@@ -202,21 +275,27 @@ function bundleMeta(files, version) {
   return meta;
 }
 
-/** installBundle from files already unpacked (unzipAllAsync), written in the background */
+/** installBundle from files already unpacked (unzipAllAsync), written in the background, and on disk (each file, and each
+ * folder's entries) before the folder is renamed into place: see writeCurrent */
 async function installFiles(root, version, files) {
   const meta = bundleMeta(files, version);
   await fs.promises.mkdir(root, { recursive: true });
   const tmp = path.join(root, '.tmp-' + version + '-' + crypto.randomBytes(4).toString('hex'));
   const dest = path.join(root, version);
   try {
+    const dirs = new Set([tmp]);
     for (const f of files) {
       const full = path.join(tmp, ...f.name.split('/'));
       if (!full.startsWith(tmp + path.sep)) throw new Error('bad path');
+      for (let d = path.dirname(full); d.startsWith(tmp) && !dirs.has(d); d = path.dirname(d)) dirs.add(d);
       await fs.promises.mkdir(path.dirname(full), { recursive: true });
-      await fs.promises.writeFile(full, f.data, f.exec ? { mode: 0o755 } : undefined);
+      const fh = await fs.promises.open(full, 'w', f.exec ? 0o755 : 0o666);
+      try { await fh.writeFile(f.data); await fh.sync(); } finally { await fh.close(); }
     }
+    for (const d of [...dirs].sort((a, b) => b.length - a.length)) await syncDir(d);      // (deepest first)
     await fs.promises.rm(dest, { recursive: true, force: true });
     await fs.promises.rename(tmp, dest);
+    await syncDir(root);
   } catch (e) {
     await fs.promises.rm(tmp, { recursive: true, force: true }).catch(() => {});
     throw e;
@@ -260,4 +339,5 @@ function pruneUpdates(root, keep) {
 module.exports = {
   updatesRoot, bundleName, parseVersion, newer, readCurrent, writeCurrent, sha256, unzipAll, installBundle, pruneUpdates,
   RELEASE_KEYS, releaseMessage, verifyRelease, parseSums, readProof, writeProof, sha256Async, unzipAllAsync, installFiles,
+  checkUpdate,
 };

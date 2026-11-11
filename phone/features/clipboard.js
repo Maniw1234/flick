@@ -35,6 +35,8 @@
   function clipOf(r) {
     if (!r) return null;
     const fromPc = r.fromPc === true, hash = typeof r.hash === 'string' ? r.hash : '';
+    // over 1 MB: the app says so instead of handing over a part of it (never sent cut short without a word)
+    if (r.kind === 'text' && r.tooBig === true) return { kind: 'text', tooBig: true, fromPc, hash };
     if (r.kind === 'text' && typeof r.text === 'string' && r.text.length) return { kind: 'text', text: r.text, fromPc, hash };
     if (r.kind === 'image' && typeof r.png === 'string' && r.png.length) return { kind: 'image', png: r.png, fromPc, hash };
     return null;
@@ -43,12 +45,15 @@
   const hashOf = (c) => c.hash || X.hash(c.kind === 'image' ? c.png : c.text);
   const utf8 = (s) => { try { return new TextEncoder().encode(s).length; } catch (e) { return s.length * 3; } };
 
+  const TOO_MUCH = 'That’s too much text to send (over 1 MB)';
+
   function send(c, auto) {
+    if (c.tooBig) { if (!auto) A.toast(TOO_MUCH, 2600); return false; }
     const msg = c.kind === 'image' ? { t: 'clip', kind: 'image', png: c.png } : { t: 'clip', kind: 'text', text: c.text };
     const json = JSON.stringify(msg);
     const bytes = c.kind === 'image' ? json.length : utf8(json);
     if (c.kind === 'text' ? utf8(c.text) > TEXT_MAX : bytes > MSG_MAX) {
-      if (!auto) A.toast(c.kind === 'image' ? 'That picture is too big to send' : 'That’s too much text to send', 2400);
+      if (!auto) A.toast(c.kind === 'image' ? 'That picture is too big to send' : TOO_MUCH, 2600);
       return false;
     }
     if (bytes > WS_MAX) {
@@ -66,8 +71,15 @@
     return true;
   }
 
-  // ••• › Send clipboard
+  // ••• › Send clipboard: to where flicks go (the PC, or the phone picked as the place flicks go)
   async function sendNow() {
+    const t = A.flickTarget ? A.flickTarget() : null;
+    if (t && t.kind === 'phone' && A.has('sendClipboardTo')) {
+      // the app reads it and sends it over that phone's link, and says how it went (one marked private goes too: the
+      // user asked)
+      if (A.nc('sendClipboardTo', t.id) === null) A.toast('Couldn’t read your clipboard', 2200);
+      return;
+    }
     if (!X.needPc('Connect to your PC to send the clipboard')) return;
     const { c, r } = await read('', false);
     if (!c && r.sensitive === true) {
@@ -112,6 +124,7 @@
       return;
     }
     if (r.same || !c) return;                            // the one dealt with last time (or unreadable)
+    if (c.tooBig) { A.pref.set('clipSeen', r.id || ''); return; }   // too much to sync: skipped (the next one goes)
     if (hashOf(c) === A.pref.get('clipHash', '') || send(c, true)) A.pref.set('clipSeen', r.id || '');
   }
 
@@ -119,7 +132,11 @@
     if (e.t === 'clip-read') { const f = waiting.get(e.req); if (f) { waiting.delete(e.req); f(e); } }
     else if (e.t === 'resume') want(500);
     else if (e.t === 'pause') { wantAt = 0; clearTimeout(tryT); }
-    else if (e.t === 'clip-in') {
+    else if (e.t === 'peer-clip') {
+      // another phone's clipboard, put on this one by the app: not sent on to the PC (it's marked as from Flick)
+      A.pref.set('clipAdopt', '1');
+      if (!document.hidden) A.toast('Copied from ' + (X.clean(e.from) || 'another phone'), 1800);
+    } else if (e.t === 'clip-in') {
       // the app put a clipboard from the PC on this phone (in the background, say)
       own = own.filter((w) => Date.now() - w.at < 1500);
       const i = own.findIndex((w) => w.kind === e.kind);

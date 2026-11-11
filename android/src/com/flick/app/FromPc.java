@@ -43,7 +43,7 @@ final class FromPc {
     static boolean open(Context c, String url) {
         if (!Links.ok(url)) return false;
         try {
-            Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url).normalizeScheme());   // (Android matches "HTTPS" only as "https")
             i.addCategory(Intent.CATEGORY_BROWSABLE);
             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             c.startActivity(i);
@@ -63,13 +63,13 @@ final class FromPc {
             if (nm == null) return;
             int id;
             synchronized (FromPc.class) { id = LINK_NOTE_FIRST + nextNote; nextNote = (nextNote + 1) % LINK_NOTES; }
-            Intent view = new Intent(Intent.ACTION_VIEW, Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            Intent view = new Intent(Intent.ACTION_VIEW, Uri.parse(url).normalizeScheme()).addCategory(Intent.CATEGORY_BROWSABLE).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             PendingIntent pi = PendingIntent.getActivity(app, 100 + id, view, Features.piFlags());
             Notification.Builder b = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(app, Features.CH_LINKS) : new Notification.Builder(app).setPriority(Notification.PRIORITY_HIGH);
             b.setSmallIcon(Features.icon(app, "ic_stat_flick", android.R.drawable.stat_notify_more))
                     .setContentTitle("Link from " + (pcName == null || pcName.length() == 0 ? "your PC" : pcName))
-                    .setContentText(url)
-                    .setStyle(new Notification.BigTextStyle().bigText(url))
+                    .setContentText(Links.brief(url, 28))      // (one line: the site's end kept, the whole address below)
+                    .setStyle(new Notification.BigTextStyle().bigText(Links.shown(url)))
                     .setAutoCancel(true)
                     .setCategory(Notification.CATEGORY_MESSAGE)
                     .setContentIntent(pi);

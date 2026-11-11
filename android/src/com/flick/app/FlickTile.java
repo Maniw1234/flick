@@ -8,7 +8,8 @@ import android.service.quicksettings.Tile;
 import android.service.quicksettings.TileService;
 
 /**
- * A Quick Settings tile that sends something to the paired PC in one tap (TilePhoto, TileClip). The work happens in
+ * A Quick Settings tile that sends something in one tap (TilePhoto, TileClip), where one-tap sends go: the paired PC, or
+ * the phone picked on the page (Actions.phoneTarget). The work happens in
  * ActionActivity: the clipboard can only be read by the app in front. A locked phone is unlocked first.
  */
 abstract class FlickTile extends TileService {
@@ -25,15 +26,21 @@ abstract class FlickTile extends TileService {
             if (t == null) return;
             t.setLabel(label());
             t.setState(Tile.STATE_INACTIVE);
-            if (Build.VERSION.SDK_INT >= 29) Api29.subtitle(t, pcName());
+            if (Build.VERSION.SDK_INT >= 29) Api29.subtitle(t, target());
             t.updateTile();
         } catch (Throwable e) { Bg.warn("tile", e); }
     }
 
-    private String pcName() {
+    // where a tap sends it, chosen as Actions chooses it: the phone picked on the page (or, with no PC paired, the only
+    // phone paired), else the paired PC
+    private String target() {
         try {
-            String n = Bg.prefs(this).getString("p:lastPcName", "");
-            return n == null || n.length() == 0 ? "No PC yet" : "To " + n;
+            String phone = Actions.phoneTarget(this);
+            if (phone != null) return "To " + Peers.get(this).nameOf(phone);
+            android.content.SharedPreferences p = Bg.prefs(this);
+            String pc = p.getString("p:lastPc", ""), n = p.getString("p:lastPcName", "");
+            boolean paired = pc != null && pc.length() > 0 && p.getString("p:token:" + pc, "").length() > 0;
+            return !paired || n == null || n.length() == 0 ? "No PC yet" : "To " + n;
         } catch (Throwable e) { return ""; }
     }
 

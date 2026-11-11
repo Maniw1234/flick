@@ -326,6 +326,9 @@ void main() {
     X.drawCard({ w: 8, h: 8, radius: 2 }, { x: -40, y: -40, z: 0 }, { heat: 0.1, elec: 0.1, gl: 0.1, rgb: 1, glow: [1, 1, 1, 0.1], mosaic: [0.1, 4, 0, 0], scan: 0.1 }, {});
     X.over(false);
     R.clear();
+    // (the programs are what take the time and they stay built; the layers are made again for the first flick, as
+    // after any quiet spell: until then they'd hold graphics memory for nothing)
+    X.free();
   };
 
   // the two layers (and the bloom chain) at 1/k of the canvas

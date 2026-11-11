@@ -9,6 +9,7 @@
 // Every step runs in a separate process (PowerShell / nmcli) with fixed arguments: nothing from the network goes in.
 const { spawn, execFile } = require('child_process');
 const crypto = require('crypto');
+const path = require('path');
 const { EventEmitter } = require('events');
 
 const ABC = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';           // nothing that reads two ways (0/O, 1/I/l)
@@ -92,7 +93,8 @@ const PS_DIRECT = [
 
 // The script goes in whole as -EncodedCommand (UTF-16LE, base64): read from stdin, PowerShell would run it line by line
 function powershell(script, env, onLine) {
-  const p = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
+  // (by its full path: Windows looks for a bare name in the current folder first)
+  const p = spawn(path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
     { windowsHide: true, env: Object.assign({}, process.env, env || {}), stdio: ['ignore', 'pipe', 'pipe'] });
   let buf = '';
   p.stdout.setEncoding('utf8');
@@ -113,6 +115,9 @@ function runPs(script, ms) {
 }
 
 // ---------------------------------------------------------------- Linux (nmcli)
+// NetworkManager's name for the connection Flick makes, and takes down and deletes again: one of its own, never a
+// connection the user may have named "Flick" (which stopping the network used to delete)
+const NM_CON = 'Flick-hotspot';
 function nmcli(args, ms) {
   return new Promise((resolve) => {
     execFile('nmcli', args, { timeout: ms || 20000 }, (err, out, errOut) => resolve({ ok: !err, out: String(out || ''), err: String(errOut || (err && err.message) || '') }));
@@ -191,7 +196,7 @@ class Hotspot extends EventEmitter {
     if (!mine) return;                                       // it was on before Flick: it stays on
     try {
       if (kind === 'mobile') await (this.run ? this.run('mobile-off') : runPs(PS_MOBILE_OFF, 20000));
-      else if (kind === 'nm') { await (this.run ? this.run('nm-down') : nmcli(['connection', 'down', 'Flick'])); await (this.run ? this.run('nm-delete') : nmcli(['connection', 'delete', 'Flick'])); }
+      else if (kind === 'nm') { await (this.run ? this.run('nm-down') : nmcli(['connection', 'down', NM_CON])); await (this.run ? this.run('nm-delete') : nmcli(['connection', 'delete', NM_CON])); }
     } catch (e) { this.log('hotspot stop: ' + e.message); }
   }
 
@@ -232,7 +237,7 @@ class Hotspot extends EventEmitter {
     const wifi = dev.out.split('\n').map((l) => l.split(':')).find((f) => f[1] === 'wifi' && f[2] !== 'unavailable');
     if (!wifi) throw new Error('This PC has no Wi-Fi to make a network with');
     const ssid = 'Flick-' + pick(4), pass = pick(10);
-    const r = await (this.run ? this.run('nm-hotspot', { dev: wifi[0], ssid, pass }) : nmcli(['device', 'wifi', 'hotspot', 'ifname', wifi[0], 'con-name', 'Flick', 'ssid', ssid, 'password', pass], 30000));
+    const r = await (this.run ? this.run('nm-hotspot', { dev: wifi[0], ssid, pass }) : nmcli(['device', 'wifi', 'hotspot', 'ifname', wifi[0], 'con-name', NM_CON, 'ssid', ssid, 'password', pass], 30000));
     if (!r.ok) throw new Error('Couldn’t start the PC’s Wi-Fi network: ' + (r.err.trim().split('\n').pop() || 'nmcli failed'));
     return { kind: 'nm', ssid, pass, mine: true };
   }

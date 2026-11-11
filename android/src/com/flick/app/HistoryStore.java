@@ -10,8 +10,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
@@ -28,6 +27,9 @@ final class HistoryStore {
 
     private final File file;
     private ArrayList<JSONObject> items;             // newest first; loaded on first use
+    private boolean unread;                          // the file is there but couldn't be read (see load)
+    private boolean cleared;                         // cleared while unread: the file's entries go when it's read
+    private final HashSet<String> gone = new HashSet<String>();     // ids removed while unread (the same)
 
     HistoryStore(File file) { this.file = file; }
 
@@ -45,7 +47,6 @@ final class HistoryStore {
         JSONObject o = clean(e);
         if (o == null) return null;
         load().add(0, o);
-        order();
         trim();
         save();
         return o;
@@ -71,7 +72,7 @@ final class HistoryStore {
             load().add(0, o);
             n++;
         }
-        if (n > 0) { order(); trim(); save(); }
+        if (n > 0) { trim(); save(); }
         return n;
     }
 
@@ -79,6 +80,7 @@ final class HistoryStore {
     synchronized boolean remove(String id) {
         if (id == null) return false;
         List<JSONObject> l = load();
+        if (unread) gone.add(id);
         for (int i = 0; i < l.size(); i++) {
             if (id.equals(l.get(i).optString("id", null))) { l.remove(i); save(); return true; }
         }
@@ -87,6 +89,7 @@ final class HistoryStore {
 
     synchronized void clear() {
         load().clear();
+        if (unread) { cleared = true; gone.clear(); }
         save();
     }
 
@@ -108,42 +111,49 @@ final class HistoryStore {
         }
     }
 
-    // newest first by time; entries added later win ties (they were put in front, and the sort keeps order)
-    private void order() {
-        Collections.sort(load(), new Comparator<JSONObject>() {
-            @Override
-            public int compare(JSONObject a, JSONObject b) {
-                long x = a.optLong("time", 0), y = b.optLong("time", 0);
-                return x == y ? 0 : (x > y ? -1 : 1);
-            }
-        });
-    }
-
+    // Newest first is the order entries were added in, not their times: the phone's clock can be wrong (reset at a
+    // restart before the network sets it, set by hand), and sorted by time a transfer made then went to the bottom, or
+    // straight out of a full History; one stamped while the clock ran ahead stayed first for good.
     private void trim() {
         List<JSONObject> l = load();
         while (l.size() > MAX) l.remove(l.size() - 1);
     }
 
+    // A file that couldn't be read (too many files open, a disk error) isn't a damaged one: taken as empty, the next
+    // entry was saved alone over the whole history. It's read again on the next use and isn't written over until it has
+    // been (entries added meanwhile go on top of it then). A Clear or a removed entry meanwhile isn't undone by it: the
+    // file's entries (or those ids) go then, and the file is written.
     private ArrayList<JSONObject> load() {
-        if (items != null) return items;
-        items = new ArrayList<JSONObject>();
-        if (!file.isFile()) return items;
+        if (items != null && !unread) return items;
+        if (items == null) items = new ArrayList<JSONObject>();
+        if (!file.isFile()) { unread = false; return items; }
+        String text;
+        try { text = read(file); } catch (IOException e) { unread = true; return items; }
+        ArrayList<JSONObject> got = new ArrayList<JSONObject>(items);
         try {
-            JSONArray a = new JSONArray(read(file));
-            for (int i = 0; i < a.length() && items.size() < MAX; i++) {
+            JSONArray a = new JSONArray(text);
+            for (int i = 0; i < a.length() && got.size() < MAX && !cleared; i++) {
                 JSONObject o = a.optJSONObject(i);
-                if (o != null) items.add(o);
+                if (o != null && !gone.contains(o.optString("id", ""))) got.add(o);
             }
         } catch (Exception e) {
             // a damaged file (a power cut while it was being written, say): start over rather than fail forever
-            items.clear();
+            got = new ArrayList<JSONObject>(items);
         }
+        boolean changed = !items.isEmpty() || cleared || !gone.isEmpty();
+        items = got;
+        unread = false;
+        cleared = false;
+        gone.clear();
+        if (changed) save();                             // (what was added, cleared or removed meanwhile)
         return items;
     }
 
     private void save() {
+        List<JSONObject> l = load();
+        if (unread) return;                              // (kept in memory: see load)
         JSONArray a = new JSONArray();
-        for (JSONObject o : load()) a.put(o);
+        for (JSONObject o : l) a.put(o);
         try { write(file, a.toString()); } catch (IOException e) { /* the history stays in memory */ }
     }
 
@@ -158,13 +168,20 @@ final class HistoryStore {
         } finally { in.close(); }
     }
 
-    /** Writes text to f all at once: a new file renamed over the old one, so a crash never leaves half a file. */
+    /**
+     * Writes text to f all at once: a new file, on the disk before it's renamed over the old one, so a crash or a power
+     * cut leaves the old file or the new one, never half a file or an empty one (file systems may put the rename on
+     * the disk before the data). History, pairings, sync records, auto-send's memory and the clipboard history use it.
+     */
     static void write(File f, String text) throws IOException {
         File dir = f.getParentFile();
         if (dir != null && !dir.isDirectory() && !dir.mkdirs()) throw new IOException("no folder");
         File tmp = new File(dir, f.getName() + ".tmp");
         FileOutputStream out = new FileOutputStream(tmp);
-        try { out.write(text.getBytes("UTF-8")); } finally { out.close(); }
+        try {
+            out.write(text.getBytes("UTF-8"));
+            out.getFD().sync();
+        } finally { out.close(); }
         if (!tmp.renameTo(f)) {
             if (!f.delete() || !tmp.renameTo(f)) { tmp.delete(); throw new IOException("rename failed"); }
         }

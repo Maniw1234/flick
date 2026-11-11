@@ -14,7 +14,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
-const { clipFiles } = require('./clipfiles');
+const { copied } = require('./clipfiles');
 
 const MAX = 100;
 
@@ -223,8 +223,11 @@ class SelWatch extends EventEmitter {
   _poll() {
     clearTimeout(this.timer);
     if (!this.active) return;
-    clipFiles().then((list) => {
+    copied().then(({ paths: list, unanswered }) => {
       if (!this.active) return;
+      // (said once: what's copied can't be seen while the clipboard isn't answering, see clipfiles.js)
+      if (unanswered && !list.length && !this.unanswered) this._log('the clipboard isn’t answering: copied files aren’t seen meanwhile');
+      this.unanswered = unanswered && !list.length;
       this._set(list.length ? 'copied' : 'other', list, true);
       this.timer = setTimeout(() => this._poll(), 1000);
     }, () => { if (this.active) this.timer = setTimeout(() => this._poll(), 2000); });

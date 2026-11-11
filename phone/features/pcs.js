@@ -21,6 +21,9 @@
     A.choosePc(p);
     A.toast('Connecting to ' + p.name + '…', 2400);
   }
+  // (the connection button's sheet lists them too once a phone is paired: app.js targetSheet)
+  X.pairedPcs = pairedPcs;
+  X.switchPc = switchTo;
 
   A.on('pcTap', () => {
     const list = pairedPcs();

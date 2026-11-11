@@ -132,11 +132,22 @@ final class Browse {
         } else if ("downloads".equals(cat) || "storage".equals(cat) || "dir".equals(cat)) {
             File d = "downloads".equals(cat) ? new File(Files.root(), "Download") : "storage".equals(cat) ? Files.root() : new File(m.optString("path", ""));
             if (!readable(d, true)) return error(id, "notfound");
-            JSONObject q = new JSONObject(Files.listDir(c, d.getPath()));
-            if (q.has("error")) return error(id, "notfound");
-            JSONArray a = q.optJSONArray("items");
-            ArrayList<JSONObject> all = new ArrayList<JSONObject>();
-            for (int i = 0; a != null && i < a.length(); i++) { JSONObject x = pub(a.optJSONObject(i)); if (x != null) all.add(x); }
+            // the PC pages through a folder: the next page comes from the listing the first one made, while the folder
+            // hasn't changed (each page listed the whole folder again: seconds a page for thousands of photos)
+            String key = d.getPath() + "|" + d.lastModified();
+            Object[] kept = offset > 0 ? listed(key) : null;
+            JSONObject q;
+            ArrayList<JSONObject> all;
+            if (kept != null) { q = (JSONObject) kept[0]; @SuppressWarnings("unchecked") ArrayList<JSONObject> k = (ArrayList<JSONObject>) kept[1]; all = k; }
+            else {
+                q = new JSONObject(Files.listDir(c, d.getPath()));
+                if (q.has("error")) return error(id, "notfound");
+                JSONArray a = q.optJSONArray("items");
+                all = new ArrayList<JSONObject>();
+                for (int i = 0; a != null && i < a.length(); i++) { JSONObject x = pub(a.optJSONObject(i)); if (x != null) all.add(x); }
+                q.remove("items");
+                keep(key, q, all);
+            }
             total = all.size();
             for (int i = offset; i < total && i < offset + limit; i++) items.put(all.get(i));
             more = offset + items.length() < total;
@@ -152,6 +163,20 @@ final class Browse {
         r.put("total", total);
         r.put("more", more);
         return r;
+    }
+
+    // the folder listed last: {its key (path and modified time), the listing (path, name, parent), its items, when}
+    private static Object[] lastListed;
+    static volatile long LISTED_MS = 60000;
+
+    private static synchronized Object[] listed(String key) {
+        Object[] l = lastListed;
+        if (l == null || !key.equals(l[0]) || System.nanoTime() / 1000000L - (Long) l[3] > LISTED_MS) return null;
+        return new Object[]{l[1], l[2]};
+    }
+
+    private static synchronized void keep(String key, JSONObject q, ArrayList<JSONObject> all) {
+        lastListed = new Object[]{key, q, all, System.nanoTime() / 1000000L};
     }
 
     /** What the PC gets of a listed item: its name, path, size, date and kind; nothing hidden or in apps' own folders. */

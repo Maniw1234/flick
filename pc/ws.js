@@ -1,13 +1,23 @@
 'use strict';
 // Minimal, dependency-free WebSocket server side (RFC 6455) for Flick.
 const crypto = require('crypto');
+// (a clock that only moves forward: the wall clock being set ahead mustn't make every link look silent and close it)
+const mono = () => performance.now();
 const { EventEmitter } = require('events');
 
 const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 // Flick only sends small JSON control frames over the socket (files go over HTTP), so a few MB is already generous.
 // Caps stop a hostile peer from making us buffer without limit (a single giant frame, or endless unfinished fragments).
 const MAX_MESSAGE = 4 * 1024 * 1024;
+// the pieces of one fragmented message: far more than any client sends (a browser's are tens of KB each), and few
+// enough that empty or one-byte pieces, which cost memory here without adding up to many bytes, can't pile up
+// (server.js allows far fewer until a device has signed in)
+const MAX_PIECES = 4096;
 const OPCODES = new Set([0x0, 0x1, 0x2, 0x8, 0x9, 0xA]);   // continuation, text, binary, close, ping, pong
+// What may wait to be sent on one link: a clipboard picture for the phone is the biggest message (a 6 MB PNG, about 8 MB
+// as text). A peer that sends and never reads (pings answered with pongs that pile up) is closed past this, and pongs
+// aren't answered while what's waiting is more than a little.
+const MAX_QUEUED = 32 * 1024 * 1024, PONG_QUEUED = 64 * 1024;
 
 class WSConnection extends EventEmitter {
   constructor(socket, req) {
@@ -20,7 +30,13 @@ class WSConnection extends EventEmitter {
     this._have = 0;
     this._need = 0;     // bytes the frame being received needs in total (0 = unknown yet)
     this._frag = null; // { opcode, chunks, len }
-    this._lastPong = Date.now();
+    // the biggest message taken, the pieces it may come in, and what may wait to be sent before the link is closed
+    // (server.js keeps all three small until a device has signed in, and raises the message for another Flick device's
+    // clipboard)
+    this.maxMessage = MAX_MESSAGE;
+    this.maxPieces = MAX_PIECES;
+    this.maxQueued = MAX_QUEUED;
+    this._lastPong = mono();
     socket.setNoDelay(true);
     socket.setKeepAlive(true, 10000);
     socket.on('data', (d) => this._onData(d));
@@ -29,7 +45,7 @@ class WSConnection extends EventEmitter {
     socket.on('error', () => this._closed());
     this._ping = setInterval(() => {
       if (!this.open) return;
-      if (Date.now() - this._lastPong > 35000) { this.close(); return; }
+      if (mono() - this._lastPong > 35000) { this.close(); return; }
       this._sendFrame(0x9, Buffer.alloc(0));
     }, 12000);
   }
@@ -71,9 +87,12 @@ class WSConnection extends EventEmitter {
         const hi = b.readUInt32BE(2), lo = b.readUInt32BE(6);
         len = hi * 4294967296 + lo; off = 10;
       }
-      if (len > MAX_MESSAGE) { this._refuse(); return; }
-      // a fragmented message is the sum of its pieces; refuse one that grows past the cap before it finishes
-      if (opcode === 0x0 && this._frag && this._frag.len + len > MAX_MESSAGE) { this._refuse(); return; }
+      if (len > this.maxMessage) { this._refuse(); return; }
+      // a control frame (close, ping, pong) is whole and small (RFC 6455 5.5)
+      if (opcode >= 0x8 && (!fin || len > 125)) { this._refuse(); return; }
+      // a fragmented message is the sum of its pieces; refuse one that grows past the cap before it finishes, or that
+      // comes in more pieces than any client sends
+      if (opcode === 0x0 && this._frag && (this._frag.len + len > this.maxMessage || this._frag.n >= this.maxPieces)) { this._refuse(); return; }
       let mask = null;
       if (masked) {
         if (b.length < off + 4) return;
@@ -91,17 +110,18 @@ class WSConnection extends EventEmitter {
   }
 
   _handleFrame(fin, opcode, payload) {
-    this._lastPong = Date.now();
+    this._lastPong = mono();
     if (opcode === 0x8) { // close
       try { this._sendFrame(0x8, payload.slice(0, 2)); } catch (e) { /* ignore */ }
       this._closed();
       return;
     }
-    if (opcode === 0x9) { this._sendFrame(0xA, payload); return; } // ping -> pong
+    if (opcode === 0x9) { if (this.socket.writableLength < PONG_QUEUED) this._sendFrame(0xA, payload); return; } // ping -> pong
     if (opcode === 0xA) { return; } // pong
     if (opcode === 0x0) { // continuation
       if (!this._frag) return;
-      this._frag.chunks.push(payload);
+      this._frag.n++;
+      if (payload.length) this._frag.chunks.push(payload);
       this._frag.len += payload.length;
       if (fin) {
         const all = Buffer.concat(this._frag.chunks);
@@ -111,7 +131,7 @@ class WSConnection extends EventEmitter {
       }
       return;
     }
-    if (!fin) { this._frag = { opcode, chunks: [payload], len: payload.length }; return; }
+    if (!fin) { this._frag = { opcode, chunks: [payload], len: payload.length, n: 1 }; return; }
     this._deliver(opcode, payload);
   }
 
@@ -136,6 +156,7 @@ class WSConnection extends EventEmitter {
     header[0] = 0x80 | opcode;
     try {
       this.socket.write(Buffer.concat([header, payload]));
+      if (this.socket.writableLength > this.maxQueued) { this._dead = true; this._closed(); return false; }   // it doesn't read
       return true;
     } catch (e) { this._closed(); return false; }
   }
@@ -167,8 +188,10 @@ function acceptUpgrade(req, socket, head) {
     'Sec-WebSocket-Accept: ' + accept + '\r\n\r\n'
   );
   const conn = new WSConnection(socket, req);
-  if (head && head.length) conn._onData(head);
+  // (what came with the upgrade request is read once the caller has its handlers on: a message or a close in it would
+  // otherwise go unheard, and a close unseen leaves the link counted as open)
+  if (head && head.length) setImmediate(() => { if (conn.open) conn._onData(head); });
   return conn;
 }
 
-module.exports = { acceptUpgrade, WSConnection };
+module.exports = { acceptUpgrade, WSConnection, MAX_MESSAGE, MAX_PIECES, MAX_QUEUED };

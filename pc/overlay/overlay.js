@@ -3,16 +3,36 @@
 (function () {
   const api = window.flick || { on() {}, send() {} };
   const handlers = {};
-  const on = (ch, fn) => { handlers[ch] = fn; api.on(ch, fn); };
+  // (these only set things up or tidy away; every other message shows something, and the graphics are ready for it first)
+  const QUIET = new Set(['fx:config', 'fx:theme', 'fx:noshot', 'fx:reset', 'fx:thumb']);
+  const on = (ch, fn) => { const f = QUIET.has(ch) ? fn : (d) => { ensureGL(); fn(d); }; handlers[ch] = f; api.on(ch, f); };
   window.__fx = (ch, d) => { if (handlers[ch]) handlers[ch](d); };   // test hook
   window.__cards = () => [...cards.values()].map((c) => ({ id: c.id, state: c.state, x: Math.round(c.pose.x), y: Math.round(c.pose.y),
-    target: c.target ? { x: Math.round(c.target.x), y: Math.round(c.target.y) } : null, edge: !!c.airEdge }));   // test hook
+    target: c.target ? { x: Math.round(c.target.x), y: Math.round(c.target.y) } : null, edge: !!c.airEdge, look: c.info ? c.info.look || null : null }));   // test hook
 
   const R = window.GFX, A = window.SFX;
   const canvas = document.getElementById('gl');
   const hud = document.getElementById('hud');
-  const GL_OK = R.init(canvas);
-  if (!GL_OK) console.log('graphics: no WebGL 2 here, so the animations can\'t be drawn');
+  // The graphics (their programs built, and each run once so the first flick doesn't wait on the driver) and the sounds
+  // are made ready when something is first to be shown: a phone connecting shows its light before any throw from it.
+  // Or 15 s after this page loads, so a first throw from elsewhere (Quick Share, a browser) is as smooth. Not at once:
+  // Flick starts with the computer, and that was a second of its start with nothing to show. With the animations turned
+  // off (main.js says so: fx), not then either: only once they're on and one is to be shown.
+  let GL_OK = false, glSet = false;
+  function ensureGL() {
+    if (glSet) return;
+    glSet = true;
+    clearTimeout(glT);
+    GL_OK = R.init(canvas);
+    if (!GL_OK) console.log('graphics: no WebGL 2 here, so the animations can\'t be drawn');
+    applySize();
+    if (theme && !theme.ready) initTheme(theme);
+    // Flick photographs the desktop before effects start (they bend, dim and light it). Drawn by the processor (no
+    // graphics chip) or with no effects at all, the photo isn't used: main.js then doesn't take one (lite)
+    const X = window.FX2;
+    api.send('fx:lite', { lite: !(GL_OK && X && X.ready() && !X.software) });
+  }
+  const glT = setTimeout(() => { if (S.fx !== false) ensureGL(); }, 15000);
 
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
   const lerp = (a, b, t) => a + (b - a) * t;
@@ -28,8 +48,7 @@
   // dirty: something drawn changed outside the cards' own state (a picture loaded, a new card, the canvas resized, which
   // blanks it): the next frame draws, whatever else (see frame)
   let dirty = true;
-  function applySize() { R.resize(S.W, S.H, S.dpr, S.dispW, S.dispH); dirty = true; }
-  applySize();
+  function applySize() { if (glSet) R.resize(S.W, S.H, S.dpr, S.dispW, S.dispH); dirty = true; }
 
   // ------------------------------------------------------------------ shared particle systems (themes spawn into these)
   const puffs = [];     // vapor / smoke
@@ -78,7 +97,11 @@
     // anything still on screen belongs to the old animation's physics: clear it before the new one takes over
     if (theme) resetAll();
     theme = next;
-    if (!theme.ready && theme.init) { try { theme.init(E); } catch (e) { console.log('theme init failed ' + e.message); } theme.ready = true; }
+    if (glSet && !theme.ready) initTheme(theme);
+  }
+  function initTheme(t) {
+    if (t.init) { try { t.init(E); } catch (e) { console.log('theme init failed ' + e.message); } }
+    t.ready = true;
   }
   setTheme(S.theme);
 
@@ -209,11 +232,16 @@
     }
   }
 
+  // a card's side as the phone (or air grab) measured it, in its CSS pixels: a message that got it wrong (not a number,
+  // nothing a screen could show) is left out, so the card keeps the usual size instead of its picture failing to draw
+  const okSide = (v) => typeof v === 'number' && v > 0 && v < 4000;
+
   class Card {
     constructor(id, info) {
       this.id = id;
       this.info = info || {};
-      const cw = (this.info.card && this.info.card.w) || 160, ch = (this.info.card && this.info.card.h) || 160;
+      const cd = this.info.card || {};
+      const cw = okSide(cd.w) ? cd.w : 160, ch = okSide(cd.h) ? cd.h : 160;
       this.w = cw * S.k; this.h = ch * S.k;
       this.radius = Math.max(5, 14 * S.k);
       this.pose = { x: -9999, y: -9999, z: 0, rx: 0, ry: 0, rz: 0, sx: 1, sy: 1 };
@@ -228,11 +256,13 @@
       this.label = null;
       this.loadTexture();
     }
+    // (again when its picture comes after it showed: what an earlier call is still loading is then left out)
     loadTexture() {
       const info = this.info;
       const n = info.count || 1;
       const w = this.w, h = this.h;
-      const setTex = (src, tw, th) => { if (!GL_OK || this.gone) return; R.freeTex(this.tex); this.tex = R.texFrom(src); this.texW = tw; this.texH = th; kick(); };
+      const gen = this.texGen = (this.texGen || 0) + 1;
+      const setTex = (src, tw, th) => { if (!GL_OK || this.gone || gen !== this.texGen) return; R.freeTex(this.tex); this.tex = R.texFrom(src); this.texW = tw; this.texH = th; kick(); };
       const face = (cv) => { if (n > 1) badgeOn(cv, w, h, n); setTex(cv, cv.width, cv.height); };
       if (info.folder) face(folderCanvas(w, h));
       else if (info.thumb) {
@@ -244,17 +274,19 @@
       } else face(docCanvas(info, w, h));
       // a stack shows up to two more items underneath
       if (n > 1) {
+        if (this.sheets) for (const sh of this.sheets) if (sh && sh.tex) R.freeTex(sh.tex);   // (the ones made before)
         this.sheets = [{}, {}];
         const thumbs = info.thumbs || [];
         for (let i = 0; i < 2; i++) {
           const slot = 1 - i;                          // the next item sits right under the top card
-          const put = (cv) => { if (!GL_OK || this.gone) return; this.sheets[slot] = { tex: R.texFrom(cv), w: cv.width, h: cv.height }; kick(); };
+          const put = (cv) => { if (!GL_OK || this.gone || gen !== this.texGen) return; this.sheets[slot] = { tex: R.texFrom(cv), w: cv.width, h: cv.height }; kick(); };
           if (thumbs[i]) loadImage(thumbs[i]).then((img) => put(img ? coverCanvas(img, w, h) : plainCanvas(w, h, '#2c2c2e')));
           else put(plainCanvas(w, h, '#2c2c2e'));
         }
       }
     }
     resize(cw, ch) {
+      if (!okSide(cw) || !okSide(ch)) return;
       const w = cw * S.k, h = ch * S.k;
       if (Math.abs(w - this.w) > 0.5 || Math.abs(h - this.h) > 0.5) { this.w = w; this.h = h; }
     }
@@ -404,7 +436,7 @@
     // its picture, made after it was picked up (it showed its file type until then)
     if (m.thumb && !c.info.thumb) {
       c.info.thumb = m.thumb;
-      if (m.card && m.card.w && m.card.h) { c.w = m.card.w * S.k; c.h = m.card.h * S.k; }
+      if (m.card && okSide(m.card.w) && okSide(m.card.h)) { c.w = m.card.w * S.k; c.h = m.card.h * S.k; }
       c.loadTexture();
     }
     if (m.edge) c.airEdge = now();
@@ -864,7 +896,7 @@
     if (!idleSince) idleSince = t;
     if (t - idleSince > 300) {
       raf = 0;
-      if (GL_OK) R.clear();
+      if (GL_OK) { R.clear(); R.sleep(); }
       if (theme.sleep) theme.sleep(E);
       drawnLook = null;
       if (!idleSent) { idleSent = true; requestAnimationFrame(() => api.send('fx:idle')); }
@@ -892,4 +924,14 @@
 
   window.addEventListener('resize', () => { S.W = innerWidth; S.H = innerHeight; applySize(); });
   api.send('fx:ready');
+  // the system's "reduce motion": main makes Reduce effects follow it (until the user sets that switch)
+  try {
+    const mq = matchMedia('(prefers-reduced-motion: reduce)');
+    const tell = () => api.send('fx:motion', { reduce: mq.matches });
+    mq.addEventListener('change', tell);
+    tell();
+  } catch (e) { /* ignore */ }
+  // loaded again after the graphics were lost (main.js reloads it, Flick in use): they're made ready at once, as before.
+  // (After saying it's ready: Flick forgets what the page said before then, such as whether the photo is used)
+  try { if ((performance.getEntriesByType('navigation')[0] || {}).type === 'reload') ensureGL(); } catch (e) { /* ignore */ }
 })();

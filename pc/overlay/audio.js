@@ -1,7 +1,8 @@
 'use strict';
-/* Flick overlay: each look's sound (sounds/<look>.wav: a riser played fast, its big moment where the card lands), at the
-   volume set in Settings. The sounds are decoded once, without opening the sound device; the device opens when a card
-   is lifted on the phone (so the flick that follows is heard at once) and is let go again a moment after the last sound. */
+/* Flick overlay: each look's sound (sounds/<look>.ogg, the phone's own files: a riser played fast, its big moment where
+   the card lands), at the volume set in Settings. The sounds are decoded once, without opening the sound device; the
+   device opens when a card is lifted on the phone (so the flick that follows is heard at once) and is let go again a
+   moment after the last sound. */
 (function () {
   const A = {};
   window.SFX = A;
@@ -41,7 +42,7 @@
   function load(name) {
     if (bufs[name]) return Promise.resolve(bufs[name]);
     if (!loads[name]) {
-      loads[name] = fetch('sounds/' + name + '.wav')
+      loads[name] = fetch('sounds/' + name + '.ogg')
         .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.arrayBuffer(); })
         .then((b) => {
           if (!decoder) decoder = new OfflineAudioContext(2, 1, 44100);

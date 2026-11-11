@@ -1,0 +1,61 @@
+/* The bar at the bottom (nav.js), Settings and Advanced settings as pages */
+:root { --tabs-h: 56px; }
+.tabs { flex: none; height: var(--tabs-h); display: flex; border-top: 1px solid var(--line); background: var(--bg); position: relative; z-index: 6; }
+.tab { position: relative; flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; border: 0; background: transparent;
+  color: var(--sub); cursor: pointer; font-size: 11.5px; padding: 0 2px; min-width: 0; }
+.tab span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab svg { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.tab:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+.tab[aria-current="page"] { color: var(--accent); font-weight: 600; }
+.tab[aria-current="page"]::before { content: ''; position: absolute; top: -1px; left: 30%; right: 30%; height: 2px; border-radius: 0 0 2px 2px; background: var(--accent); }
+.tab:focus-visible { outline-offset: -3px; }
+.tabdot { position: absolute; top: 9px; left: calc(50% + 7px); width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+
+/* the views leave the bar showing under them (and a note from main, while there is one: panel.js) */
+.wview { bottom: calc(var(--tabs-h) + 1px + var(--note-h, 0px)); }
+/* (a page reached from the bar: no Back, its title where Back's arrow would be) */
+.whead .tabtitle { padding-left: 8px; }
+
+/* Settings */
+#setView .wbody > .card:first-child { margin-top: 4px; }
+#advBtn { margin-top: 18px; }
+.helpcard { display: flex; flex-direction: column; align-items: flex-start; padding: 6px 14px; }
+.helpcard .note.fwhelp { align-self: stretch; }
+#setView .foot { padding-top: 12px; }
+.sub0.upd { color: rgba(255,255,255,0.75); }
+.sub0.upd .link { display: inline; font-size: 12px; padding: 0; }
+
+/* Advanced settings: the five groups, then each one on its own */
+#advList .advrow:first-child { margin-top: 4px; }
+#advList .advrow { margin-top: 8px; }
+.advg > .card:first-child, .advg > section:first-child { margin-top: 4px; }
+
+/* Home follows the connection (panel.js sets body.linked). Nothing connected: Connect, and the welcome under it.
+ * Connected: no Connect card (it's in Devices: Connect a device brings it back here until that connecting ends,
+ * connect.js; and it stays while it says this PC's own Wi-Fi network is still on, with Turn it off), and the send
+ * area is the big thing on the page. */
+body.linked #cn[data-phase="idle"]:not(.want):not(:has(.cnhoton)), body.linked #intro { display: none; }
+body.linked #sendRow { margin: 12px 0 4px; padding: 22px 16px 16px; border: 1.5px dashed rgba(255,255,255,0.2); border-radius: 10px; text-align: center; }
+body.linked #sendRow .btn { padding: 12px 16px; font-size: 15px; }
+body.linked #sendRow .sendsub { margin-top: 10px; }
+body.linked #sendRow .sendto { text-align: left; }
+
+/* cards on Home that can be hidden (nav.js); their × shows on pointing at the card or the keyboard on it */
+.hcard { position: relative; margin-top: 12px; }
+.hcard > .wentry { margin-top: 0; padding-right: 40px; }
+.hcard:has(> .wentry[hidden]), .hcard.gone { display: none; }
+.hx { position: absolute; top: 4px; right: 4px; width: 26px; height: 26px; display: grid; place-items: center; border: 0; border-radius: 6px;
+  background: transparent; color: var(--sub); cursor: pointer; opacity: 0; }
+.hx svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
+.hcard:hover .hx, .hcard:focus-within .hx { opacity: 1; }
+.hx:hover { background: rgba(255,255,255,0.08); color: var(--text); }
+.hcard .wchev { margin-right: -24px; }
+@media (hover: none) { .hx { opacity: 1; } }
+
+@media (forced-colors: active) {
+  .hx { opacity: 1; }
+  .tab[aria-current="page"] { forced-color-adjust: none; color: Highlight; }
+  .tab[aria-current="page"]::before, .tabdot { forced-color-adjust: none; background: Highlight; }
+}
+/* (a short window, or very large text: a lower bar; a name too long for its place is cut short, never wrapped) */
+@media (max-height: 420px) { :root { --tabs-h: 46px; } .tab span { font-size: 10.5px; } }

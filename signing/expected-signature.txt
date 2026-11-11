@@ -1,5 +1,7 @@
 verified=true v1=false v2=false v3=true
   minSdk: 28
-  v3 signer: CN=Flick 49DE7047A49F81F6;  sdk 28..2147483647
+  v3 signer: CN=Flick 49DE7047A49F81F6001ED4735F9BD0CFB1C1403437783B3040F7EC7540C1FD2A;  sdk 28..2147483647
   v3.1 verified: false
-  lineage: CN=Android Debug 1E08A903AEF9C3A7; CN=Flick 49DE7047A49F81F6; 
+  lineage: CN=Android Debug 1E08A903AEF9C3A721510B64EC764D01D3D094EB954161B62544EA8F187B5953; CN=Flick 49DE7047A49F81F6001ED4735F9BD0CFB1C1403437783B3040F7EC7540C1FD2A; 
+    CN=Android Debug: installedData=true sharedUid=true permission=true rollback=false auth=true
+    CN=Flick: installedData=true sharedUid=true permission=true rollback=false auth=true

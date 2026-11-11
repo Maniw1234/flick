@@ -73,3 +73,9 @@
 .bjob .link { flex: none; padding: 2px 0; font-size: 12.5px; }
 .bjbar { height: 3px; margin-top: 9px; border-radius: 2px; background: rgba(255,255,255,0.12); overflow: hidden; }
 .bjbar i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 2px; transition: width .3s ease; }
+@media (forced-colors: active) {
+  .btabs button.on { forced-color-adjust: none; background: Highlight; color: HighlightText; }
+  .btile.sel .bth { outline: 2px solid Highlight; outline-offset: -2px; }
+  .btile.sel .bcheck { forced-color-adjust: none; background: Highlight; border-color: Highlight; }
+  .btile.sel .bcheck::after { border-color: HighlightText; }
+}

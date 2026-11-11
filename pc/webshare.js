@@ -17,6 +17,11 @@ const path = require('path');
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
 
+// Every wait here is timed by a clock that only moves forward: the wall clock set back an hour (a time sync, the user
+// correcting it) made a "Don't allow" pause, the prompts' cap or an unanswered prompt last that hour, and set ahead it
+// ended the share or turned every browser away at once.
+const mono = () => performance.now();
+
 const LIMITS = {
   idleMs: 30 * 60000,      // sharing stops after this long without browser activity
   sessions: 20,            // browsers per share (allowed, waiting or turned away)
@@ -74,6 +79,9 @@ const DL_TYPES = {
 
 const key = (bytes) => crypto.randomBytes(bytes).toString('base64url');
 const TOKEN_RE = /^[A-Za-z0-9_-]{22}$/;
+// a name a browser sent, as the PC shows it (only as text): invisible direction marks could make "x<RLO>gnp.exe" read
+// as a photo
+const shownName = (name) => String(name).replace(/[\u0000-\u001f\u007f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '').slice(0, 200) || 'file';
 
 /** A short name for the device a browser runs on, from its User-Agent ("iPhone", "Mac", ...). */
 function deviceName(ua, touch) {
@@ -116,6 +124,8 @@ class WebShare extends EventEmitter {
    * opts.server: the FlickServer (its port, name, tmpDir and free-space check are used)
    * opts.save(tmpPath, name, info): moves a received file into place the way phone uploads are saved and resolves
    *   to { name, path, where }; required for uploads
+   * opts.keep(tmpPath, name, info): a received file that couldn't be saved is kept the way a phone's is, and resolves
+   *   to where it is now (null: it's gone); without it, such a file is deleted
    * opts.where(): the label of the folder files are saved to ("Desktop"), shown on the page
    * opts.limits: overrides for LIMITS (tests: idleMs etc.)
    */
@@ -123,6 +133,7 @@ class WebShare extends EventEmitter {
     super();
     this.server = opts.server;
     this.save = opts.save || null;
+    this.keep = opts.keep || null;
     this.where = opts.where || (() => '');
     this.webDir = opts.webDir || path.join(__dirname, 'web');
     this.assetDir = opts.assetDir || path.join(__dirname, 'assets');
@@ -151,7 +162,7 @@ class WebShare extends EventEmitter {
     if (this.token) return;
     this.token = key(16);
     this.endedWhy = '';
-    this.lastActive = Date.now();
+    this.lastActive = mono();
     this._armIdle();
     this.sweepT = setInterval(() => this._sweep(), 2000);
     if (this.sweepT.unref) this.sweepT.unref();
@@ -199,7 +210,7 @@ class WebShare extends EventEmitter {
   deny(id) {
     const s = this.byId.get(id);
     if (!s || s.state !== 'pending') return false;
-    const now = Date.now();
+    const now = mono();
     for (const [a, until] of this.cool) if (until < now) this.cool.delete(a);
     this.cool.set(s.address, now + this.limits.coolMs);
     this._doneAsking(s);
@@ -213,6 +224,7 @@ class WebShare extends EventEmitter {
   kick(id) {
     const s = this.byId.get(id);
     if (!s || s.state !== 'ok') return false;
+    this.emit('log', 'disconnected a browser: ' + s.device + ' at ' + s.address);
     this._end(s, 'removed');
     this.emit('state');
     return true;
@@ -228,7 +240,10 @@ class WebShare extends EventEmitter {
       if (!st.isFile()) continue;
       if ([...this.files.values()].some((f) => f.path === p)) continue;
       const id = key(9);
-      this.files.set(id, { id, path: p, name: path.basename(p), size: st.size, added: Date.now(), streams: new Set() });
+      // the name browsers see and save it under: invisible direction marks could make "x<RLO>gnp.exe" read as a photo
+      // there (the same rule as for names that arrive here)
+      const name = path.basename(p).replace(/[\u0000-\u001f\u007f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '_');
+      this.files.set(id, { id, path: p, name, size: st.size, added: Date.now(), streams: new Set() });
       n++;
     }
     if (n) { this._touch(); this._filesChanged(); }
@@ -248,7 +263,7 @@ class WebShare extends EventEmitter {
 
   /** for the panel: who joined (without their keys) */
   browsers() {
-    const now = Date.now();
+    const now = mono();
     return [...this.sessions.values()].filter((s) => s.state === 'ok' || s.state === 'pending' || s.state === 'denied').map((s) => ({
       id: s.id, device: s.device, address: s.address, state: s.state, since: s.created,
       away: s.state === 'ok' && !s.waiters.size && now - s.seen > this.limits.awayMs, sending: s.uploads.size, getting: s.downloads.size,
@@ -319,7 +334,7 @@ class WebShare extends EventEmitter {
     }
     // everything else needs a browser the user allowed
     if (!s || s.state !== 'ok') return this._refuse(req, res, 403, { ok: false, error: s ? s.state : 'gone' });
-    s.seen = Date.now();
+    s.seen = mono();
     if (req.method !== 'POST') return this._plain(res, 405);
     if (api === 'batch') return this._batch(req, res, s);
     if (api === 'upload') return this._upload(req, res, s, u.searchParams);
@@ -443,7 +458,7 @@ class WebShare extends EventEmitter {
     this._send(req, res, body, type);
   }
 
-  _touch() { this.lastActive = Date.now(); }
+  _touch() { this.lastActive = mono(); }
 
   // the panel's list says who is sending or downloading: tell it, at most a few times a second
   _stateSoon() {
@@ -455,11 +470,11 @@ class WebShare extends EventEmitter {
   // 30 minutes without a browser doing anything (an upload or download in progress counts) ends the share
   _armIdle() {
     clearTimeout(this.idleT);
-    const wait = Math.max(20, this.lastActive + this.limits.idleMs - Date.now());
+    const wait = Math.max(20, this.lastActive + this.limits.idleMs - mono());
     this.idleT = setTimeout(() => {
       if (!this.token) return;
       if (this.uploading > 0 || this.downloading > 0) this._touch();
-      if (Date.now() - this.lastActive >= this.limits.idleMs) return this.stop('idle');
+      if (mono() - this.lastActive >= this.limits.idleMs) return this.stop('idle');
       this._armIdle();
     }, wait);
     if (this.idleT.unref) this.idleT.unref();
@@ -470,7 +485,7 @@ class WebShare extends EventEmitter {
     const body = await this._body(req, 4096);
     if (!this.token) return this._plain(res, 404);
     if (!body) return this._json(res, 400, { state: 'error' });
-    const now = Date.now();
+    const now = mono();
     const address = this._addr(req);
     const pc = this.server.name;
     // (asking isn't activity: only browsers the user allowed keep the share alive, see _armIdle)
@@ -493,7 +508,11 @@ class WebShare extends EventEmitter {
     // just turned away, and a cap per minute (as for phones)
     if (a) return this._json(res, 200, { state: 'busy', pc });
     this.prompts = this.prompts.filter((t) => now - t < 60000);
-    if (this.prompts.length >= this.limits.prompts || this.sessions.size >= this.limits.sessions) return this._json(res, 200, { state: 'busy', pc });
+    if (this.prompts.length >= this.limits.prompts) return this._json(res, 200, { state: 'busy', pc });
+    // Browsers the user allowed are kept while the share is on, away or not (a phone that was locked comes back to it).
+    // At the cap, the one away the longest with nothing on its way makes room; if none can, the new one is told it's
+    // full, not that someone else is asking.
+    if (this.sessions.size >= this.limits.sessions && !this._makeRoom(now)) return this._json(res, 200, { state: 'full', pc });
     this.prompts.push(now);
     const s = {
       sid: key(16), dl: key(16), id: key(6), device, address, cid, state: 'pending', created: now, seen: now, changed: now,
@@ -510,23 +529,44 @@ class WebShare extends EventEmitter {
     this._json(res, 200, { sid: s.sid, state: 'pending', pc, device, v: s.v, code: s.code });
   }
 
+  // The browser away the longest (no news asked for a while, nothing being sent or fetched) is let go, as Disconnect
+  // there would: its page says it lost its connection and offers to connect again. A browser turned away or ended goes
+  // first: it only waits to learn what happened.
+  _makeRoom(now) {
+    let done = null, away = null;
+    for (const s of this.sessions.values()) {
+      if (s.state !== 'ok' && s.state !== 'pending') { if (!done || s.changed < done.changed) done = s; continue; }
+      if (s.state === 'ok' && !s.waiters.size && !s.uploads.size && !s.downloads.size && now - s.seen > this.limits.awayMs &&
+        (!away || s.seen < away.seen)) away = s;
+    }
+    const s = done || away;
+    if (!s) return false;
+    if (s === away) { this.emit('log', 'let go of a browser that was away, to make room: ' + s.device); this._end(s, 'gone'); }
+    this.sessions.delete(s.sid); this.byId.delete(s.id); this.byDl.delete(s.dl);
+    this.emit('state');
+    return true;
+  }
+
   _doneAsking(s) {
     if (this.asking === s) { this.asking = null; this.emit('ask-done', { id: s.id }); }
   }
 
-  // a browser leaves: told why (if it's still asking for news), its transfers stop, its keys stop working
+  // a browser leaves: told why (if it's still asking for news), its transfers stop, its keys stop working. A file it
+  // was sending is told the same why: Disconnect on the PC ('removed') isn't sharing ending ('ended').
   _end(s, state) {
     s.state = state;
-    s.changed = Date.now();
+    s.changed = mono();
     this.byDl.delete(s.dl);
     this._doneAsking(s);
-    for (const u of [...s.uploads]) u.abort('ended');
+    for (const u of [...s.uploads]) u.abort(state);
     for (const r of [...s.downloads]) { try { r.destroy(); } catch (e) { /* ignore */ } }
+    // its batches won't get the rest of their files: each ends now with what arrived (once a file still being saved is)
+    for (const g of [...this.groups.values()]) if (g.s === s) { g.cut = true; this._groupCheck(g); }
     this._changed(s);
   }
 
   _sweep() {
-    const now = Date.now(), L = this.limits;
+    const now = mono(), L = this.limits;
     let changed = false;
     for (const s of [...this.sessions.values()]) {
       if (s.state === 'pending' && ((!s.waiters.size && now - s.seen > L.goneMs) || now - s.created > L.askMs)) {
@@ -556,25 +596,25 @@ class WebShare extends EventEmitter {
       v.files = [...this.files.values()].reverse().map((f) => ({ id: f.id, name: f.name, size: f.size, url: base + f.id + '/' + encodeURIComponent(f.name) }));
     }
     if (s.state === 'pending') v.code = s.code;
-    if (s.state === 'denied') v.wait = Math.max(0, Math.ceil(((this.cool.get(s.address) || 0) - Date.now()) / 1000));
+    if (s.state === 'denied') v.wait = Math.max(0, Math.ceil(((this.cool.get(s.address) || 0) - mono()) / 1000));
     return v;
   }
 
   _poll(req, res, s, q) {
-    s.seen = Date.now();
+    s.seen = mono();
     if (Number(q.get('v')) !== s.v) return this._json(res, 200, this._view(s));
     // nothing new yet: wait for news. A few may wait at once (the page open in two tabs); the oldest makes way.
     if (s.waiters.size >= 3) this._answer(s, s.waiters.values().next().value);
     const w = { res, t: null };
     w.t = setTimeout(() => this._answer(s, w), this.limits.pollMs);
     s.waiters.add(w);
-    res.on('close', () => { clearTimeout(w.t); if (s.waiters.delete(w)) s.seen = Date.now(); });
+    res.on('close', () => { clearTimeout(w.t); if (s.waiters.delete(w)) s.seen = mono(); });
   }
 
   _answer(s, w) {
     if (!s.waiters.delete(w)) return;
     clearTimeout(w.t);
-    s.seen = Date.now();
+    s.seen = mono();
     this._json(w.res, 200, this._view(s));
   }
 
@@ -592,7 +632,7 @@ class WebShare extends EventEmitter {
   async _batch(req, res, s) {
     const b = await this._body(req, 2048);
     if (!b) return this._json(res, 400, { ok: false, error: 'bad request' });
-    const count = Math.max(1, Math.min(10000, Math.floor(+b.count) || 1));
+    const count = Math.max(1, Math.min(10000, Math.floor(+b.count) || 1));        // (web.js BATCH_MAX)
     const bytes = Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, Math.floor(+b.bytes) || 0));
     if (!this.server._roomFor(bytes + this.pendingBytes)) return this._json(res, 507, { ok: false, error: 'no space' });
     const g = this._group(s, count, bytes);
@@ -601,7 +641,8 @@ class WebShare extends EventEmitter {
   }
 
   _group(s, count, bytes) {
-    const g = { id: key(9), s, count, bytes, active: new Set(), saved: [], failed: 0, done: 0, last: Date.now(), announced: false, lastEmit: 0, over: false };
+    // unsaved: files that arrived whole but couldn't be saved ({ name, why: 'save' | 'space', kept: where they are })
+    const g = { id: key(9), s, count, bytes, active: new Set(), saved: [], unsaved: [], failed: 0, done: 0, last: mono(), announced: false, lastEmit: 0, over: false };
     this.groups.set(g.id, g);
     return g;
   }
@@ -620,32 +661,35 @@ class WebShare extends EventEmitter {
     if (!g || g.s !== s || g.over) g = this._group(s, 1, len);
     const tmp = path.join(this.server.tmpDir, 'w-' + crypto.randomBytes(8).toString('hex') + '.part');
     let out;
-    try { out = fs.createWriteStream(tmp, { highWaterMark: 1024 * 1024 }); } catch (e) { return this._refuse(req, res, 500, { ok: false, error: 'disk' }); }
+    // (readable by this account only while it arrives)
+    try { out = fs.createWriteStream(tmp, { highWaterMark: 1024 * 1024, mode: 0o600 }); } catch (e) { return this._refuse(req, res, 500, { ok: false, error: 'disk' }); }
     const u = { got: 0, len, over: false, saving: false, abort: null };
     s.uploads.add(u); g.active.add(u); this.uploading++;
     this.pendingBytes += len;
-    g.last = Date.now();
+    g.last = mono();
     this._stateSoon();
     this._touch();
     if (!g.announced) {
       g.announced = true;
-      // for the card on screen only (shown as text): invisible direction marks could make "x<RLO>gnp.exe" read as a photo
-      const shown = name.replace(/[\u0000-\u001f\u007f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '').slice(0, 200) || 'file';
-      this.emit('incoming-start', { gid: g.id, device: s.device, count: g.count, total: Math.max(g.bytes, len), name: shown });
+      this.emit('incoming-start', { gid: g.id, device: s.device, count: g.count, total: Math.max(g.bytes, len), name: shownName(name) });
     }
     let ended = false, lastTouch = 0;
     let owed = len;                                       // promised bytes not written yet (pendingBytes)
     const pay = (n) => { const k = Math.min(n, owed); owed -= k; this.pendingBytes -= k; };
-    const settle = () => { pay(owed); s.uploads.delete(u); g.active.delete(u); this.uploading--; g.last = Date.now(); this._stateSoon(); };
+    const settle = () => {
+      if (u.settled) return;
+      u.settled = true;
+      pay(owed); s.uploads.delete(u); g.active.delete(u); this.uploading--; g.last = mono(); this._stateSoon();
+    };
     const removeTmp = () => { if (out.closed) fs.rm(tmp, { force: true }, () => {}); else out.once('close', () => fs.rm(tmp, { force: true }, () => {})); };
     const fail = (why, code) => {
-      if (u.over) return;
+      if (u.over || u.saving) return;                     // (once it has all arrived, only saving it decides)
       u.over = true;
       settle();
       out.destroy();
       removeTmp();
       g.failed++;
-      if (why !== 'ended') this.emit('log', 'a browser upload failed: ' + why);
+      if (why !== 'ended' && why !== 'removed') this.emit('log', 'a browser upload failed: ' + why);
       if (!res.headersSent && !res.destroyed) this._refuse(req, res, code || 500, { ok: false, error: why });
       else { try { req.destroy(); } catch (e) { /* ignore */ } }
       this._groupCheck(g);
@@ -664,7 +708,7 @@ class WebShare extends EventEmitter {
       if (u.got > len) return fail('too long', 400);
       pay(c.length);
       if (!out.write(c)) { req.pause(); out.once('drain', () => { if (!u.over) req.resume(); }); }
-      const now = Date.now();
+      const now = mono();
       if (now - lastTouch > 1000) { lastTouch = now; this._touch(); s.seen = now; }
       this._progress(g);
     });
@@ -674,18 +718,30 @@ class WebShare extends EventEmitter {
       ended = true;
       if (u.over) return;
       if (u.got !== len) return fail('short', 400);
+      // All of it is here: no more bytes to wait for. Saving it can take a while (a big file copied to a save folder
+      // on another drive), and the stall limit would cut the browser off meanwhile, telling it the file didn't go
+      // when it did.
+      req.setTimeout(0);
       u.saving = true;
-      out.end(async () => {
+      out.end(async (werr) => {
         if (u.over) return;
-        let r = null, err = null;
+        // (a last write that failed comes here first, before the stream's 'error': the file isn't all there)
+        if (werr) { u.saving = false; return fail(werr.code === 'ENOSPC' ? 'no space' : 'disk', werr.code === 'ENOSPC' ? 507 : 500); }
+        let r = null, err = null, kept = null;
         try { r = await this.save(tmp, name, { device: s.device }); } catch (e) { err = e; }
+        // It arrived whole but couldn't be saved (the folder is read-only, its drive full): kept the way a phone's file
+        // is, where the PC's user is told it is, instead of being thrown away (while it still counts as arriving, so
+        // its batch can't end without it)
+        if ((err || !r) && this.keep) { try { kept = await this.keep(tmp, name, { device: s.device }); } catch (e) { kept = null; } }
         u.over = true;
         settle();
         if (err || !r) {
-          fs.rm(tmp, { force: true }, () => {});
+          if (!kept) fs.rm(tmp, { force: true }, () => {});
+          const space = !!err && (err.code === 'ENOSPC' || err.code === 'EDQUOT');
           g.failed++;
-          this.emit('log', 'a browser upload could not be saved: ' + ((err && err.message) || 'no answer'));
-          this._json(res, 500, { ok: false, error: 'save' });
+          g.unsaved.push({ name: shownName(name), why: space ? 'space' : 'save', kept: kept || null });
+          this.emit('log', 'a browser upload could not be saved: ' + ((err && err.message) || 'no answer') + (kept ? ' (kept in ' + kept + ')' : ''));
+          this._json(res, space ? 507 : 500, { ok: false, error: space ? 'no space' : 'save' });
         } else {
           g.done += len;
           g.saved.push({ name: r.name, path: r.path });
@@ -698,7 +754,7 @@ class WebShare extends EventEmitter {
   }
 
   _progress(g, force) {
-    const now = Date.now();
+    const now = mono();
     if (!force && now - g.lastEmit < 40) return;
     g.lastEmit = now;
     let got = g.done;
@@ -709,14 +765,14 @@ class WebShare extends EventEmitter {
 
   _groupCheck(g) {
     if (g.over || g.active.size) return;
-    if (g.saved.length + g.failed >= g.count) this._finishGroup(g);
+    if (g.cut || g.saved.length + g.failed >= g.count) this._finishGroup(g);
   }
 
   _finishGroup(g) {
     if (g.over) return;
     g.over = true;
     this.groups.delete(g.id);
-    if (g.announced) this.emit('incoming-done', { gid: g.id, device: g.s.device, saved: g.saved, failed: Math.max(g.failed, g.count - g.saved.length) });
+    if (g.announced) this.emit('incoming-done', { gid: g.id, device: g.s.device, saved: g.saved, unsaved: g.unsaved, failed: Math.max(g.failed, g.count - g.saved.length) });
   }
 
   async _text(req, res, s) {
@@ -741,6 +797,8 @@ class WebShare extends EventEmitter {
     const f = this.files.get(fid);
     if (!s || s.state !== 'ok' || s.address !== this._addr(req) || !f) return this._plain(res, 404);
     fs.stat(f.path, (err, st) => {
+      // the browser went meanwhile (a slow or sleeping disk, a quick tap back): nothing to send, nothing to count
+      if (res.destroyed || !res.socket || res.socket.destroyed) return;
       if (err || !st.isFile() || !this.files.has(fid) || s.state !== 'ok') return this._plain(res, 404);
       const size = st.size;
       const etag = '"' + size.toString(36) + '-' + Math.floor(st.mtimeMs).toString(36) + '"';
@@ -775,6 +833,10 @@ class WebShare extends EventEmitter {
       const rs = fs.createReadStream(f.path, { start, end, highWaterMark: 256 * 1024 });
       s.downloads.add(res); f.streams.add(res); this.downloading++;
       this._stateSoon();
+      // A whole file a browser downloads: how far it got, for the window's Transfers (main.js). Not a range: that's a
+      // player seeking, or a download carrying on, whose bytes say nothing about the file as a whole.
+      const dl = partial ? null : { id: key(6), sent: 0, at: 0 };
+      if (dl) this.emit('download-start', { id: dl.id, device: s.device, name: f.name, total: size });
       let closed = false, lastTouch = 0;
       res.on('close', () => {
         if (closed) return;
@@ -783,9 +845,14 @@ class WebShare extends EventEmitter {
         s.downloads.delete(res); f.streams.delete(res); this.downloading--;
         this._touch();
         this._stateSoon();
+        if (dl) this.emit('download-end', { id: dl.id, ok: res.writableFinished });
       });
       res.setTimeout(this.limits.dlStallMs, () => res.destroy());
-      rs.on('data', () => { const now = Date.now(); if (now - lastTouch > 1000) { lastTouch = now; this._touch(); s.seen = now; } });
+      rs.on('data', (c) => {
+        const now = mono();
+        if (now - lastTouch > 1000) { lastTouch = now; this._touch(); s.seen = now; }
+        if (dl) { dl.sent += c.length; if (now - dl.at > 100) { dl.at = now; this.emit('download-progress', { id: dl.id, sent: dl.sent, total: size }); } }
+      });
       rs.on('error', () => res.destroy());
       rs.pipe(res);
     });

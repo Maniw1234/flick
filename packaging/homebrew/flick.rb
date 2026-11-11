@@ -1,13 +1,13 @@
 # Flick for Homebrew, from the personal tap Maniw1234/homebrew-flick (where this file goes as Casks/flick.rb):
 #   brew install --cask maniw1234/flick/flick
-# The version and checksums come from a signed release: node packaging/update.js <version> (packaging/README.md).
-# Until a release has Mac disk images, the checksums below are placeholders.
+# The version and checksums come from a signed release: node packaging/update.js <version> (packaging/README.md),
+# which leaves them as they are for a release without Mac disk images.
 cask "flick" do
   arch arm: "arm64", intel: "x64"
 
-  version "1.1.0"
-  sha256 arm:   "1b1f5e6a8d83abf8fdc18b7274cb23fe635c3e9e3fca63a6effa5887f2ac5ed4",
-         intel: "02f20cf2e31f73401675df1c14e29540de22272db376496a0f11a4d2f5be2b47"
+  version "2.0.0"
+  sha256 arm:   "02383b1f2cf1dccd63470c8c962a1e9747aaefa0d4b1f8ceaeeea6a742cb9327",
+         intel: "3727aec806763209acd93861b85fbeecef46b70f4e0ab1b59885391e8ab72e59"
 
   url "https://github.com/Maniw1234/flick/releases/download/v#{version}/Flick-mac-#{arch}.dmg"
   name "Flick"

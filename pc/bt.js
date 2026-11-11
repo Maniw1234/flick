@@ -4,10 +4,13 @@
 // traffic through mux.js. Much slower than Wi-Fi, but it works anywhere the PC and phone are paired.
 const net = require('net');
 const fs = require('fs');
-const path = require('path');
 const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
 const { MuxLink } = require('./mux');
+
+// links at once: one for each phone linked over Bluetooth, a few at most (anything on this computer can reach the
+// relay's local port too: it can't pile up links here)
+const MAX_LINKS = 8;
 
 class BtBridge extends EventEmitter {
   /** opts: { exe, http (the FlickServer's http.Server), log } */
@@ -76,6 +79,7 @@ class BtBridge extends EventEmitter {
   }
 
   _link(sock) {
+    if (this.links.size >= MAX_LINKS) { sock.destroy(); return; }
     const link = new MuxLink(sock, 'bluetooth');
     this.links.add(link);
     link.on('stream', (s) => this.http.emit('connection', s));

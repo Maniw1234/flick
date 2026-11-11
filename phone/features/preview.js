@@ -1,7 +1,8 @@
 /* A file full screen before sending it: photos (pinch or double-tap to zoom), videos (play), any other file as its
- * thumbnail. Swipe sideways for the next or previous file of the view, down to close; Send to <PC> sends it, and so
- * does flicking it upward. app.js opens it through the 'preview' hook (a file's menu › Preview, or two fingers spread
- * on its card); the whole file comes from the app (mediaUrl: an address the page may load it from). */
+ * thumbnail. Swipe sideways (or Previous file / Next file, ← →) for the next or previous file of the view, down to
+ * close; Send to <PC> sends it, and so does flicking it upward. app.js opens it through the 'preview' hook (a file's
+ * menu › Preview, or two fingers spread on its card); the whole file comes from the app (mediaUrl: an address the page
+ * may load it from). */
 (window.FlickFeatures = window.FlickFeatures || []).push(function (A, X) {
   'use strict';
   const h = X.h;
@@ -13,6 +14,8 @@
     play: '<svg viewBox="0 0 24 24"><path d="M8.2 5.6v12.8a.8.8 0 0 0 1.2.7l10-6.4a.8.8 0 0 0 0-1.4l-10-6.4a.8.8 0 0 0-1.2.7z" fill="currentColor"/></svg>',
     pause: '<svg viewBox="0 0 24 24"><rect x="6.2" y="5" width="4.2" height="14" rx="1.3" fill="currentColor"/><rect x="13.6" y="5" width="4.2" height="14" rx="1.3" fill="currentColor"/></svg>',
     up: '<svg viewBox="0 0 24 24"><path d="M12 19V6M6.5 11.5L12 6l5.5 5.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    prev: '<svg viewBox="0 0 24 24"><path d="M14.5 5.5L8 12l6.5 6.5" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+    next: '<svg viewBox="0 0 24 24"><path d="M9.5 5.5L16 12l-6.5 6.5" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   };
 
   // ---- the page: the black behind, three slides (previous, current, next), the bars on top
@@ -31,7 +34,15 @@
   const tName = X.nm('b'), tSub = h('small');
   const tBox = h('div', 'pvt');
   tBox.append(tName, tSub);
-  top.append(xBtn, tBox);
+  // (a screen reader says the file and where it is in the view as they change: the next file's name, after Next file)
+  tBox.setAttribute('aria-live', 'polite'); tBox.setAttribute('aria-atomic', 'true');
+  // The previous and next file for a keyboard (← and → too) and a screen reader: a sideways swipe is a finger's, and
+  // TalkBack's swipes move its own focus, so with either the preview showed one file and the rest of the view was out of
+  // reach from it
+  const prevBtn = h('button', 'pvx pvnav'), nextBtn = h('button', 'pvx pvnav');
+  prevBtn.setAttribute('aria-label', 'Previous file'); prevBtn.appendChild(A.svgEl(SVG.prev));
+  nextBtn.setAttribute('aria-label', 'Next file'); nextBtn.appendChild(A.svgEl(SVG.next));
+  top.append(xBtn, tBox, prevBtn, nextBtn);
   const bot = h('footer', 'pvbot');
   const vBar = h('div', 'pvvbar');
   const vPlay = h('button', 'pvvp');
@@ -60,7 +71,8 @@
     return s;
   });
 
-  const S = { open: false, list: [], i: 0, it: null, W: innerWidth, H: innerHeight, dx: 0, busy: false, view: '', raf: 0, tapT: 0, last: null, seeking: false };
+  const S = { open: false, list: [], i: 0, it: null, W: innerWidth, H: innerHeight, dx: 0, busy: false, going: false, view: '', raf: 0, tapT: 0, last: null, seeking: false };
+  const anims = [];                                // (see settle)
   const Z = { s: 1, x: 0, y: 0 };                   // the current slide's zoom and position
   const sent = new Set();                           // ids sent from here, until the PC has them
   const cur = () => slides[1];
@@ -76,7 +88,7 @@
   function fill(s, it) {
     if (s._it === it && it) return;
     unload(s);
-    s._it = it || null; s._full = false;
+    s._it = it || null; s._full = ''; s._thBad = false; s._card = null;
     s.className = 'pvslide';
     s.style.clipPath = '';
     const z = s._z;
@@ -87,7 +99,9 @@
     if (k === 'image') {
       const img = h('img', 'pvimg');
       img.alt = ''; img.draggable = false; img.decoding = 'async';
-      if (th) img.src = th;
+      // (no thumbnail: the photo itself, once it comes; if it can't, its card: unseen)
+      img.onerror = () => { if (s._img !== img) return; img.classList.add('bad'); s._thBad = true; unseen(s, it); };
+      if (th) img.src = th; else s._thBad = true;
       s._img = img;
       z.appendChild(img);
     } else if (k === 'video') {
@@ -103,51 +117,94 @@
       pb.appendChild(A.svgEl(SVG.play));
       s._vid = v;
       z.append(v, pb);
-    } else {
-      // a document, an app, a song…: its thumbnail as a page, or its type
-      const card = h('div', 'pvdoc');
-      const pic = h('div', 'pvdpic' + (it.kind === 'apk' || it.kind === 'audio' ? ' app' : ''));
-      const ext = h('span', 'pvext', String(it.ext || '').toUpperCase().slice(0, 4) || 'FILE');
-      pic.appendChild(ext);
-      if (th) {
-        const img = h('img');
-        img.alt = ''; img.draggable = false;
-        img.onload = () => ext.remove();
-        img.onerror = () => img.remove();
-        img.src = th;
-        pic.appendChild(img);
-      }
-      card.append(pic, X.nm('b', '', it.name));
-      z.appendChild(card);
+    } else z.appendChild(docCard(it, th));         // a document, an app, a song…: its thumbnail as a page, or its type
+  }
+  function docCard(it, th, note) {
+    const card = h('div', 'pvdoc');
+    const pic = h('div', 'pvdpic' + (it.kind === 'apk' || it.kind === 'audio' ? ' app' : ''));
+    const ext = h('span', 'pvext', String(it.ext || (/\.([a-z0-9]{1,5})$/i.exec(it.name || '') || [])[1] || '').toUpperCase().slice(0, 4) || 'FILE');
+    pic.appendChild(ext);
+    if (th) {
+      const img = h('img');
+      img.alt = ''; img.draggable = false;
+      img.onload = () => ext.remove();
+      img.onerror = () => img.remove();
+      img.src = th;
+      pic.appendChild(img);
     }
+    card.append(pic, X.nm('b', '', it.name));
+    if (note) card.appendChild(h('small', '', note));
+    return card;
+  }
+  // A photo nothing of which can be shown (no thumbnail, and the file itself doesn't load: 0 bytes, damaged): its card, as
+  // a document has, saying so. It was a black screen, a broken picture's little icon in its corner
+  function unseen(s, it) {
+    if (s._it !== it || s._full || !s._thBad || s._noWhole !== it || s._card) return;
+    s._card = docCard(it, '', 'This photo can’t be shown here');
+    s._z.appendChild(s._card);
   }
   function unload(s) {
     const v = s._vid;
     if (v) { try { v.pause(); v.removeAttribute('src'); v.load(); } catch (e) { /* ignore */ } }
     s._vid = null; s._img = null;
   }
-  // the whole photo (a thumbnail shows until it has loaded); "" from the app: the thumbnail is all there is.
-  // s._loading: the file whose photo is on its way; a slide given another file meanwhile loads that one's own (when
-  // it was only "loading", a photo swiped to quickly kept its blurry thumbnail)
-  function loadFull(s) {
+  // The photo at the size the screen shows it (a thumbnail shows until it has loaded), and the whole of it once zoomed
+  // in. A phone's 12 MP photo is 48 MB once decoded: loaded whole, a few of them took the page past half a gigabyte
+  // (a phone short of memory closes it) and each was slow to open. The app makes the screen's size (the thumbnail's
+  // address with s=<longest side in device pixels>, or id= for Flick's list; turned as its EXIF says); it answers 404
+  // for anything that isn't a still photo, and that (a GIF, an animated WebP), a size it couldn't make, or an older
+  // app's thumbnail in its place is shown from the whole file. "" from the app: the thumbnail is all there is.
+  // s._full: '' / 'sized' / 'whole'. s._loading: the file whose photo is on its way (whole: s._loadingWhole); a slide
+  // given another file meanwhile loads that one's own (when it was only "loading", a photo swiped to quickly kept its
+  // blurry thumbnail)
+  // The size asked for: the longest side the photo is shown at unzoomed, in device pixels, with the phone held either
+  // way (turned, it needs no other), in steps of 256 (the app keeps each size it made); the screen's longest side when
+  // the photo's own size isn't known
+  function sizeFor(it) {
+    const a = Math.min(S.W, S.H), b = Math.max(S.W, S.H), w = +it.w, ht = +it.h;
+    const f = (W, H) => Math.max(w, ht) * Math.min(W / w, H / ht);
+    const px = (w > 0 && ht > 0 ? Math.max(f(a, b), f(b, a)) : b) * (window.devicePixelRatio || 1);
+    return clamp(Math.ceil(px / 256) * 256, 256, 4096);
+  }
+  function sizedUrl(it, px) {
+    if (/^(gif|svg)$/i.test(it.ext || '') || /gif|svg/i.test(it.mime || '')) return '';
+    const t = it.path ? A.thumbUrl(it) : '';
+    if (t && t.indexOf('https://flick.local/t?') === 0) return t + '&s=' + px;
+    return !it.path && it.id ? 'https://flick.local/t?id=' + encodeURIComponent(String(it.id)) + '&s=' + px : '';
+  }
+  function loadFull(s, whole) {
     const it = s._it;
-    if (!it || kind(it) !== 'image' || s._full || s._loading === it) return;
-    const url = mediaUrl(it);
-    if (!url) return;
-    s._loading = it;
+    if (!it || kind(it) !== 'image' || s._full === 'whole' || (s._full && !whole)) return;
+    if ((s._loading === it && (s._loadingWhole || !whole)) || (whole && s._noWhole === it)) return;
+    const px = sizeFor(it);
+    const sized = whole ? '' : sizedUrl(it, px);
+    const url = sized || mediaUrl(it);
+    if (!url) { if (whole) { s._noWhole = it; unseen(s, it); } return; }
+    s._loading = it; s._loadingWhole = !sized;
     const im = new Image();
     im.decoding = 'async';
+    const done = () => { if (s._loading === it && s._loadingWhole === !sized) s._loading = null; };
     im.onload = () => {
       const show = () => {
-        if (s._loading === it) s._loading = null;
-        if (s._it !== it || !s._img) return;
+        done();
+        if (s._it !== it || !s._img || s._full === 'whole') return;
+        let as = 'whole';
+        if (sized) {
+          // (only a file's own size says the photo is no bigger: a Flick-list item's w and h are its thumbnail's, so a
+          // 12 MP photo of the list counted as whole at the screen's size, and zoomed in it stayed that, upscaled)
+          const n = Math.max(im.naturalWidth, im.naturalHeight), known = !!it.path && +it.w > 0 && +it.h > 0;
+          if (known && n >= Math.max(+it.w, +it.h) * 0.98) as = 'whole';
+          else if (n >= px * 0.9) as = 'sized';
+          else { loadFull(s, true); return; }
+        }
         im.className = 'pvimg'; im.alt = ''; im.draggable = false;
         s._img.replaceWith(im);
-        s._img = im; s._full = true;
+        s._img = im; s._full = as;
+        if (as === 'sized' && s === cur() && Z.s > 1.01) loadFull(s, true);     // zoomed in meanwhile
       };
       if (im.decode) im.decode().then(show, show); else show();
     };
-    im.onerror = () => { if (s._loading === it) s._loading = null; };
+    im.onerror = () => { done(); if (!sized) { s._noWhole = it; unseen(s, it); } else if (s._it === it) loadFull(s, true); };
     im.src = url;
   }
   function place(dx) {
@@ -174,14 +231,14 @@
     item: () => (S.open ? S.it : null),
     video: () => (S.open ? cur()._vid : null),
     rect: () => { const z = cur() && cur()._z; const r = z && (z.querySelector('img,video') || z).getBoundingClientRect(); return r && r.width ? r : null; },
-    close: () => { if (S.open) close(); },
+    close: (fade) => { if (S.open) close(fade); },
   };
   function open(it, rect) {
     if (S.open || !it || it.dir) return;
     let list = A.viewFiles();
     let i = list.findIndex((x) => x.id === it.id);
     if (i < 0) { list = [it]; i = 0; }
-    S.list = list; S.i = i; S.open = true; S.busy = false; S.view = viewSig();
+    S.list = list; S.i = i; S.open = true; S.busy = false; S.going = false; S.view = viewSig();
     S.W = innerWidth; S.H = innerHeight;
     settle();                                       // (closed a moment ago: what its closing left behind)
     el.hidden = false;
@@ -195,10 +252,10 @@
     if (rect && kind(it) !== 'file') {
       // grows out of its card
       const f = fit(s), to = cardTf(rect, f);
-      s.animate([{ clipPath: to.clip }, { clipPath: 'inset(0px 0px 0px 0px round 0px)' }], { duration: 300, easing: ease });
-      s._z.animate([{ transform: to.tf }, { transform: 'translate3d(0px,0px,0) scale(1)' }], { duration: 300, easing: ease });
-    } else s._z.animate([{ opacity: 0, transform: 'scale(.94)' }, { opacity: 1, transform: 'scale(1)' }], { duration: 240, easing: ease });
-    for (const e of [bg, top, bot]) e.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 260, easing: 'ease-out' });
+      ani(s, [{ clipPath: to.clip }, { clipPath: 'inset(0px 0px 0px 0px round 0px)' }], { duration: 300, easing: ease });
+      ani(s._z, [{ transform: to.tf }, { transform: 'translate3d(0px,0px,0) scale(1)' }], { duration: 300, easing: ease });
+    } else ani(s._z, [{ opacity: 0, transform: 'scale(.94)' }, { opacity: 1, transform: 'scale(1)' }], { duration: 240, easing: ease });
+    for (const e of [bg, top, bot]) ani(e, [{ opacity: 0 }, { opacity: 1 }], { duration: 260, easing: 'ease-out' });
     setTimeout(() => { if (S.open) xBtn.focus({ preventScroll: true }); }, 60);
   }
   // where a card (rect) is, as the current slide's clip and zoom
@@ -210,7 +267,8 @@
       clip: 'inset(' + r.top.toFixed(1) + 'px ' + (S.W - r.right).toFixed(1) + 'px ' + (S.H - r.bottom).toFixed(1) + 'px ' + r.left.toFixed(1) + 'px round 14px)',
     };
   }
-  function close() {
+  // (fade: it fades where it is, instead of going back onto its card: the Connect screen takes the files' place)
+  function close(fade) {
     if (!S.open) return false;
     S.open = false;
     clearTimeout(S.tapT); S.last = null;
@@ -221,16 +279,16 @@
     X.block('preview', screens(), false);
     // back onto its card, when it's a picture shown whole; otherwise it fades
     let r = null;
-    if (it && kind(it) !== 'file' && Z.s <= 1.01 && Math.abs(S.dx) < 2) { A.showItem(it.id); r = A.cardRect(it.id); }
+    if (!fade && it && kind(it) !== 'file' && Z.s <= 1.01 && Math.abs(S.dx) < 2) { A.showItem(it.id); r = A.cardRect(it.id); }
     const from = getComputedStyle(s._z).transform, fromO = getComputedStyle(bg).opacity;
     const ms = 260;
     if (r) {
       const to = cardTf(r, fit(s));
-      s.animate([{ clipPath: 'inset(0px 0px 0px 0px round 0px)' }, { clipPath: to.clip }], { duration: ms, easing: ease, fill: 'forwards' });
-      s._z.animate([{ transform: from === 'none' ? 'none' : from }, { transform: to.tf }], { duration: ms, easing: ease, fill: 'forwards' });
-    } else s._z.animate([{ opacity: getComputedStyle(s._z).opacity }, { opacity: 0, transform: (from === 'none' ? '' : from + ' ') + 'scale(.94)' }], { duration: 200, easing: 'ease-in', fill: 'forwards' });
-    bg.animate([{ opacity: fromO }, { opacity: 0 }], { duration: ms, easing: 'ease-out', fill: 'forwards' });
-    for (const e of [top, bot]) e.animate([{ opacity: getComputedStyle(e).opacity }, { opacity: 0 }], { duration: 160, fill: 'forwards' });
+      ani(s, [{ clipPath: 'inset(0px 0px 0px 0px round 0px)' }, { clipPath: to.clip }], { duration: ms, easing: ease, fill: 'forwards' });
+      ani(s._z, [{ transform: from === 'none' ? 'none' : from }, { transform: to.tf }], { duration: ms, easing: ease, fill: 'forwards' });
+    } else ani(s._z, [{ opacity: getComputedStyle(s._z).opacity }, { opacity: 0, transform: (from === 'none' ? '' : from + ' ') + 'scale(.94)' }], { duration: 200, easing: 'ease-in', fill: 'forwards' });
+    ani(bg, [{ opacity: fromO }, { opacity: 0 }], { duration: ms, easing: 'ease-out', fill: 'forwards' });
+    for (const e of [top, bot]) ani(e, [{ opacity: getComputedStyle(e).opacity }, { opacity: 0 }], { duration: 160, fill: 'forwards' });
     setTimeout(() => {
       if (S.open) return;                          // opened again meanwhile
       el.hidden = true;
@@ -240,8 +298,12 @@
     }, ms + 20);
     return true;
   }
+  // (its own animations are kept as they start: Element.getAnimations is newer than Android 9's WebView, and calling it
+  // there stopped the preview opening at all)
+  function ani(x, k, o) { const a = x.animate(k, o); anims.push(a); return a; }
   function settle() {
-    for (const x of [el, bg, top, bot].concat(slides, slides.map((y) => y._z))) for (const a of x.getAnimations()) a.cancel();
+    for (const a of anims.splice(0)) a.cancel();
+    if (el.getAnimations) for (const x of [el, bg, top, bot].concat(slides, slides.map((y) => y._z))) for (const a of x.getAnimations()) a.cancel();
     bg.style.opacity = '';
   }
 
@@ -249,6 +311,9 @@
   function activate() {
     const s = cur(), it = s._it;
     S.it = it;
+    // (the files beside it, off the screen until a swipe brings them, are out of a screen reader's reach: TalkBack read
+    // the next file's name as part of this one, and moving onto it scrolled the preview sideways, half onto that file)
+    for (const x of slides) { const away = x !== s; x.inert = away; if (away) x.setAttribute('aria-hidden', 'true'); else x.removeAttribute('aria-hidden'); }
     Z.s = 1; Z.x = 0; Z.y = 0;
     applyZ(false);
     for (const x of [slides[0], slides[2]]) { if (x._vid) x._vid.pause(); x._z.style.transform = ''; }
@@ -256,7 +321,7 @@
     tName.textContent = it.name;
     renderSub();
     const bits = [A.fmtSize(it.size), A.fmtWhen(it.mtime || it.added)];
-    if (it.kind === 'image' && it.w && it.h) bits.push(it.w + ' × ' + it.h);
+    if (it.kind === 'image' && it.path && it.w && it.h) bits.push(it.w + ' × ' + it.h);   // (a list item's are its thumbnail's)
     if (it.kind === 'video' && it.dur) bits.push(A.fmtDur(it.dur));
     info.textContent = bits.join(' · ');
     renderSend();
@@ -272,13 +337,20 @@
     setTimeout(() => { if (S.open && S.it === it && slides[2]._it) loadFull(slides[2]); }, 450);
     if (S.i >= S.list.length - 4) A.moreFiles();     // the next page of a long category
   }
+  const dim = (b, off) => { if (off) b.setAttribute('aria-disabled', 'true'); else b.removeAttribute('aria-disabled'); };
   function renderSub() {
     const V = A.V, more = V.more && V.cat !== 'dir' && V.cat !== 'shelf';
     const total = more ? Math.max(S.list.length, V.total || 0) : S.list.length;
-    tSub.textContent = total > 1 ? (S.i + 1).toLocaleString() + ' of ' + total.toLocaleString() : '';
+    const sub = total > 1 ? A.fmtNum(S.i + 1) + ' of ' + A.fmtNum(total) : '';
+    if (tSub.textContent !== sub) tSub.textContent = sub;     // (unchanged, it isn't said again)
+    // (at either end its button stays where it was, and in reach, dimmed: a disabled one dropped the keyboard's focus)
+    prevBtn.hidden = nextBtn.hidden = total < 2;
+    dim(prevBtn, S.i <= 0);
+    dim(nextBtn, S.i >= S.list.length - 1);
   }
+  // (a PC this phone isn't paired with, or not any more: "Send to a PC", which opens Connect)
   function renderSend() {
-    sendT.textContent = 'Send to ' + X.pcName();
+    sendT.textContent = X.sendLabel('Send to ');
     sendBtn.classList.toggle('off', !A.st.connected);
   }
   A.on('conn', () => { if (S.open) renderSend(); });
@@ -288,6 +360,14 @@
     const i = it ? list.findIndex((x) => x.id === it.id) : -1;
     if (i >= 0) { S.list = list; S.i = i; }
     renderSub();
+  }
+  // A page more of a long category came while a file shows: the files beside it are the view's now. They were taken
+  // again only on the next move, so a file at the end of what had come (swiped to before the next page did) stayed the
+  // last one: a swipe at it only bounced, and it took no other way on
+  function more() {
+    if (!S.open || S.busy) return;                  // (a move under way takes them again as it ends)
+    resync();
+    fill(slides[0], S.list[S.i - 1]); fill(slides[2], S.list[S.i + 1]);
   }
 
   function renderVideo() {
@@ -334,6 +414,7 @@
     z.classList.toggle('tw', !!anim);
     z.style.transform = 'translate3d(' + Z.x.toFixed(1) + 'px,' + Z.y.toFixed(1) + 'px,0) scale(' + Z.s.toFixed(4) + ')';
     el.classList.toggle('zoomed', Z.s > 1.01);
+    if (Z.s > 1.01 && S.it && kind(S.it) === 'image' && cur()._full !== 'whole') loadFull(cur(), true);   // (zoomed in: the whole photo)
   }
   // how far a photo zoomed to s may move (none while it fits the screen); rubber: past that, but harder
   function bound(s, x, y, rubber) {
@@ -346,8 +427,9 @@
     const b = bound(s, px - s * qx, py - s * qy);
     Z.s = s; Z.x = b.x; Z.y = b.y;
   }
+  const zoomable = () => !!(S.it && kind(S.it) === 'image' && !cur()._card);   // (a photo shown as its card isn't)
   function doubleTap(x, y) {
-    if (!S.it || kind(S.it) !== 'image') return;
+    if (!zoomable()) return;
     if (Z.s > 1.01) { Z.s = 1; Z.x = 0; Z.y = 0; } else zoomAt(2.5, x - S.W / 2, y - S.H / 2);
     applyZ(true);
     A.haptic('soft');
@@ -369,7 +451,7 @@
     if (!S.open || S.busy) return;
     if (e.target.closest && e.target.closest('.pvtop, .pvbot')) return;   // the buttons and the video's bar
     if (e.cancelable) e.preventDefault();
-    if (e.touches.length === 2 && S.it && kind(S.it) === 'image') {
+    if (e.touches.length === 2 && zoomable()) {
       const a = pt(e.touches[0]), b = pt(e.touches[1]);
       if (G && G.mode === 'swipe') place(0);
       G = { mode: 'pinch', d0: Math.max(20, Math.hypot(a.x - b.x, a.y - b.y)), s0: Z.s, x0: Z.x, y0: Z.y, mx: (a.x + b.x) / 2 - S.W / 2, my: (a.y + b.y) / 2 - S.H / 2 };
@@ -472,6 +554,10 @@
   }
   el.addEventListener('touchend', touchEnd);
   el.addEventListener('touchcancel', touchEnd);
+  // The preview never scrolls: the files beside the current one (moved out of sight) made it wider than the screen, and
+  // anything brought into view in it (a screen reader's focus, the keyboard's) slid the whole of it sideways, the files
+  // behind showing at the edge. (features.css clips it; a WebView older than that is put back here)
+  el.addEventListener('scroll', () => { if (el.scrollLeft || el.scrollTop) { el.scrollLeft = 0; el.scrollTop = 0; } });
   function endPinch() {
     bg.style.opacity = '';
     if (Z.s < 0.8) { close(); return; }
@@ -500,8 +586,11 @@
   }
   function go(d) {
     const ni = S.i + d;
+    // (one move at a time: another press while one slides is let go. It sent this one's slide back, its end never came,
+    // and the preview took no swipe, key or Send again until it was closed)
+    if (S.going) return;
     if (S.busy || ni < 0 || ni >= S.list.length) { slideTo(0); return; }
-    S.busy = true;
+    S.busy = true; S.going = true;
     if (cur()._vid) cur()._vid.pause();
     A.haptic('tick');
     slideTo(-d * (S.W + GAP), () => {
@@ -510,10 +599,31 @@
       resync();
       fill(slides[0], S.list[S.i - 1]); fill(slides[2], S.list[S.i + 1]);
       place(0);
-      S.busy = false;
+      S.busy = false; S.going = false;
       activate();
     });
   }
+  // the buttons and ← →: at either end the file gives a little, as a swipe there does
+  function step(d) {
+    if (!S.open || S.going || !S.it) return;
+    const ni = S.i + d;
+    if (ni >= 0 && ni < S.list.length) { go(d); return; }
+    if (S.busy) return;
+    place(-d * 28);
+    slideTo(0);
+  }
+  prevBtn.onclick = () => step(-1);
+  nextBtn.onclick = () => step(1);
+  // ← and → anywhere in the preview, but on the video's position (they move it there); also with nothing focused (a tap
+  // on the photo leaves the focus nowhere), unless a menu or question is open over it
+  document.addEventListener('keydown', (e) => {
+    if (!S.open || (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    const t = e.target;
+    const nowhere = t === document.body || t === document.documentElement;
+    if (t === vSeek || el.inert || (!el.contains(t) && (!nowhere || A.sheetOpen))) return;
+    e.preventDefault();
+    step(e.key === 'ArrowRight' ? 1 : -1);
+  });
 
   // ---- sending: the button, or a flick upward. It leaves the screen; a file that stays on the phone comes back.
   function send(how) {
@@ -526,7 +636,7 @@
     const f = fit(s), w = Math.min(220, S.W * 0.52), hh = clamp(w * f.h / Math.max(1, f.w), w * 0.56, w * 1.5);
     const from = { left: (S.W - w) / 2, top: (S.H - hh) / 2, width: w, height: hh, right: (S.W + w) / 2, bottom: (S.H + hh) / 2 };
     sent.add(it.id);
-    A.sendItems([it], { quiet: true, from });
+    A.sendItems([it], { quiet: true, from, say: true });   // (said once it is on the PC: app.js onSaved)
     A.toast('Sending to ' + X.pcName() + '…', 1800);
     const side = A.st.side === 'right' ? -1 : 1;     // where the PC is
     z.classList.remove('tw');
@@ -557,10 +667,10 @@
       place(0);
       S.busy = false;
       activate();
-      cur()._z.animate([{ opacity: 0, transform: 'scale(.94)' }, { opacity: 1, transform: 'scale(1)' }], { duration: 220, easing: ease });
+      ani(cur()._z, [{ opacity: 0, transform: 'scale(.94)' }, { opacity: 1, transform: 'scale(1)' }], { duration: 220, easing: ease });
     }, 320);
   }
-  sendBtn.onclick = () => { A.haptic('tick'); send('btn'); };
+  sendBtn.onclick = () => { A.haptic('tick'); if (X.sendPc()) send('btn'); else X.toConnect(); };
   A.on('sent', (items) => {
     const mine = (items || []).filter((x) => sent.has(x.id));
     for (const x of mine) sent.delete(x.id);
@@ -580,7 +690,7 @@
   A.on('native', (e) => {
     if ((e.t === 'pause' || e.t === 'locked') && S.open && cur()._vid) cur()._vid.pause();
   });
-  A.on('view', () => { if (S.open && viewSig() !== S.view) close(); });   // another tab or folder
+  A.on('view', () => { if (S.open && viewSig() !== S.view) close(); else more(); });   // another tab or folder; a page more
   window.addEventListener('resize', () => {
     if (!S.open) return;
     S.W = innerWidth; S.H = innerHeight;

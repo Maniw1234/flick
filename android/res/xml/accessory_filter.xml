@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- another phone with Flick on the same USB cable switched this one over to talk to it (UsbPeer) -->
+<resources>
+    <usb-accessory manufacturer="Flick" model="Flick" />
+</resources>

@@ -25,11 +25,15 @@ const THUMBS_MS = 45000;              // thumbnails keep coming for a page this 
 const THUMB_MAX = 120 * 1024;         // one thumbnail (a data URL)
 const THUMB_CACHE = 900;
 const PULL_MAX = 200;                 // files in one copy
+// durations here use a clock that only moves forward: the wall clock set back must not keep a copy 'running' for hours
+const mono = () => performance.now();
 const PULL_IDLE_MS = 120000;          // a copy with no news for that long has stopped
 const OUT_RATE = { n: 40, ms: 10000 };    // requests to one phone
 const IN_RATE = { n: 120, ms: 10000 };    // answers from one phone (pages, thumbnail batches, progress)
 
 const rid = () => crypto.randomBytes(6).toString('hex');
+// a view's items, with their index by path (and their pictures to be looked up again); the window has none of them yet
+function setItems(v, items) { v.items = items; v.byPath = new Map(items.map((x) => [x.path, x])); v.scan = 0; v.shown = 0; }
 const str = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
 const num = (v) => (Number.isFinite(+v) && +v >= 0 ? Math.floor(+v) : 0);
 
@@ -52,7 +56,7 @@ class PhoneBrowse {
 
   // ---------------- limits ----------------
   _allow(kind, device, r) {
-    const k = kind + '|' + device, now = Date.now();
+    const k = kind + '|' + device, now = mono();
     const a = (this.rate.get(k) || []).filter((t) => now - t < r.ms);
     if (a.length >= r.n) { this.rate.set(k, a); return false; }
     a.push(now);
@@ -64,7 +68,7 @@ class PhoneBrowse {
   _ask(device, msg, op, ms) {
     if (!this._allow('out', device, OUT_RATE)) return { error: 'slow' };
     const id = 'b' + rid();
-    const p = { device, op, at: Date.now(), timer: null };
+    const p = { device, op, at: mono(), timer: null };
     p.timer = setTimeout(() => { this.pending.delete(id); this._timeout(id, p); }, ms || ANSWER_MS);
     this.pending.set(id, p);
     if (!this.s.sendEvent(device, Object.assign({ t: 'browse', id, op }, msg))) {
@@ -93,6 +97,7 @@ class PhoneBrowse {
     this.view = {
       device, name: device ? this.o.nameOf(device) : '', status: 'loading', cat: CATS.includes(cat) ? cat : (old && old.device === device ? old.cat : 'photos'),
       path: '', root: '', rootName: '', parent: null, items: [], total: 0, more: false, loading: false, req: null, want: null, sent: new Set(),
+      byPath: new Map(), scan: 0, shown: 0,
     };
     if (!device) { this.view.status = 'none'; this._push(); return; }
     if (!this.o.hasFeatures(device)) { this.view.status = 'old'; this._push(); return; }
@@ -114,7 +119,7 @@ class PhoneBrowse {
     v.req = r.id;
     v.loading = true;
     v.want = q;
-    if (!q.offset) { v.status = 'loading'; v.items = []; v.total = 0; v.more = false; }
+    if (!q.offset) { v.status = 'loading'; setItems(v, []); v.total = 0; v.more = false; }
     this._push();
   }
 
@@ -165,23 +170,32 @@ class PhoneBrowse {
       let acc = v.root;
       for (const part of v.path.slice(v.root.length + 1).split('/').filter(Boolean)) { acc += '/' + part; crumbs.push({ name: part, path: acc }); }
     }
+    // pictures it has already for items the window hasn't had yet (one made later goes by itself: see _thumbed). Only
+    // the items added since: looking at all of them for every page of a folder of thousands held everything up.
     const thumbs = {};
-    for (const x of v.items) {
-      const k = this._tk(v.device, x), t = this.thumbs.get(k);
+    for (let i = v.scan; i < v.items.length; i++) {
+      const x = v.items[i], k = this._tk(v.device, x), t = this.thumbs.get(k);
       if (t && !v.sent.has(k)) { thumbs[x.path] = t; v.sent.add(k); }
     }
+    v.scan = v.items.length;
     return {
       open: true, device: v.device, name: v.name, status: v.status, cat: v.cat, path: v.path, root: v.root, rootName: v.rootName, crumbs,
-      items: v.items.map((x) => { const o = Object.assign({}, x); delete o.mid; delete o.mt; return o; }), thumbs,
-      total: v.total, more: v.more, loading: v.loading, job: this._jobState(),
+      items: v.items, thumbs, total: v.total, more: v.more, loading: v.loading, job: this._jobState(),
     };
   }
 
-  /** The panel (re)loaded: it has none of the thumbnails. */
-  resend() { if (this.view) this.view.sent = new Set(); this._push(); }
+  /** The panel (re)loaded: it has none of the thumbnails, nor the items. */
+  resend() { if (this.view) { this.view.sent = new Set(); this.view.scan = 0; this.view.shown = 0; } this._push(); }
 
-  _push() { this.o.panelSend('panel:browse', this.state()); }
-  _pushJob() { this.o.panelSend('panel:browse-job', this._jobState()); }
+  // The window gets a listing a page at a time: the items it has of it already don't go again (from: how many it has;
+  // 0, the whole list). A folder of thousands comes 60 at a time, and the whole list so far with every page sent the
+  // window about N²/60 items, 81 MB for 6,000, and cost the main process milliseconds more with every page.
+  _push() {
+    const st = this.state(), v = this.view;
+    if (v) { st.from = v.shown; st.items = v.shown ? v.items.slice(v.shown) : v.items; v.shown = v.items.length; }
+    this.o.panelSend('panel:browse', st);
+  }
+  _pushJob() { const st = this._jobState(); this.o.panelSend('panel:browse-job', st); if (this.o.onJob) { try { this.o.onJob(st); } catch (e) { this.log('browse: ' + e.message); } } }
   _tk(device, x) { return device + '|' + x.path + '|' + (x.mtime || 0); }
 
   // ---------------- answers from the phone (POST /api/browse) ----------------
@@ -215,13 +229,13 @@ class PhoneBrowse {
     }
     const items = (Array.isArray(b.items) ? b.items : []).slice(0, LIMIT * 2).map((x) => this._item(x)).filter(Boolean);
     const first = !(v.want && v.want.offset);
+    const shown = items.map(({ mid, mt, ...x }) => x);         // (what's only for asking the phone for pictures stays here)
     if (first) {
-      v.items = items;
+      setItems(v, shown);
       if (v.want && v.want.cat !== 'dir') { v.root = str(b.path, 1024); v.rootName = str(b.name, 120); v.path = v.root; }
       else v.path = str(b.path, 1024) || v.path;
     } else {
-      const seen = new Set(v.items.map((x) => x.path));
-      for (const x of items) if (!seen.has(x.path)) v.items.push(x);
+      for (const x of shown) if (!v.byPath.has(x.path)) { v.items.push(x); v.byPath.set(x.path, x); }
     }
     v.parent = typeof b.parent === 'string' && b.parent ? b.parent.slice(0, 1024) : null;
     v.total = Math.max(num(b.total), v.items.length);
@@ -262,7 +276,8 @@ class PhoneBrowse {
       const key = device + '|' + fp + '|' + p.items.get(fp);
       this.thumbs.delete(key);
       this.thumbs.set(key, url);
-      if (v && v.device === device && v.items.some((x) => x.path === fp && this._tk(device, x) === key)) { got[fp] = url; v.sent.add(key); }
+      const x = v && v.device === device && v.byPath.get(fp);
+      if (x && this._tk(device, x) === key) { got[fp] = url; v.sent.add(key); }
     }
     while (this.thumbs.size > THUMB_CACHE) this.thumbs.delete(this.thumbs.keys().next().value);
     if (Object.keys(got).length) this.o.panelSend('panel:browse-thumbs', { device, thumbs: got });
@@ -281,17 +296,17 @@ class PhoneBrowse {
     }
     if (!files.length) return;
     const job = {
-      id: rid(), device: v.device, deviceName: v.name, files, done: new Set(), bad: new Map(), state: 'running', at: Date.now(), last: Date.now(),
+      id: rid(), device: v.device, deviceName: v.name, files, done: new Set(), bad: new Map(), state: 'running', at: mono(), last: mono(),
       cur: null, saved: [], where: '', bytes: files.reduce((n, f) => n + f.size, 0),
     };
     const r = this._ask(v.device, { job: job.id, files: files.map((f) => ({ i: f.i, path: f.path, name: f.name })) }, 'pull', ANSWER_MS);
     if (r.error) { this._note(r.error === 'slow' ? 'Wait a moment, then try again.' : v.name + ' isn’t reachable right now.'); return; }
     r.p.job = job.id;
-    const now = Date.now();
+    const now = mono();
     for (const [k, e] of this.ended) if (now - e.at > 30 * 60000) this.ended.delete(k);
     for (const [k, j] of this.jobs) if (j.state !== 'running') { this.ended.set(k, { device: j.device, at: j.end || now }); this.jobs.delete(k); }
     this.jobs.set(job.id, job);
-    job.idle = setInterval(() => { if (job.state === 'running' && Date.now() - job.last > PULL_IDLE_MS) this._jobEnd(job.id, 'stalled'); }, 5000);
+    job.idle = setInterval(() => { if (job.state === 'running' && mono() - job.last > PULL_IDLE_MS) this._jobEnd(job.id, 'stalled'); }, 5000);
     if (job.idle.unref) job.idle.unref();
     this.log('copying', files.length, 'file(s) from', v.name);
     this._pushJob();
@@ -311,7 +326,7 @@ class PhoneBrowse {
     const job = this.jobs.get(b.job);
     if (!job || job.device !== device) return { code: 409, error: 'unknown' };
     if (job.state !== 'running') return { ok: true, stopped: true };     // the phone stops when it reads this
-    job.last = Date.now();
+    job.last = mono();
     if (b.end === true) { this._jobFinish(job); return { ok: true }; }
     const i = Number.isInteger(b.i) ? b.i : -1;
     if (i >= 0 && i < job.files.length && !job.done.has(i)) {
@@ -348,7 +363,7 @@ class PhoneBrowse {
   async pulled(f, c) {
     const { job, i } = c;
     job.done.add(i);                        // a second copy of the same file isn't taken
-    job.last = Date.now();
+    job.last = mono();
     let r;
     try { r = await this.o.saveReceived(f.tmpPath, job.files[i].name); }
     catch (e) { job.done.delete(i); job.bad.set(i, 'save'); this._pushJob(); throw e; }
@@ -379,7 +394,7 @@ class PhoneBrowse {
     if (!job || job.state !== 'running') return;
     clearTimeout(job.finishing); clearInterval(job.idle);
     job.state = how === 'done' ? (job.done.size ? 'done' : 'failed') : how;
-    job.end = Date.now();
+    job.end = mono();
     job.cur = null;
     this.log('copy from', job.deviceName, job.state + ':', job.done.size, 'of', job.files.length);
     this._pushJob();
@@ -394,7 +409,7 @@ class PhoneBrowse {
     if (!job) return null;
     const doneBytes = job.files.filter((f) => job.done.has(f.i)).reduce((n, f) => n + f.size, 0) + (job.cur ? Math.min(job.cur.sent, job.cur.total) : 0);
     return {
-      id: job.id, state: job.state, n: job.files.length, done: job.done.size, bad: job.bad.size, why: job.bad.size ? [...job.bad.values()][0] : '',
+      id: job.id, device: job.device, first: job.files[0].name, state: job.state, n: job.files.length, done: job.done.size, bad: job.bad.size, why: job.bad.size ? [...job.bad.values()][0] : '',
       bytes: job.bytes, doneBytes, where: job.where, deviceName: job.deviceName, current: job.cur ? job.files[job.cur.i].name : '', last: job.saved[job.saved.length - 1] || '',
     };
   }

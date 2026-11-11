@@ -122,6 +122,17 @@ function attach(o) {
     });
     win.loadFile(path.join(__dirname, 'air', 'air.html'), { query: { hand: pathToFileURL(HAND).href } });
     win.on('closed', () => { win = null; ready = null; camState = 'off'; });
+    // Its page died (out of memory in the hand tracker, a graphics crash): the window goes, and a new one is made the
+    // next time the camera is wanted. (A window whose page is gone hears nothing, and with a phone ready it was kept:
+    // the camera stayed dark until Flick restarted.)
+    const w = win;
+    w.webContents.on('render-process-gone', (_e, d) => {
+      log('camera window gone:', (d && d.reason) || '');
+      if (win !== w) return;
+      if (camRunning()) stopCam();
+      w.destroy();
+      if (o.changed) o.changed();
+    });
     return ready;
   }
   function send(ch, d) { if (win && !win.isDestroyed()) win.webContents.send(ch, d); }
@@ -315,7 +326,7 @@ function attach(o) {
     const t0 = Date.now();
     a.bobT = setInterval(() => {
       if (a.landed || a.follow || !lifted.has(a.t.tid)) { clearInterval(a.bobT); return; }
-      a.t.seen = Date.now();                             // held by a hand: not a drag the phone forgot (main.js)
+      a.t.seen = performance.now();                          // held by a hand: not a drag the phone forgot (main.js)
       o.fx('move', peekMsg(a, Math.sin((Date.now() - t0) / 210) * 5));
     }, 60);
   }
@@ -407,7 +418,12 @@ function attach(o) {
   }
 
   async function pick(p) {
-    const paths = G.sel.filter((f) => { try { fs.accessSync(f); return true; } catch (e) { return false; } }).slice(0, 100);
+    // the first 100 that are still there (looking at every file of a big selection held everything else up meanwhile)
+    const paths = [];
+    for (const f of G.sel) {
+      if (paths.length >= 100) break;
+      try { fs.accessSync(f); paths.push(f); } catch (e) { /* gone */ }
+    }
     if (!paths.length) return;
     const h = G.held = { id: 'air-out-' + (++G.n), paths, at: Date.now(), state: 'hand', x: p.x, y: p.y };
     armUntil(Date.now() + HELD_MS);                      // the camera keeps watching the fist (put back, or gone)

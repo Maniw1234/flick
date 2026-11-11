@@ -41,6 +41,38 @@ final class Wire {
     private Wire() {}
 
     /**
+     * Milliseconds on a clock that only moves forward: setting the phone's clock (or network time correcting it) doesn't
+     * move it, so a wait measured on it ends when it should. On Android it counts deep sleep too (Sends sets it to
+     * SystemClock.elapsedRealtime): a wait that ran out while the phone slept is over when it wakes, as with the wall
+     * clock. Until then, and on any JVM, System.nanoTime.
+     */
+    interface Clock { long ms(); }
+    private static volatile Object[] CLOCK;              // {Clock, shift}: shift keeps mono() going on from where it was
+
+    static long mono() {
+        Object[] c = CLOCK;
+        return c == null ? System.nanoTime() / 1000000L : ((Clock) c[0]).ms() + (Long) c[1];
+    }
+
+    /** Measures waits with c from now on (carrying on from the clock before: waits under way stay as long). */
+    static synchronized void clock(Clock c) {
+        long was = mono();
+        CLOCK = new Object[]{c, was - c.ms()};
+    }
+
+    /**
+     * What lets a transfer's Cancel or Pause cut its request at once, from another thread (Outbox's: Watchdog under the
+     * transfer's flag). Each connection the request makes is given to watch(), which returns what to close once the
+     * request is done with it; cut(): it was cut (or is to be).
+     */
+    interface Cutter {
+        Closeable watch(Closeable c);
+        boolean cut();
+    }
+
+    private static void done(Closeable w) { if (w != null) try { w.close(); } catch (IOException e) { /* ignore */ } }
+
+    /**
      * Puts a socket on the network a PC is on before it connects (Sends sets one on Android, see Sends.Nets). Android
      * sends a socket over its default network, which isn't the PC's Wi-Fi when that has no internet (a laptop's hotspot
      * while the laptop is offline) and mobile data is on: the PC's address can't be reached there.
@@ -55,6 +87,15 @@ final class Wire {
         try { b.bind(s, host); } catch (Throwable e) { /* the default network, as before */ }
     }
 
+    /** The same for a UDP socket (other phones' discovery): true if it was put on another network than the default. */
+    interface UdpBinder { boolean bind(java.net.DatagramSocket s, String host) throws IOException; }
+    static volatile UdpBinder UDP_BINDER;
+    static boolean bind(java.net.DatagramSocket s, String host) {
+        UdpBinder b = UDP_BINDER;
+        if (b == null || host == null || host.startsWith("127.")) return false;
+        try { return b.bind(s, host); } catch (Throwable e) { return false; }
+    }
+
     /** Whether address a is in the subnet net/prefix (both the same family, as raw bytes). */
     static boolean inSubnet(byte[] net, int prefix, byte[] a) {
         if (net == null || a == null || net.length != a.length || prefix < 0 || prefix > net.length * 8) return false;
@@ -65,17 +106,27 @@ final class Wire {
         return (net[whole] & mask) == (a[whole] & mask);
     }
 
-    /** How to reach a PC: host:port, and the fingerprint its certificate must show (null: plain, this phone only). */
+    /**
+     * How to reach a PC: host:port, and the fingerprint its certificate must show (null: plain, to one of this app's
+     * relays on this phone, the Bluetooth link's).
+     */
     static final class Link {
         final String host;
         final int port;
         final String pin;
+        // (plain) the relay it goes through: its key as requests carry it ("/k/<key>", see TlsProxy.Gate; "" for none)
+        final String relay;
         private SSLSocketFactory factory;
 
-        Link(String host, int port, String pin) {
+        /** A plain link (pin null) goes through the relay open at that port now. */
+        Link(String host, int port, String pin) { this(host, port, pin, null); }
+
+        /** relay: for a plain link, the key of the relay it goes through (null: the one open at that port now). */
+        Link(String host, int port, String pin, String relay) {
             this.host = host;
             this.port = port;
             this.pin = pin == null || pin.length() == 0 ? null : pin.toLowerCase(Locale.US);
+            this.relay = this.pin != null ? null : relay != null ? relay : TlsProxy.Gate.prefix(port);
         }
 
         private synchronized SSLSocketFactory factory() throws IOException {
@@ -83,16 +134,29 @@ final class Wire {
             return factory;
         }
 
+        // (plain) its relay is open at its port now: once that relay closed, the port can be any app's (any app may listen
+        // on a port of this phone), which would get what the request carries, the PC's sign-in token and the file
+        private boolean relayHere() { return relay.length() > 0 && relay.equals(TlsProxy.Gate.prefix(port)); }
+
         /** {the socket to talk over, the TCP socket under it} (the same one when plain). */
-        Socket[] dial() throws IOException {
-            // nothing goes over the network unencrypted: plain only to a port on this phone
+        Socket[] dial() throws IOException { return dial(null); }
+
+        /** stop: (may be null) the transfer's Cutter: its Cancel ends the connecting at once (a vanished PC takes CONNECT_MS). */
+        Socket[] dial(Cutter stop) throws IOException {
+            // nothing goes over the network unencrypted: plain only to a port on this phone, and only to its relay
             if (pin == null && !"127.0.0.1".equals(host)) throw new IOException("not encrypted");
+            if (pin == null && !relayHere()) throw new IOException("link gone");
             Socket raw = new Socket();
+            Closeable g = stop != null ? stop.watch(raw) : null;
             try {
                 raw.setTcpNoDelay(true);
                 bind(raw, host);
                 raw.connect(new InetSocketAddress(host, port), CONNECT_MS);
-                if (pin == null) return new Socket[]{raw, raw};
+                if (pin == null) {
+                    // (still open now it's connected: one closing meanwhile gives up its key first, then its port)
+                    if (!relayHere()) throw new IOException("link gone");
+                    return new Socket[]{raw, raw};
+                }
                 raw.setSoTimeout(10000);                                    // for the handshake
                 SSLSocket s = (SSLSocket) factory().createSocket(raw, host, port, true);
                 s.setUseClientMode(true);
@@ -102,14 +166,17 @@ final class Wire {
             } catch (IOException e) {
                 try { raw.close(); } catch (IOException x) { /* ignore */ }
                 throw e;
+            } finally {
+                done(g);
             }
         }
 
         boolean same(Link o) {
-            return o != null && o.host.equals(host) && o.port == port && (pin == null ? o.pin == null : pin.equals(o.pin));
+            return o != null && o.host.equals(host) && o.port == port && (pin == null ? o.pin == null && relay.equals(o.relay) : pin.equals(o.pin));
         }
 
-        String key() { return host + ":" + port + ":" + pin; }
+        // (a kept connection is used again only for the same relay: never another one that took the port later)
+        String key() { return host + ":" + port + ":" + pin + (relay != null ? relay : ""); }
 
         @Override public String toString() { return host + ":" + port; }
     }
@@ -120,7 +187,7 @@ final class Wire {
         final OutputStream raw;
         final InputStream in;
         final String key;
-        long since;                                     // when it finished its last request (kept idle since)
+        long since;                                     // when it finished its last request (kept idle since; mono())
 
         Conn(Socket[] ss, String key) throws IOException {
             this.s = ss[0];
@@ -140,7 +207,7 @@ final class Wire {
     /** A kept connection to this PC that's fresh enough, or null. */
     private static Conn take(Link l) {
         String key = l.key();
-        long now = System.currentTimeMillis();
+        long now = mono();
         synchronized (IDLE) {
             ArrayDeque<Conn> q = IDLE.get(key);
             while (q != null && !q.isEmpty()) {
@@ -154,9 +221,17 @@ final class Wire {
 
     private static void keep(Conn k) {
         synchronized (IDLE) {
+            // kept ones past their use are closed here: those to an address nothing asks for any more (the PC's
+            // address changed) were never taken again, so they stayed for good, each with its socket and buffers
+            long now = mono();
+            for (java.util.Iterator<ArrayDeque<Conn>> it = IDLE.values().iterator(); it.hasNext(); ) {
+                ArrayDeque<Conn> old = it.next();
+                while (!old.isEmpty() && now - old.peekFirst().since >= IDLE_MS) old.pollFirst().close();
+                if (old.isEmpty()) it.remove();
+            }
             ArrayDeque<Conn> q = IDLE.get(k.key);
             if (q == null) IDLE.put(k.key, q = new ArrayDeque<Conn>());
-            k.since = System.currentTimeMillis();
+            k.since = mono();
             q.addLast(k);
             while (q.size() > IDLE_MAX) q.pollFirst().close();
         }
@@ -220,6 +295,18 @@ final class Wire {
 
         /** fresh: over a new connection (not a kept one). */
         static Call open(Link l, String method, String target, long length, String type, int readMs, String headers, boolean fresh) throws IOException {
+            return open(l, method, target, length, type, readMs, headers, fresh, null);
+        }
+
+        /** stop: (may be null) the transfer's Cutter: its Cancel ends a connecting to a PC that doesn't answer. */
+        static Call open(Link l, String method, String target, long length, String type, int readMs, String headers, boolean fresh, Cutter stop) throws IOException {
+            // a port on this phone is a relay (the Bluetooth link's): every request to it carries its key (TlsProxy.Gate),
+            // the key of the relay the link goes through (dial goes nowhere else; nor does a kept connection to it, once
+            // it closed)
+            if (l.pin == null) {
+                if (!l.relayHere()) throw new IOException("link gone");
+                target = l.relay + TlsProxy.Gate.strip(target);
+            }
             StringBuilder h = new StringBuilder(target.length() + 160);
             h.append(method).append(' ').append(target).append(" HTTP/1.1\r\n");
             // the PC takes requests addressed to an IP (a web page can't make those through DNS tricks)
@@ -237,7 +324,7 @@ final class Wire {
                 try { return start(k, true, length, readMs, head); }
                 catch (IOException e) { /* the PC had closed it: a new one */ }
             }
-            return start(new Conn(l.dial(), l.key()), false, length, readMs, head);
+            return start(new Conn(l.dial(stop), l.key()), false, length, readMs, head);
         }
 
         private static Call start(Conn k, boolean reused, long length, int readMs, byte[] head) throws IOException {
@@ -281,12 +368,45 @@ final class Wire {
 
         long written() { return written; }
 
+        /** The PC's answer began (over a kept connection: the PC hadn't closed it). */
+        boolean heard() { return heard; }
+
         /** Ends the body and reads the PC's answer (at most max bytes of it are kept). */
         Answer answer(int max) throws IOException {
+            endBody();
+            return read(max, true);
+        }
+
+        private boolean ended;
+
+        /** The body is all written (a chunked one's end too) and on its way. */
+        void endBody() throws IOException {
+            if (ended) return;
             if (length >= 0 && written != length) throw new IOException("body short");
             if (length == CHUNKED) raw.write("0\r\n\r\n".getBytes(UTF8));
             raw.flush();
-            return read(max, true);
+            ended = true;
+        }
+
+        /**
+         * Ends the body and waits up to ms for the PC's answer to begin: true once it has (nothing of it is read yet:
+         * answer() reads it), false when it hasn't by then. What was written can still be on its way when the last write
+         * returns (the system's buffers: megabytes over a slow link), and the PC answers only once it's all in: a caller
+         * that knows how far the PC got waits as long as that keeps growing, instead of a fixed time from the last write.
+         */
+        boolean answerWithin(int ms) throws IOException {
+            endBody();
+            k.s.setSoTimeout(Math.max(1, ms));
+            try {
+                in.mark(1);
+                if (in.read() < 0) throw new IOException("no answer");
+                in.reset();
+                return true;
+            } catch (java.net.SocketTimeoutException e) {
+                return false;
+            } finally {
+                try { k.s.setSoTimeout(readMs); } catch (IOException e) { /* closed: the next read says so */ }
+            }
         }
 
         /**
@@ -429,10 +549,35 @@ final class Wire {
         }
     }
 
+    static final int PIECE = 64 * 1024;
+
+    /**
+     * o, written to in pieces of at most 64 KB. A stall watchdog (Watchdog.Guard.watch) counts a write as progress once
+     * it returns, and over a slow link one large write is taken in only as the system's buffers drain: 512 KB at 15
+     * KB/s is 34 s, longer than the stall limit, for a link that's moving.
+     */
+    static OutputStream pieces(OutputStream o) {
+        return new java.io.FilterOutputStream(o) {
+            @Override public void write(byte[] b, int off, int len) throws IOException {
+                while (len > 0) { int n = Math.min(len, PIECE); out.write(b, off, n); off += n; len -= n; }
+            }
+        };
+    }
+
     /** A request with a small body (or none), answered in full. */
     static Answer call(Link l, String method, String target, byte[] body, String type, int readMs) throws IOException {
+        return call(l, method, target, body, type, readMs, null);
+    }
+
+    /**
+     * The same for a transfer: stop (may be null) is its Cutter, and its Cancel or Pause ends the request at once,
+     * however long the PC would take to answer.
+     */
+    static Answer call(Link l, String method, String target, byte[] body, String type, int readMs, Cutter stop) throws IOException {
         for (int attempt = 0; ; attempt++) {
-            Call c = Call.open(l, method, target, body == null ? NO_BODY : body.length, type, readMs, null, attempt > 0);
+            if (stop != null && stop.cut()) throw new IOException("stopped");
+            Call c = Call.open(l, method, target, body == null ? NO_BODY : body.length, type, readMs, null, attempt > 0, stop);
+            Closeable g = stop != null ? stop.watch(c) : null;
             // a kept connection to a PC that vanished meanwhile would stay silent until the read timeout: given a few
             // seconds only, then the request goes once more over a new one (which fails at once if the PC is gone)
             if (c.reused) c.firstMs = Math.min(readMs, FIRST_MS);
@@ -440,10 +585,12 @@ final class Wire {
                 if (body != null && body.length > 0) c.body().write(body);
                 return c.answer(1024 * 1024);
             } catch (IOException e) {
+                if (stop != null && stop.cut()) throw new IOException("stopped");
                 // a kept connection the PC had closed meanwhile: once more over a new one (nothing was answered)
                 if (c.reused && !c.heard && attempt == 0) continue;
                 throw e;
             } finally {
+                done(g);
                 c.close();
             }
         }
@@ -451,8 +598,15 @@ final class Wire {
 
     static Answer get(Link l, String target, int readMs) throws IOException { return call(l, "GET", target, null, null, readMs); }
 
+    /** A GET for a transfer: its Cancel ends it at once (see call). */
+    static Answer get(Link l, String target, int readMs, Cutter stop) throws IOException { return call(l, "GET", target, null, null, readMs, stop); }
+
     static Answer postJson(Link l, String target, String json, int readMs) throws IOException {
-        return call(l, "POST", target, json.getBytes(UTF8), "application/json; charset=utf-8", readMs);
+        return postJson(l, target, json, readMs, null);
+    }
+
+    static Answer postJson(Link l, String target, String json, int readMs, Cutter stop) throws IOException {
+        return call(l, "POST", target, json.getBytes(UTF8), "application/json; charset=utf-8", readMs, stop);
     }
 
     // ------------------------------------------------------------ reading
@@ -514,17 +668,20 @@ final class Wire {
     }
 
     /**
-     * A URL the page made for a local port (http://127.0.0.1:<port>/...): the PC behind it, reached directly. An
-     * encrypted link's port (TlsProxy) becomes the PC's own address with the same pin; any other local port (the
-     * Bluetooth link) stays as it is. {link, target (path and query)}, or null for anything else.
+     * A URL the page made for a local port (http://127.0.0.1:<port>/k/<key>/...): the PC behind it, reached directly.
+     * An encrypted link's port (TlsProxy) becomes the PC's own address with the same pin; any other local port (the
+     * Bluetooth link) stays as it is. Either only while the relay the URL names (its key) is open there: one that closed
+     * may have left its port to another app, or to another relay of this app's, to another PC (the link then goes
+     * nowhere: see Link.dial). {link, target (path and query, without the relay's key: open() puts it back where it's
+     * needed)}, or null for anything else.
      */
     static Object[] direct(String url) {
         try {
             java.net.URL u = new java.net.URL(url);
             if (!"http".equals(u.getProtocol()) || !"127.0.0.1".equals(u.getHost()) || u.getPort() <= 0) return null;
-            String target = u.getFile();
+            String target = TlsProxy.Gate.strip(u.getFile()), named = TlsProxy.Gate.named(u.getFile());
             TlsProxy p = TlsProxy.get(u.getPort());
-            Link l = p != null ? new Link(p.host, p.port, p.fp) : new Link("127.0.0.1", u.getPort(), null);
+            Link l = p != null && named.length() > 0 && named.equals(p.prefix()) ? new Link(p.host, p.port, p.fp) : new Link("127.0.0.1", u.getPort(), null, named);
             return new Object[]{l, target};
         } catch (Exception e) { return null; }
     }

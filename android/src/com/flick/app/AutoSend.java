@@ -43,13 +43,26 @@ public class AutoSend extends JobService {
     // ------------------------------------------------------------ switching and scheduling (any thread)
     /** The setting changed: a new mode starts from now (nothing taken before is sent); off forgets what waits. */
     static void modeChanged(Context c, String mode) {
-        Context app = c.getApplicationContext();
+        final Context app = c.getApplicationContext();
+        final AutoSendQueue was;
         synchronized (AutoSend.class) {
             gen++;
-            if ("off".equals(mode)) new File(app.getFilesDir(), "autosend.json").delete();
+            File f = new File(app.getFilesDir(), "autosend.json");
+            was = f.isFile() ? load(app) : null;
+            if ("off".equals(mode)) f.delete();
             else save(app, AutoSendQueue.start(System.currentTimeMillis() / 1000));
         }
         schedule(app);
+        // what was on its way won't go now: the PC lets go of what it has of it (instead of keeping it for hours)
+        if (was == null) return;
+        Bg.send("auto-send drop", new Runnable() {
+            @Override public void run() {
+                PcClient client = Bg.client(app);
+                PcClient.Target t;
+                try { t = client.target(); } catch (PcClient.Failure f) { return; }
+                for (AutoSendQueue.Item it : was.waitingItems()) client.drop(t, it.up);
+            }
+        });
     }
 
     /** Arms the media trigger for the current mode (or cancels both jobs when it's off). */
@@ -75,7 +88,10 @@ public class AutoSend extends JobService {
             JobScheduler js = (JobScheduler) c.getSystemService(Context.JOB_SCHEDULER_SERVICE);
             if (js == null) return;
             if (js.getPendingJob(JOB_TRIGGER) == null) schedule(c);
-            if (js.getPendingJob(JOB_RETRY) == null && !load(c.getApplicationContext()).outbox.isEmpty()) retryLater(c, RETRY_MS);
+            if (js.getPendingJob(JOB_RETRY) == null) {
+                AutoSendQueue q = load(c.getApplicationContext());
+                if (q == null || !q.outbox.isEmpty()) retryLater(c, RETRY_MS);
+            }
         } catch (Throwable e) { Bg.warn("auto-send ensure", e); }
     }
 
@@ -142,6 +158,8 @@ public class AutoSend extends JobService {
         } finally {
             busy.set(false);
         }
+        // (asked for after this pass last looked, and before it let go: nobody else runs that pass)
+        if (again.get() && (stop == null || !stop.get())) work(c, stop);
     }
 
     private static void once(Context c, AtomicBoolean stop) {
@@ -151,6 +169,8 @@ public class AutoSend extends JobService {
         final int g;
         final AutoSendQueue q;
         synchronized (AutoSend.class) { g = gen; q = load(c); }
+        if (q == null) { retryLater(c, RETRY_MS); return; }   // (couldn't be read now: later, nothing written over it)
+        q.clock(now);                                   // (a clock set back since the last look)
         List<AutoSendQueue.Item> rows;
         try { rows = query(c, mode, q.since); } catch (Throwable e) { Bg.warn("auto-send query", e); rows = new ArrayList<AutoSendQueue.Item>(); }
         List<AutoSendQueue.Item> dropped = q.offer(rows, now);
@@ -159,31 +179,43 @@ public class AutoSend extends JobService {
         for (AutoSendQueue.Item d : dropped) history(c, d, false, null);
         if (q.outbox.isEmpty()) return;
 
-        PcClient client = Bg.client(c);
-        PcClient.Target t;
+        final PcClient client = Bg.client(c);
+        final PcClient.Target t;
         try { t = client.target(); }
         catch (PcClient.Failure f) { retryLater(c, RETRY_MS); return; }   // no paired PC yet: quietly, later
+        for (AutoSendQueue.Item d : dropped) dropAsync(client, t, d);
+        // a PC that keeps what arrived takes each file in a part that carries on after a cut (a 2 GB video cut at 90%
+        // used to start over, and a try whose answer was lost left a second copy there)
+        boolean resumable;
+        try { resumable = client.quietParts(t, stop); }
+        catch (PcClient.Failure f) { save(c, q, g); retryLater(c, RETRY_MS); return; }   // the PC is away: later
+        final Context app = c;
+        final AutoSendQueue fq = q;
+        Runnable keep = new Runnable() { @Override public void run() { save(app, fq, g); } };
         ContentResolver cr = c.getContentResolver();
         for (AutoSendQueue.Item it : q.waitingItems()) {
             if ((stop != null && stop.get()) || !mode.equals(Features.autoSend(c))) break;
             try {
                 Uri u = Uri.parse(it.uri);
-                long size = sizeOf(cr, u, it.size);
-                client.upload(t, Bg.uriSource(c, u, size), it.name, it.kind, stop);
+                long[] st = statOf(cr, u, it.size);
+                AutoSendQueue.send(client, t, it, Bg.uriSource(c, u, st[0]), st[0] + ":" + st[1], resumable, keep, stop);
                 q.sent(it);
-                it.size = size;
+                it.size = st[0];
                 if (!save(c, q, g)) return;
                 history(c, it, true, t);
             } catch (FileNotFoundException gone) {
                 q.gone(it);                                              // deleted before it could go
                 if (!save(c, q, g)) return;
+                dropAsync(client, t, it);
             } catch (PcClient.Failure f) {
                 if (f.is(PcClient.Failure.REFUSED) || f.is(PcClient.Failure.LOCAL)) {
                     String no = Bg.declined(f);                          // the PC's user said no: it isn't asked again
+                    // (or canceled it there while it came: not sent again either)
+                    if (no == null && f.is(PcClient.Failure.REFUSED) && f.code == 410) no = "canceled";
                     boolean givenUp;
                     if (no != null) { q.gone(it); givenUp = true; } else givenUp = q.failed(it);
                     if (!save(c, q, g)) return;
-                    if (givenUp) history(c, it, false, t, no);
+                    if (givenUp) { history(c, it, false, t, no); if (no == null) dropAsync(client, t, it); }
                     continue;
                 }
                 // the PC is away, not paired any more, or this was stopped: everything waits for the next try
@@ -200,11 +232,21 @@ public class AutoSend extends JobService {
         if (!q.outbox.isEmpty()) retryLater(c, RETRY_MS);
     }
 
-    private static long sizeOf(ContentResolver cr, Uri u, long fallback) throws FileNotFoundException {
+    /** {size, modified (s, 0 when unknown)} of the item as it is now (the media index's size can be out of date). */
+    private static long[] statOf(ContentResolver cr, Uri u, long fallback) throws FileNotFoundException {
         ParcelFileDescriptor fd = cr.openFileDescriptor(u, "r");
         if (fd == null) throw new FileNotFoundException();
-        try { long s = fd.getStatSize(); return s >= 0 ? s : fallback; }
-        finally { try { fd.close(); } catch (Throwable e) { /* ignore */ } }
+        try {
+            long s = fd.getStatSize(), m = 0;
+            try { m = android.system.Os.fstat(fd.getFileDescriptor()).st_mtime; } catch (Throwable e) { /* unknown: the size alone */ }
+            return new long[]{s >= 0 ? s : fallback, m};
+        } finally { try { fd.close(); } catch (Throwable e) { /* ignore */ } }
+    }
+
+    /** An item that won't go after all: what its transfer left on the PC goes there too (off this thread). */
+    private static void dropAsync(final PcClient client, final PcClient.Target t, final AutoSendQueue.Item it) {
+        if (it.up == null || !it.up.begun) return;
+        Bg.run("auto-send drop", new Runnable() { @Override public void run() { client.drop(t, it.up); } });
     }
 
     private static void history(Context c, AutoSendQueue.Item it, boolean ok, PcClient.Target t) { history(c, it, ok, t, null); }
@@ -277,6 +319,7 @@ public class AutoSend extends JobService {
     }
 
     // ------------------------------------------------------------ state file
+    /** What auto-send keeps (autosend.json), or null when it's there but couldn't be read now. */
     static synchronized AutoSendQueue load(Context c) {
         File f = new File(c.getFilesDir(), "autosend.json");
         long now = System.currentTimeMillis() / 1000;
@@ -285,7 +328,11 @@ public class AutoSend extends JobService {
             save(c, q);
             return q;
         }
-        try { return AutoSendQueue.fromJson(HistoryStore.read(f), now); } catch (Throwable e) { return AutoSendQueue.start(now); }
+        // (a file that couldn't be read, too many files open or a disk error, isn't a damaged one: started over, what
+        // waited and what was sent were forgotten and saved so. null: this pass waits, the file kept as it is)
+        String s;
+        try { s = HistoryStore.read(f); } catch (Throwable e) { Bg.warn("auto-send load", e); return null; }
+        try { return AutoSendQueue.fromJson(s, now); } catch (Throwable e) { return AutoSendQueue.start(now); }
     }
 
     /** Saves q unless the mode changed since it was loaded (generation g); false then. */

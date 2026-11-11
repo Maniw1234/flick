@@ -9,7 +9,10 @@ const { History } = require('./history');
 const { SyncStore } = require('./sync');
 const { ClipWatch } = require('./clip');
 const { MediaKeys } = require('./keys');
-const { cleanUrl } = require('./phoneapi');
+const { cleanUrl, URL_MAX } = require('./phoneapi');
+const NOT_LINK = 'That isn’t a web link. Links start with http:// or https://.';
+// a link the user gives is read up to this long (a map route, a tracking link), to say it's too long rather than not a link
+const LINK_READ_MAX = 64 * 1024;
 const { ClipHistory } = require('./cliphist');
 const { PhoneBrowse } = require('./browse');
 const { AcceptGate } = require('./ask');
@@ -18,6 +21,30 @@ const FEATURES_CODE = 20000;    // phone app version code (hello `app`) from whi
 const RING_SEC = 30;
 const SETTINGS = ['clipSync', 'openLinks', 'phoneNotify', 'clipHistory'];   // on unless turned off (store[k] !== false)
 const QUIET_WHAT = { screenshot: 'Screenshot', photo: 'Photo' };
+const PEER_PNG_MAX = 4400 * 1024;   // a clipboard picture to another device: what it takes (server.js, PeerServer.java)
+// the clipboard didn't answer in time (clipfiles.js ask: on Linux, until the program that has it answers, or Flick restarts)
+const CLIP_WAIT = 'Flick can’t read the clipboard: the program you copied from isn’t answering. If this goes on, quit Flick and open it again.';
+
+/** What to say when something didn't reach another device (peerlink.js message's why). */
+function peerWhy(why, nm) {
+  if (why === 'old') return 'Update Flick on ' + nm + ' first.';
+  if (why === 'unpaired') return nm + ' isn’t paired with this computer any more.';
+  if (why === 'auth') return nm + ' doesn’t know this computer any more. Remove it and pair again.';
+  if (why === 'busy') return 'That was a lot at once. Try again in a minute.';
+  if (why === 'off') return nm + ' doesn’t take clipboards: it’s turned off there.';
+  if (why === 'too big') return 'That’s too big to send.';
+  if (why === 'empty' || why === 'bad' || why === 'refused') return nm + ' couldn’t take that.';
+  return 'Couldn’t reach ' + nm + '. Make sure Flick is open on it.';
+}
+
+/**
+ * A notification's text as Linux's notification server is to show it: there the body is markup (Electron hands it on
+ * as it is), so a phone app's notification with <a href=…> showed as a link to click, <b> as bold, and an "&" could
+ * leave it blank. Windows and macOS show the text as it is.
+ */
+function noMarkup(s) {
+  return process.platform === 'linux' ? s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : s;
+}
 
 class Features {
   /**
@@ -37,13 +64,17 @@ class Features {
     this.notes = new Map();     // "device|key" -> the Windows notification of a phone notification
     this.media = [];            // the last media keys asked for
     this.ringing = null;
+    this.peerLinks = [];        // links other devices sent lately (the test control reads them)
 
-    // the panel's list follows while the panel is open (a big folder sync changes it all the time); its History view
-    // asks for a fresh copy when opened, and the summary on the main view comes with every state
-    this.history = new History(path.join(o.userDir, 'history.json'), { log: this.log, onChange: () => this._soon('h', () => { if (this._panelShown()) this._pushHistory(); else this._push(); }, 250) });
+    // The window's History view follows what's added while it's open (a big folder sync changes it all the time); it asks
+    // for a fresh copy when it opens. Otherwise only the summary on the main view goes, with every state: the list of 200
+    // with each file looked up on the disk was sent after every change while the window was up, History open or not.
+    this.histOpen = false;
+    this.histThere = new Map();      // history item id -> whether its file was there when last looked up
+    this.history = new History(path.join(o.userDir, 'history.json'), { log: this.log, onChange: () => this._soon('h', () => { if (this.histOpen && this._panelShown()) this._pushHistory(); else this._push(); }, 250) });
     this.sync = new SyncStore({
-      root: () => o.saveDirNow(), pairs: this.store.syncPairs || {}, markOfWeb: o.markOfWeb || (() => {}),
-      persist: () => { this.store.syncPairs = this.sync.pairs; o.saveStore(); },
+      root: () => o.saveDirNow(), pairs: this.store.syncPairs || {}, gone: this.store.syncGone || {}, markOfWeb: o.markOfWeb || (() => {}),
+      persist: () => { this.store.syncPairs = this.sync.pairs; this.store.syncGone = this.sync.gone; o.saveStore(); },
     });
     this.sync.on('changed', () => this._push());
     this.sync.on('stored', (x) => this.record({ dir: 'in', path: x.path, size: x.size, device: x.device, deviceName: x.phone, how: 'sync' }));
@@ -65,6 +96,7 @@ class Features {
       server: this.server, log: this.log, panelSend: o.panelSend, saveReceived: o.saveReceived, record: (e) => this.record(e),
       hasFeatures: (d) => this._hasFeatures(d), nameOf: (d) => this._name(d), panelInFront: () => this._panelInFront(),
       notify: (n) => this.toast(n), showItem: (p) => { try { this.el.shell.showItemInFolder(p); } catch (e) { /* ignore */ } },
+      onJob: o.onBrowseJob,               // (Transfers lists its copies)
     });
 
     const s = this.server;
@@ -76,6 +108,9 @@ class Features {
     s.on('devices-changed', (devs) => { for (const d of Object.keys(this.store.acceptMode || {})) if (!devs || !devs[d]) this.ask.forget(d); });
     s.on('clip-in', (m) => this._clipIn(m));
     s.on('link-in', (m) => this._linkIn(m));
+    // from another of the user's computers (server.js: peer-clip, peer-link)
+    s.on('peer-clip', (m) => this._peerClipIn(m));
+    s.on('peer-link', (m) => this._peerLinkIn(m));
     s.on('notify-in', (m) => this._notifyIn(m));
     s.on('media', (m) => { this.media.push(m.key); if (this.media.length > 50) this.media.shift(); this.keys.press(m.key); });
     s.on('ring-found', (m) => { if (this.ringing && this.ringing.device === m.device) { this._note(this.ringing.name + ' stopped ringing.'); this._ringEnd(); } });
@@ -144,13 +179,16 @@ class Features {
       .sort((a, b) => b.last - a.last);
     const h = this.history.items[0];
     const c = this.cliph.items[0];
+    const pc = this.o.targetPc ? this.o.targetPc() : null;
     return {
       phones, target: phones.find((x) => x.active) || null,
+      pcTarget: pc ? { id: pc, name: this._peerNm(pc) } : null,     // Send to: another computer (links go there)
       ringing: this.ringing ? { device: this.ringing.device, name: this.ringing.name, until: this.ringing.until } : null,
       clipSync: this._on('clipSync'), openLinks: this._on('openLinks'), phoneNotify: this._on('phoneNotify'), clipHistory: this._on('clipHistory'),
       apps, pairs, seenFeat: !!this.store.seenFeat || phones.some((x) => x.feat),
       last: h ? { name: h.name, dir: h.dir, deviceName: h.deviceName, time: h.time, ok: h.ok, why: h.why || '' } : null, count: this.history.items.length,
-      clips: this.cliph.items.length, clipLast: c ? { kind: c.kind, preview: c.preview || '', time: c.time } : null,
+      clips: this.cliph.items.length, clipLast: c ? { kind: c.kind, preview: c.preview || '', blank: !!c.blank, time: c.time } : null,
+      setN: this.setN || 0,
     };
   }
 
@@ -165,10 +203,16 @@ class Features {
     this._soon('s', () => this.o.panelSend('panel:feat-state', this.state()), 60);
   }
 
-  // the history for the panel: the newest 200, each with whether its file is still there (Send again needs it)
-  async _pushHistory() {
+  // the history for the panel: the newest 200, each with whether its file is still there (Send again needs it). Every
+  // file is looked up when History opens (fresh: files are moved and deleted meanwhile); while it's open, only the ones
+  // added since.
+  async _pushHistory(fresh) {
     const items = this.history.items.slice(0, 200);
-    const there = await Promise.all(items.map((it) => (it.path ? fs.promises.access(it.path).then(() => true, () => false) : Promise.resolve(false))));
+    const known = fresh ? new Map() : this.histThere;
+    const there = await Promise.all(items.map((it) => (!it.path ? false : known.has(it.id) ? known.get(it.id) : fs.promises.access(it.path).then(() => true, () => false))));
+    const now = new Map();
+    items.forEach((it, i) => now.set(it.id, there[i]));
+    this.histThere = now;
     this.o.panelSend('panel:feat-history', { items: items.map((it, i) => Object.assign({}, it, { there: there[i] })), total: this.history.items.length });
     this._push();
   }
@@ -186,7 +230,7 @@ class Features {
     if (!N || (typeof N.isSupported === 'function' && !N.isSupported())) return null;
     let n;
     try {
-      n = new N({ title: String(title).slice(0, 120), body: String(body || '').slice(0, 250), silent: !!silent, actions: action ? [{ type: 'button', text: action }] : [] });
+      n = new N({ title: String(title).slice(0, 120), body: noMarkup(String(body || '').slice(0, 250)), silent: !!silent, actions: action ? [{ type: 'button', text: action }] : [] });
     } catch (e) { this.log('notification failed: ' + e.message); return null; }
     this.live.add(n);
     const drop = () => this.live.delete(n);
@@ -214,6 +258,24 @@ class Features {
     if (!this._panelInFront()) this.toast({ title: 'Copied from ' + m.name, body: (m.kind === 'text' ? 'Text' : 'A picture') + ' is on your clipboard.', silent: true });
   }
 
+  // a clipboard another computer sent (its user asked there): onto this one's, like one from the phone
+  async _peerClipIn(m) {
+    let ok = false;
+    try { ok = await this.clip.put(m.kind, m.kind === 'text' ? m.text : m.png); } catch (e) { this.log('clipboard write failed: ' + e.message); }
+    if (!ok) return;
+    if (!m.priv) this._clipKeep('in', m.device, m, m.name);      // one marked private there (a password) is never kept
+    this._note('Copied from ' + m.name + '. ' + (m.kind === 'text' ? 'The text' : 'The picture') + ' is on your clipboard.');
+    if (!this._panelInFront()) this.toast({ title: 'Copied from ' + m.name, body: (m.kind === 'text' ? 'Text' : 'A picture') + ' is on your clipboard.', silent: true });
+  }
+
+  // a link another device sent: never opened by itself (it may be someone else's computer): the notification opens it
+  _peerLinkIn(m) {
+    this.peerLinks.unshift({ name: m.name, url: m.url, at: Date.now() });
+    if (this.peerLinks.length > 20) this.peerLinks.length = 20;
+    this._note('Link from ' + m.name + ': ' + m.url + '. Click the notification to open it.');
+    this.toast({ title: 'Link from ' + m.name, body: 'Click to open ' + m.url, action: 'Open', click: () => this._open(m.url) });
+  }
+
   _linkIn(m) {
     if (this._on('openLinks')) { this._open(m.url); this._note('Opened a link from ' + m.name + '.'); return; }
     // Electron shows notification buttons on macOS only: on Windows the notification itself is the Open button
@@ -222,7 +284,10 @@ class Features {
 
   _notifyIn(m) {
     const apps = this.store.notifyApps || (this.store.notifyApps = {});
-    const pkg = (m.pkg || m.app || 'app').slice(0, 200);
+    // (a name every object has, "__proto__" say, can't be a key of the list: it named the list's prototype, and what
+    // was kept for it landed on every object there is. No app is called that: kept under a name of its own.)
+    const named = (m.pkg || m.app || 'app').slice(0, 200);
+    const pkg = Object.prototype.hasOwnProperty.call(Object.prototype, named) ? 'app:' + named : named;
     let a = apps[pkg];
     if (!a || (m.app && a.app !== m.app)) {
       a = apps[pkg] = Object.assign(a || { muted: false }, { app: (m.app || (a && a.app) || pkg).slice(0, 100), last: Date.now() });
@@ -285,17 +350,65 @@ class Features {
   }
 
   // ---------- to the phone ----------
-  /** Sends a link to the phone in use (the panel's field, the tray). */
+  /** Sends a link to the phone in use (the panel's field, the tray), or to the computer picked in Send to. */
   sendLink(text) {
-    let s = String(text || '').trim();
-    if (s && !/^[a-z][a-z0-9+.-]*:/i.test(s) && /^[^\s/]+\.[^\s/]{2,}(\/|$)/.test(s)) s = 'https://' + s;   // "example.com/x"
-    const url = cleanUrl(s);
-    if (!url) { this._note('That isn’t a web link. Links start with http:// or https://.'); return false; }
+    const url = this._link(text);
+    if (!url) return false;
+    const pc = this.o.targetPc ? this.o.targetPc() : null;
+    if (pc) { this.linkTo(pc, url); return true; }
     const d = this.server.eventTarget();
     if (d && !this._hasFeatures(d)) { this._note('Update Flick on ' + this._name(d) + ' to send it links.'); return false; }
     if (!d || !this.server.sendEvent(d, { t: 'link', url })) { this._note('Your phone isn’t reachable. Open Flick on it, or turn on “Stay connected in the background” there.'); return false; }
     this._note('Link sent to ' + this._name(d) + '.');
     return true;
+  }
+
+  /** The link the user gave, as one that goes, or null (and said why). A web link with a space in it (copied from a
+   * PDF or a chat) goes as a browser takes it (%20); one longer than phones and other computers take is said to be too
+   * long, not "not a web link". */
+  _link(text) {
+    let s = String(text || '').trim();
+    if (s && !/^[a-z][a-z0-9+.-]*:/i.test(s) && /^[^\s/]+\.[^\s/]{2,}(\/|$)/.test(s)) s = 'https://' + s;   // "example.com/x"
+    const long = () => { this._note('That link is too long to send (over ' + URL_MAX.toLocaleString('en-US') + ' characters).'); return null; };
+    if (s.length > LINK_READ_MAX && /^https?:\/\/[^\s/]/i.test(s)) return long();
+    const url = cleanUrl(s.replace(/ /g, '%20'), LINK_READ_MAX);
+    if (!url) { this._note(NOT_LINK); return null; }
+    return url.length > URL_MAX ? long() : url;
+  }
+
+  // ---------- to another computer (Your other devices, Send to) ----------
+  _peerNm(id) { return (this.o.peerName && this.o.peerName(id)) || 'that computer'; }
+
+  /** A link to another computer: it shows there as a notification that opens it. */
+  async linkTo(id, url) {
+    const P = this.o.peers && this.o.peers(), nm = this._peerNm(id);
+    if (!P) return false;
+    const r = await P.message(id, 'link', { t: 'link', url });
+    this._note(r.ok ? 'Link sent to ' + nm + '.' : peerWhy(r.why, nm));
+    return r.ok;
+  }
+
+  /** What's on this computer's clipboard, to another computer (its user asked: one marked private goes too, unkept). */
+  async clipTo(id) {
+    const P = this.o.peers && this.o.peers(), nm = this._peerNm(id);
+    if (!P) return false;
+    let msg = null, big = false, wait = false;
+    try {
+      const text = await this.clip._text();
+      if (text) { if (Buffer.byteLength(text, 'utf8') <= 1024 * 1024) msg = { t: 'clip', kind: 'text', text }; else big = true; }
+      else {
+        const im = await this.clip._readImage();
+        const png = im ? await im.png(PEER_PNG_MAX) : null;
+        if (png) msg = { t: 'clip', kind: 'image', png: png.toString('base64') }; else if (im) big = true;
+      }
+    } catch (e) { wait = e && e.code === 'ECLIPWAIT'; this.log('clipboard read failed: ' + e.message); }
+    if (!msg) { this._note(wait ? CLIP_WAIT : big ? 'What’s on your clipboard is too big to send.' : 'Your clipboard is empty.'); return false; }
+    const priv = await this.clip._private().catch(() => false);
+    if (priv) msg.private = true;                           // (so the other computer doesn't keep it either)
+    const r = await P.message(id, 'clip', msg);
+    this._note(r.ok ? 'Clipboard sent to ' + nm + '.' : peerWhy(r.why, nm));
+    if (r.ok && !priv) this._clipKeep('out', id, msg, nm);
+    return r.ok;
   }
 
   /** Find my phone: it rings for 30 s (or until it's stopped here or on the phone). */
@@ -335,10 +448,10 @@ class Features {
 
   // ---------- clipboard history (cliphist.js) ----------
   // m: a clipboard message ({kind:'text', text} or {kind:'image', png: Buffer | base64}) that went to or came from device
-  _clipKeep(dir, device, m) {
+  _clipKeep(dir, device, m, name) {
     if (!this._on('clipHistory') || !m) return;
     const c = m.kind === 'image' ? { kind: 'image', png: Buffer.isBuffer(m.png) ? m.png : Buffer.from(String(m.png || ''), 'base64') } : { kind: 'text', text: m.text };
-    this.cliph.add(c, { dir, device, deviceName: device ? this._name(device) : '' });
+    this.cliph.add(c, { dir, device, deviceName: name || (device ? this._name(device) : '') });
   }
 
   // a small picture for the list (the clipboard's own picture can be a whole screenshot)
@@ -356,8 +469,10 @@ class Features {
 
   _pushClips() { this.o.panelSend('panel:clips', { on: this._on('clipHistory'), items: this.cliph.list(), target: this._clipTarget() }); }
 
-  // where "Send to phone" goes: the phone in use, if it takes the clipboard
+  // where "Send to phone" goes: the computer picked in Send to, or the phone in use, if it takes the clipboard
   _clipTarget() {
+    const pc = this.o.targetPc ? this.o.targetPc() : null;
+    if (pc) return { device: pc, name: this._peerNm(pc), ok: true, pc: true };
     const d = this.server.eventTarget();
     return d ? { device: d, name: this._name(d), ok: this._hasFeatures(d) } : null;
   }
@@ -372,6 +487,19 @@ class Features {
   }
 
   async _clipSend(id) {
+    const pc = this.o.targetPc ? this.o.targetPc() : null;
+    if (pc) {
+      const c = await this.cliph.get(id);
+      if (!c) { this._note('That item isn’t there any more.'); this._pushClips(); return; }
+      const P = this.o.peers && this.o.peers(), nm = this._peerNm(pc);
+      if (!P) return;
+      if (c.kind === 'image' && c.png.length > PEER_PNG_MAX) { this._note('That picture is too big to send.'); return; }
+      const msg = c.kind === 'text' ? { t: 'clip', kind: 'text', text: c.text } : { t: 'clip', kind: 'image', png: c.png.toString('base64') };
+      const r = await P.message(pc, 'clip', msg);
+      this._note(r.ok ? 'Sent to ' + nm + '.' : peerWhy(r.why, nm));
+      if (r.ok && this._on('clipHistory')) this.cliph.add(c, { dir: 'out', device: pc, deviceName: nm });
+      return;
+    }
     const d = this.server.eventTarget();
     if (d && !this._hasFeatures(d)) { this._note('Update Flick on ' + this._name(d) + ' to send it the clipboard.'); return; }
     const c = await this.cliph.get(id);
@@ -388,7 +516,11 @@ class Features {
     web.on('incoming-done', (g) => {
       const who = g.device || 'A browser';
       for (const f of g.saved || []) this.record({ dir: 'in', path: f.path, name: f.name, deviceName: who, how: 'browser' });
-      if (g.failed) this.record({ dir: 'in', name: g.failed === 1 ? '1 file' : g.failed + ' files', deviceName: who, ok: false, how: 'browser', size: 0 });
+      // (each one the save folder wouldn't take by its name, and where it's kept; the rest that didn't come as a count)
+      const bad = Array.isArray(g.unsaved) ? g.unsaved : [];
+      for (const u of bad) this.record({ dir: 'in', name: u.name, path: u.kept || undefined, deviceName: who, ok: false, why: u.why === 'space' ? 'space' : 'save', how: 'browser', size: 0 });
+      const lost = (g.failed || 0) - bad.length;
+      if (lost > 0) this.record({ dir: 'in', name: lost === 1 ? '1 file' : lost + ' files', deviceName: who, ok: false, how: 'browser', size: 0 });
     });
   }
 
@@ -397,20 +529,32 @@ class Features {
   trayItems() {
     const d = this.server.eventTarget();
     if (!d || !this.clip.link || !this._hasFeatures(d)) return [];
-    const click = async () => { let t = ''; try { t = await this.el.clipboard.readText(); } catch (e) { /* ignore */ } this.sendLink(t); };
+    // (read in its time: see clip.js)
+    const click = async () => {
+      let t = '';
+      try { t = await this.clip._text(); } catch (e) { this._note(CLIP_WAIT); return; }
+      this.sendLink(t);
+    };
     return [{ label: 'Send clipboard link to phone', click: () => { click(); } }, { type: 'separator' }];
   }
 
   // ---------- panel actions ----------
   _action(m) {
     const str = (v) => (typeof v === 'string' ? v : '');
+    // (the number of the window's last switch change taken here: its states say it, so a switch clicked since keeps what
+    // it shows until its own change is taken: the panel's features.js change)
+    if (Number.isSafeInteger(m.n) && m.n > 0) this.setN = m.n;
     const item = () => this.history.get(str(m.id));
     const there = (it, then) => {
       if (!it || !it.path) return;
-      fs.promises.access(it.path).then(then, () => { this._note('That file isn’t there any more.'); this._pushHistory(); });
+      fs.promises.access(it.path).then(then, () => { this._note('That file isn’t there any more.'); this._pushHistory(true); });
     };
     switch (m.what) {
-      case 'hello': this._push(true); this._pushHistory(); this._pushClips(); this.o.panelSend('panel:ask', this.ask.list()); this.browse.resend(); break;
+      // (the window just loaded: its History view is closed)
+      case 'hello': this.histOpen = false; this._push(true); this._pushClips(); this.o.panelSend('panel:ask', this.ask.list()); this.browse.resend(); break;
+      // History opened (or shown again): a fresh list, then what's added while it's open
+      case 'hist-view': this.histOpen = true; this._pushHistory(true); break;
+      case 'hist-leave': this.histOpen = false; break;
       case 'use': if (this.server.use(str(m.device))) this._push(true); break;
       case 'ring': this.ring(str(m.device)); break;
       case 'ring-stop': this.ringStop(); break;
@@ -449,9 +593,13 @@ class Features {
         break;
       }
       case 'link': this.sendLink(str(m.url)); break;
+      // to another computer, from its row in Your other devices
+      case 'p-clip': if (str(m.device)) this.clipTo(str(m.device)); break;
+      case 'p-link': if (str(m.device)) { const u = this._link(str(m.url)); if (u) this.linkTo(str(m.device), u); } break;
       case 'h-open': there(item(), () => this.o.openAfterArrival(item().path)); break;
       case 'h-show': there(item(), () => { try { this.el.shell.showItemInFolder(item().path); } catch (e) { /* ignore */ } }); break;
-      case 'h-send': { const it = item(); there(it, () => this.o.sendFiles([it.path])); break; }
+      // Send again: to the computer it went to (another of the user's); anything else, to the phone
+      case 'h-send': { const it = item(); there(it, () => (it.dir === 'out' && it.how === 'peer' && it.device && this.o.sendTo ? this.o.sendTo(it.device, [it.path]) : this.o.sendFiles([it.path]))); break; }
       case 'h-remove': this.history.remove(str(m.id)); break;
       case 'h-clear': this.history.clear(); break;
       case 'pair-open': { const p = this.sync.pairs[str(m.id)]; if (p) fs.promises.mkdir(p.folder, { recursive: true }).then(() => this.el.shell.openPath(p.folder), () => {}); break; }
@@ -478,7 +626,7 @@ class Features {
     switch (u.pathname) {
       case '/f/state':
         return res.end(JSON.stringify({ state: this.state(), shown: this.shown, history: this.history.items.slice(0, 50), media: this.media,
-          clip: { running: this.clip.running, link: this.clip.link, sent: this.clip.sent }, tray: this.trayItems().map((x) => x.label || x.type), pairs: this.sync.pairs }));
+          clip: { running: this.clip.running, link: this.clip.link, sent: this.clip.sent }, tray: this.trayItems().map((x) => x.label || x.type), pairs: this.sync.pairs, peerLinks: this.peerLinks }));
       case '/f/clip-text':     // the user copies text on the PC
         Promise.resolve(this.el.clipboard.writeText(q.get('text') || '')).then(() => res.end('ok'), (e) => res.end('error ' + e.message));
         return undefined;

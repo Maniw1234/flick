@@ -354,7 +354,16 @@ void main() {
   R.bindTex = function (unit, tex, loc) { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, tex); if (loc) gl.uniform1i(loc, unit); };
 
   // ------------------------------------------------------------------ setup
+  // A graphics driver that can't build one of the programs: the overlay carries on as with no WebGL 2 at all (a file's
+  // label, its sound, the overlay hiding when it's done), rather than its page stopping there
   R.init = function (cv) {
+    try { return setup(cv); } catch (e) {
+      console.log('graphics: ' + e.message);
+      gl = null; R.gl = null;
+      return false;
+    }
+  };
+  function setup(cv) {
     canvas = cv;
     gl = canvas.getContext('webgl2', { alpha: true, premultipliedAlpha: true, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: false, powerPreference: 'high-performance' });
     if (!gl) return false;
@@ -410,7 +419,7 @@ void main() {
     attrib(P.streak, 'iSeg', 4, 44, 0); attrib(P.streak, 'iStyle', 4, 44, 16); attrib(P.streak, 'iColor', 3, 44, 32);
     gl.bindVertexArray(null);
     return true;
-  };
+  }
   function bindCorner(pr) {
     gl.bindBuffer(gl.ARRAY_BUFFER, quadVBO);
     const loc = gl.getAttribLocation(pr.p, 'aCorner');
@@ -513,7 +522,20 @@ void main() {
   }
   R.desk = desk;
   R.deskUV = () => [1 / fullW, 1 / fullH];
-  R.dropDesk = function () { desk.ok = false; };
+  // The photo is out of date once the overlay hides (Flick takes a new one for the next flick): its textures go too,
+  // rather than holding the graphics memory of a whole screen and its blurs for as long as Flick runs
+  R.dropDesk = function () {
+    desk.ok = false;
+    if (!gl) return;
+    for (const t of [].concat(desk.tex || [], desk.blur || [], desk.levels || [], desk.tmp || [])) freeTarget(t);
+    desk.tex = null; desk.blur = []; desk.levels = null; desk.tmp = null; desk.w = desk.h = 0;
+  };
+  // nothing on screen: the buffers made for effects (motion blur, vapor) are let go until they're needed again
+  R.sleep = function () {
+    if (!gl) return;
+    freeTarget(acc); acc = null;
+    freeTarget(vden); vden = null;
+  };
   // binds the desk textures for a background program: uDesk, uBlur1..3, uDeskUV, uHasDesk
   R.bindDesk = function (u, unit0) {
     const b = unit0 || 0;

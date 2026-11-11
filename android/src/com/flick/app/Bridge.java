@@ -30,6 +30,24 @@ final class Bridge {
     Bridge(MainActivity a) {
         this.a = a;
         this.prefs = a.getSharedPreferences("flick", 0);
+        markNewInstall(a, prefs);
+    }
+
+    /**
+     * A new install starts with the animations off and shows the page's first-time tour; one updated from an older Flick
+     * keeps what it had (animations on, no tour). Decided once, the first time this version starts, and kept as the
+     * page's pref "newInstall": "1" when no Flick was ever opened on this phone's data, "0" otherwise. Every Flick since
+     * 1.0.0 keeps the phone's id ("device") the first time its page loads, so an older Flick that was used left one, and
+     * a new install that Android updated before it was first opened is still new (its install and update times differ).
+     */
+    static void markNewInstall(Context c, SharedPreferences prefs) {
+        if (prefs.contains("p:newInstall")) return;
+        boolean fresh = false;
+        try {
+            fresh = !prefs.contains("device")
+                && !prefs.contains("p:settings") && !prefs.contains("p:theme") && !prefs.contains("p:lastPc");
+        } catch (Throwable e) { fresh = false; }
+        prefs.edit().putString("p:newInstall", fresh ? "1" : "0").apply();
     }
 
     @JavascriptInterface
@@ -44,6 +62,7 @@ final class Bridge {
             o.put("corner", a.cornerRadius);
             o.put("version", Updater.installedName(a));
             o.put("code", Updater.installedCode(a));
+            o.put("store", Store.play(a) ? "play" : "github");   // the Google Play version updates through Play
             o.put("sdk", Build.VERSION.SDK_INT);
             return o.toString();
         } catch (Throwable e) { return "{}"; }
@@ -52,6 +71,8 @@ final class Bridge {
     // ---------------- wireless updates from the PC ----------------
     @JavascriptInterface
     public String updateState() {
+        // (the Google Play version never installs anything: Play updates it)
+        if (Store.play(a)) return "{\"canInstall\":false,\"ready\":0,\"readySha\":\"\",\"busy\":false}";
         try {
             Updater u = a.updater();
             JSONObject o = new JSONObject();
@@ -66,8 +87,17 @@ final class Bridge {
     /** sums + sig: the SHA256SUMS and SHA256SUMS.sig of the Flick release the update comes from (refused without). */
     @JavascriptInterface
     public void updateDownload(String url, String code, String size, String sha256, String sums, String sig) {
+        if (Store.play(a)) return;
         try { a.updater().download(url, Long.parseLong(code), Long.parseLong(size), sha256, sums, sig); }
         catch (Throwable e) { a.updater().fail("bad request"); }
+    }
+
+    /** updateDownload for the update card's own background fetch (the user didn't ask): "metered" when it waits for Wi-Fi (nothing starts), "" otherwise. */
+    @JavascriptInterface
+    public String updateAutoDownload(String url, String code, String size, String sha256, String sums, String sig) {
+        if (Store.play(a)) return "";
+        try { return a.updater().download(url, Long.parseLong(code), Long.parseLong(size), sha256, sums, sig, true) ? "" : "metered"; }
+        catch (Throwable e) { a.updater().fail("bad request"); return ""; }
     }
 
     /**
@@ -76,6 +106,7 @@ final class Bridge {
      */
     @JavascriptInterface
     public void updateCheckGitHub() {
+        if (Store.play(a)) return;                      // Google Play updates the Play version
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -108,11 +139,11 @@ final class Bridge {
 
     // ---------------- Bluetooth (when there's no network) ----------------
     @JavascriptInterface public void btPermission() { a.runOnUiThread(new Runnable() { @Override public void run() { a.askBluetooth(); } }); }
-    @JavascriptInterface public boolean btPermitted() { return BtLink.permitted(a); }
     @JavascriptInterface public void btWant(boolean on) { a.btLink().setWanted(on); }
 
     @JavascriptInterface
     public void updateInstall() {
+        if (Store.play(a)) return;
         a.runOnUiThread(new Runnable() { @Override public void run() { a.updater().install(a); } });
     }
 
@@ -157,8 +188,9 @@ final class Bridge {
     private static final ExecutorService LINKS = Transfers.pool("flick-link", 2);
 
     /**
-     * A local port that leads to the PC over TLS. Answers as an event: {ok, port, fp} or {ok:false, why} with why
-     * "pin" (the PC's certificate isn't the pinned one; fp = the one seen), "tls" or "unreachable".
+     * A local port that leads to the PC over TLS. Answers as an event: {ok, port, base, fp} (base: where requests go,
+     * with the link's key) or {ok:false, why} with why "pin" (the PC's certificate isn't the pinned one; fp = the one
+     * seen), "tls" or "unreachable".
      */
     @JavascriptInterface
     public void tlsOpen(final String req, final String host, final int port, final String pin) {
@@ -171,6 +203,7 @@ final class Bridge {
                         TlsProxy p = TlsProxy.open(host, port, pin);
                         r.put("ok", true);
                         r.put("port", p.localPort());
+                        r.put("base", p.base());
                         r.put("fp", p.fp);
                     } catch (TlsProxy.PinMismatch e) {
                         r.put("ok", false); r.put("why", "pin"); r.put("fp", e.seen == null ? "" : e.seen);
@@ -186,6 +219,13 @@ final class Bridge {
     }
 
     @JavascriptInterface public void tlsClose(int port) { TlsProxy.close(port); }
+
+    /** Where requests to the link at this local port go (the Bluetooth link's: "http://127.0.0.1:<port>/k/<key>"), or "". */
+    @JavascriptInterface
+    public String relayBase(int port) {
+        String k = TlsProxy.Gate.prefix(port);
+        return k.length() == 0 ? "" : "http://127.0.0.1:" + port + k;
+    }
 
     /**
      * Sign-in proof for the PC pcId: HMAC-SHA256 with the token this phone holds for it, over both random numbers
@@ -368,6 +408,22 @@ final class Bridge {
             }
         });
     }
+    /** A line of text (the PC app's link) through Android's share sheet: Copy, an email or a message to oneself. */
+    @JavascriptInterface
+    public void shareText(final String title, final String text) {
+        if (text == null || text.length() == 0 || text.length() > 2000) return;
+        a.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                Intent i = new Intent(Intent.ACTION_SEND);
+                i.setType("text/plain");
+                i.putExtra(Intent.EXTRA_TEXT, text);
+                if (title != null && title.length() > 0) i.putExtra(Intent.EXTRA_SUBJECT, title);
+                try { a.startActivity(Intent.createChooser(i, title)); } catch (Throwable e) { a.toast("Couldn't share the link"); }
+            }
+        });
+    }
+
     @JavascriptInterface public String library() { return Library.get(a).listJson(); }
     @JavascriptInterface public String thumb(String id) { return Library.get(a).thumbBase64(id); }
     @JavascriptInterface public void remove(String id) { Library.get(a).remove(id); }
@@ -386,6 +442,13 @@ final class Bridge {
     @JavascriptInterface
     public void pick(final String kind) {
         a.runOnUiThread(new Runnable() { @Override public void run() { a.launchPicker(kind); } });
+    }
+
+    /** pick(), with the page's name for it (tag): the 'added' event that follows carries it (none when nothing was picked). */
+    @JavascriptInterface
+    public void pickFor(final String kind, final String tag) {
+        final String t = tag == null ? null : tag.length() > 40 ? tag.substring(0, 40) : tag;
+        a.runOnUiThread(new Runnable() { @Override public void run() { a.launchPicker(kind, t); } });
     }
 
     // ---------------- sends that survive Flick closing and carry on (protocol 7 PCs, see Sends/Outbox) ----------------
@@ -410,6 +473,81 @@ final class Bridge {
             @Override public void run() { a.result(req, SpeedTest.run(a.getApplicationContext(), pcId, host, port, via)); }
         });
     }
+
+    // ---------------- other phones (Peers): finding them, pairing with the code, sending, taking theirs ----------------
+    /** {devices: [{id, name, paired, nearby, busy, code, codeOk, allowed, progress, error}], on, receiving, me, ask}. */
+    @JavascriptInterface public String peerState() { return Peers.get(a).state().toString(); }
+    /** Looks for other phones while the page shows them (answers come as "peers" events). */
+    @JavascriptInterface public void peerScan(boolean on) { try { Peers.get(a).client().scan(on); } catch (Throwable e) { Bg.warn("peers", e); } }
+    @JavascriptInterface public void peerPair(String id) { try { Peers.get(a).client().pair(id); } catch (Throwable e) { Bg.warn("peers", e); } }
+    /** The code here is the same as on the other phone (or not: pairing is undone). */
+    @JavascriptInterface public void peerConfirm(String id, boolean same) { try { Peers.get(a).client().confirm(id, same); } catch (Throwable e) { Bg.warn("peers", e); } }
+    /** Stops a pairing or a send. */
+    @JavascriptInterface public void peerCancel(String id) { try { Peers.get(a).client().cancel(id); } catch (Throwable e) { Bg.warn("peers", e); } }
+    /** Unpairs, both ways (the other phone is told when it can be reached). */
+    @JavascriptInterface public void peerForget(String id) { try { Peers.get(a).client().forget(id, true); } catch (Throwable e) { Bg.warn("peers", e); } }
+    /** Allow / Don't allow, for a phone asking to pair with this one ("peer-ask"). */
+    @JavascriptInterface public void peerAnswer(String device, boolean allow) { Peers.get(a).answer(device, allow); }
+    // Connect: the screen is showing (discovery says so to devices whose user holds Connect), and the user is holding it
+    // here (PCs and phones nearby are looked for every 300 ms meanwhile)
+    @JavascriptInterface public void connectReady(boolean on) { Peers.get(a).setReady(on); }
+    /** Bluetooth for phones that aren't on this Wi-Fi: {supported, permitted, on, up}. */
+    @JavascriptInterface public String bleState() { return BleLink.state(a).toString(); }
+    /** Android's "turn on Bluetooth?" question (false: it can't ask). */
+    @JavascriptInterface
+    public boolean btEnable() {
+        try {
+            a.startActivity(new android.content.Intent(android.bluetooth.BluetoothAdapter.ACTION_REQUEST_ENABLE));
+            return true;
+        } catch (Throwable e) { return false; }
+    }
+    /** Asks Android for what Bluetooth needs ("Nearby devices"); answered with a 'ble-perm' event. */
+    @JavascriptInterface public void bleAsk() { a.runOnUiThread(new Runnable() { @Override public void run() { a.askNearby(); } }); }
+    /** The USB cable: {cable: plugged into a computer, tether: USB tethering on}; 'usb' events follow it. */
+    @JavascriptInterface public String usbState() { return UsbWatch.state().toString(); }
+    /** Android's screen with the USB tethering switch (an app can't turn it on itself). */
+    @JavascriptInterface public boolean openTethering() { return UsbWatch.openTethering(a); }
+    /** Android's Location settings (Android 10 and 11 find phones over Bluetooth only with Location on): false if none opened. */
+    @JavascriptInterface
+    public boolean openLocationSettings() {
+        try {
+            a.startActivity(new Intent(android.provider.Settings.ACTION_LOCATION_SOURCE_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            return true;
+        } catch (Throwable e) { return false; }      // (no screen for it on this phone)
+    }
+    @JavascriptInterface
+    public void connectFast(boolean on) {
+        a.discovery().setFast(on);
+        try { Peers.get(a).client().fast(on); } catch (Throwable e) { Bg.warn("peers", e); }
+    }
+    /**
+     * Pairs with a phone the user reached by holding Connect here: done once it allows it there and the code here is
+     * confirmed the same (peerConfirm); over a USB cable, once it allows it there.
+     */
+    @JavascriptInterface public void peerPairAuto(String id) { try { Peers.get(a).client().pair(id, true); } catch (Throwable e) { Bg.warn("peers", e); } }
+    /** items: [{path} | {id}]. "ok", "busy", "unpaired" or "none". */
+    @JavascriptInterface
+    public String peerSend(String id, String items) {
+        try { return Peers.get(a).send(id, items); } catch (Throwable e) { Bg.warn("peers", e); return "none"; }
+    }
+    /** "Let other phones send to this phone". */
+    @JavascriptInterface public void peerReceive(boolean on) { Peers.get(a).setReceive(on); }
+    /** A flick to another phone: items as peerSend, fx { look, y, vx } (its card arrives there the same way). */
+    @JavascriptInterface public String peerSendFx(String id, String items, String fx) { return Peers.get(a).send(id, items, fx); }
+    /** The card of files from another phone landed here: that phone gets a thud. */
+    @JavascriptInterface public void peerLanded(String fid) { try { Peers.get(a).landed(fid); } catch (Throwable e) { Bg.warn("peers", e); } }
+    /** A clipboard ("clip": {kind, text | png}), a link ("link": the address) or find my phone ("ring": "on" | "off") to a
+     *  paired phone; answered with the event 'peer-msg' {req, id, what, ok, why}. */
+    @JavascriptInterface public void peerMsg(String id, String what, String payload, String req) { Peers.get(a).message(id, what, payload, req, null); }
+    /** "Ask each time" (on) or "Always accept" for files from a paired device; the answer to one waiting ('peer-accept'). */
+    @JavascriptInterface public void peerAsk(String id, boolean on) { Peers.get(a).setAsk(id, on); }
+    @JavascriptInterface public void peerAccept(String tid, boolean yes) { Peers.get(a).decide(tid, yes, "declined"); }
+
+    // ---------------- what's moving, both ways, with every device (Moving): Settings › Transfers, the Transfers page ----------------
+    /** {now: [items], recent: [items that ended lately]}; 'moving' events ({t, state}) follow it, at most every 250 ms. */
+    @JavascriptInterface public String movingState() { return Moving.snapshot().toString(); }
+    /** Cancel, as its notification's: returns at once (the transfer stops on a thread of its own, and its item ends). */
+    @JavascriptInterface public void movingCancel(String key) { Moving.cancelSoon(key); }
 
     @JavascriptInterface public void upload(String tid, String id, String url) { a.transfers().upload(tid, id, url); }
     @JavascriptInterface public void uploadBundle(String tid, String items, String url) { a.transfers().uploadBundle(tid, items, url); }
@@ -604,12 +742,17 @@ final class Bridge {
         a.runOnUiThread(new Runnable() { @Override public void run() { FromPc.open(a, url); } });
     }
 
+    /** Find my phone from the PC over the page's link. On: false when it won't ring (found here a moment ago), so the
+     *  page doesn't cover the screen for a ringing that isn't. Off: sec -1 is the PC's ring-stop (it may ring again at
+     *  once); 0 is the user's Stop here (found: the PC can't ring it again for a couple of minutes). */
     @JavascriptInterface
-    public void ring(boolean on, int sec) {
-        if (on) Ringer.start(a, sec); else Ringer.stop(a, "user");
+    public boolean ring(boolean on, int sec) {
+        if (on) return Ringer.start(a, sec);
+        Ringer.stop(a, sec < 0 ? "pc" : "user");
+        return true;
     }
 
-    /** {"bg","notifyAccess","notifyPerm","autoSend","clipFromPc","notify","sdk"}. */
+    /** {"bg","notifyAccess","notifyPerm","autoSend","clipFromPc","notify","browse","clipHistory","sdk"}. */
     @JavascriptInterface
     public String features() {
         String j = Features.json(a);
@@ -725,7 +868,7 @@ final class Bridge {
             public void run() {
                 try {
                     String t = title != null && title.trim().length() > 0 ? title.trim() : "Shared link";
-                    JSONObject item = Library.get(a).importText(url, t.length() > 60 ? t.substring(0, 60) : t);
+                    JSONObject item = Library.get(a).importText(url, savedName(t));
                     JSONObject o = new JSONObject();
                     o.put("t", "added");
                     o.put("items", new JSONArray().put(item));
@@ -735,21 +878,34 @@ final class Bridge {
         });
     }
 
-    /** What the "Send last photo" tile does; the outcome shows as a page toast. */
-    @JavascriptInterface
-    public void sendLatestPhoto() {
-        Transfers.hold(a, true);
-        Actions.sendLatestPhoto(a, "share", true, new Actions.Report() { @Override public void say(String msg) { a.toast(msg); } });
+    /**
+     * A saved link's name in at most 60 characters. The page names it "<host> · <the sharing app's title>": the host
+     * stays whole, or keeps its end (the site it opens) when it alone is too long, and the title gives way. Cut at its
+     * end, a long host showed only the site it begins with.
+     */
+    static String savedName(String t) {
+        int dot = t.indexOf(" · ");
+        if (dot < 0) return t.codePointCount(0, t.length()) > 60 ? t.substring(0, t.offsetByCodePoints(0, 59)) + "…" : t;
+        String host = Links.fit(t.substring(0, dot), 60), rest = t.substring(dot + 3);
+        int room = 60 - host.codePointCount(0, host.length()) - 3;
+        if (room < 2) return host;
+        if (rest.codePointCount(0, rest.length()) > room) rest = rest.substring(0, rest.offsetByCodePoints(0, room - 1)) + "…";
+        return host + " · " + rest;
     }
 
-    /** What the "Send clipboard" tile does (the user asked, so a clipboard marked private goes too). Returns at once. */
+    /** Sends this phone's clipboard to the PC, as the "Send clipboard" tile does when no phone is picked (the user asked, so
+     *  a clipboard marked private goes too). Returns at once. */
     @JavascriptInterface
-    public void sendClipboard() {
+    public void sendClipboard() { sendClipboardTo(""); }
+
+    /** The same, to the PC (phone "") or to a paired phone (its id), as the page says. */
+    @JavascriptInterface
+    public void sendClipboardTo(final String phone) {
         CLIP.execute(new Runnable() {
             @Override
             public void run() {
                 a.awaitFocus(1500);
-                Actions.sendClipboard(a, Clip.read(a, true), new Actions.Report() {
+                Actions.sendClipboard(a, Clip.read(a, true), phone == null || phone.length() == 0 ? null : phone, new Actions.Report() {
                     @Override public void say(String msg) { a.toast(msg); }
                 });
             }

@@ -1,0 +1,43 @@
+/* The progress card on the screen (card.js, main.js cardShow): the window's look, at a size main knows ahead (each row
+   50 px, "+2 more" 24 px), so its window fits it exactly and catches no click outside it */
+@font-face { font-family: 'Inter'; src: url('../assets/fonts/InterVariable.woff2') format('woff2'); font-weight: 100 900; }
+:root { --card: rgba(43,43,43,0.98); --card-hi: rgba(50,50,50,0.98); --text: #fff; --sub: rgba(255,255,255,0.62); --accent: #4cc2ff; --ok: #6ccb5f; --bad: #ff99a4; }
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; color: var(--text); user-select: none; cursor: default;
+  font-family: 'Segoe UI Variable Text', 'Segoe UI', 'Inter', system-ui, sans-serif; font-size: 13px; -webkit-font-smoothing: antialiased; }
+.cd { position: fixed; inset: 0; padding: 6px 0; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; background: var(--card); overflow: hidden;
+  cursor: pointer; transition: opacity .15s ease, transform .15s ease, background .12s; }
+.cd:hover { background: var(--card-hi); }
+.cd.out { opacity: 0; transform: translateY(6px); }
+.cd.top.out { transform: translateY(-6px); }
+.r { display: flex; align-items: center; gap: 10px; height: 50px; padding: 0 14px; }
+.r + .r { border-top: 1px solid rgba(255,255,255,0.06); }
+.ic { flex: none; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; background: rgba(255,255,255,0.07); }
+.ic svg { width: 14px; height: 14px; fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.r.ok .ic { background: rgba(108,203,95,0.16); } .r.ok .ic svg { stroke: var(--ok); }
+.r.bad .ic { background: rgba(255,153,164,0.14); } .r.bad .ic svg { stroke: var(--bad); }
+.r.off .ic svg { stroke: var(--sub); }
+.tx { flex: 1; min-width: 0; }
+.t1, .t2 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.t1 { font-weight: 600; line-height: 17px; }
+.t2 { display: flex; margin-top: 1px; color: var(--sub); font-size: 12px; line-height: 15px; font-variant-numeric: tabular-nums; }
+/* (a long device name is cut short, never what comes after it: the % always shows) */
+.t2 > span { flex: none; white-space: pre; }
+.t2 > bdi { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.r.bad .t2 { color: var(--bad); }
+.ln { height: 3px; margin-top: 5px; border-radius: 2px; background: rgba(255,255,255,0.12); overflow: hidden; }
+.ln > i { display: block; height: 100%; width: 0; border-radius: 2px; background: var(--accent); transition: width .25s linear; }
+.ln.busy > i { width: 30%; animation: slide 1.1s ease-in-out infinite alternate; }
+@keyframes slide { from { transform: translateX(-10%); } to { transform: translateX(240%); } }
+.r.paused .ln > i, .r.wait .ln > i { background: rgba(255,255,255,0.45); }
+.r.ok .ln > i { background: var(--ok); }
+.r.bad .ln, .r.off .ln { visibility: hidden; }
+.more { height: 24px; line-height: 24px; padding: 0 14px 0 52px; color: var(--sub); font-size: 12px; }
+@media (prefers-reduced-motion: reduce) { .cd, .ln > i { transition: none; } .ln.busy > i { animation: none; width: 100%; opacity: .5; } }
+/* contrast themes (forced colors): the bar's fill is a background, which they'd paint over */
+@media (forced-colors: active) {
+  .ln { forced-color-adjust: none; background: Canvas; box-shadow: inset 0 0 0 1px GrayText; }
+  .ln > i, .r.ok .ln > i { background: Highlight; }
+  .r.paused .ln > i, .r.wait .ln > i { background: GrayText; }
+}

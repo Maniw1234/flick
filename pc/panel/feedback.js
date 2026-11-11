@@ -9,6 +9,8 @@
   const NOT_READY = 'This version of Flick can’t send feedback yet.';
   let S = { ready: false, device: '', waiting: 0 };
   let type = 'bug', open = false, busy = false;
+  let refusedBack = false;    // a message kept for later that the form didn't take is back in the box (said when opened)
+  const REFUSED = 'The feedback form didn’t take this when Flick tried to send it. Try again later.';
 
   function setType(t) {
     type = t === 'idea' ? 'idea' : 'bug';
@@ -22,7 +24,9 @@
     $('fbDevText').textContent = S.device || '';
     $('fbDevText').classList.toggle('off', !$('fbDev').checked);
     const sendBtn = $('fbSend');
-    sendBtn.disabled = busy || !S.ready;
+    // (while it sends: not disabled, so the keyboard stays on it; the form takes no second send meanwhile)
+    sendBtn.disabled = !S.ready;
+    if (busy) sendBtn.setAttribute('aria-disabled', 'true'); else sendBtn.removeAttribute('aria-disabled');
     sendBtn.textContent = !S.ready ? 'Feedback isn’t set up yet' : busy ? 'Sending…' : 'Send';
     if (!S.ready) note(NOT_READY);
     else if ($('fbNote').textContent === NOT_READY) note('');
@@ -34,7 +38,8 @@
     $('fbView').hidden = !open;
     if (open) {
       $('fbForm').hidden = false; $('fbDone').hidden = true;
-      note('');
+      note(refusedBack ? REFUSED : '', refusedBack);
+      refusedBack = false;
       send('hello');
       render();
       $('fbView').focus();
@@ -42,6 +47,7 @@
     }
   }
   $('fbOpen').onclick = () => showView(true);
+  (window.flickViews = window.flickViews || {}).fb = (on) => { if (open !== !!on) showView(on); };   // (the bar closes it: nav.js)
   $('fbBack').onclick = () => showView(false);
   $('fbAgain').onclick = () => showView(false);
   $('fbDev').onchange = render;
@@ -61,16 +67,26 @@
   };
 
   function done(title, text) {
+    // (the keyboard was in the form, hidden now: it goes to what's said instead of being dropped to the page)
+    const had = $('fbForm').contains(document.activeElement);
     $('fbForm').hidden = true; $('fbDone').hidden = false;
     $('fbDoneTitle').textContent = title;
     $('fbDoneText').textContent = text;
     $('fbMsg').value = ''; $('fbEmail').value = ''; $('fbDev').checked = true;
     setType('bug');
+    if (had) $('fbDoneTitle').focus();
   }
 
   api.on('panel:feedback', (s) => {
     if (!s) return;
     S = Object.assign(S, s);
+    if (s.refused && !busy) {
+      // (not over something being written: then it's only said)
+      const back = !$('fbMsg').value.trim();
+      if (back) { setType(s.refused.type); $('fbMsg').value = s.refused.message || ''; $('fbEmail').value = s.refused.email || ''; }
+      if (open) { $('fbForm').hidden = false; $('fbDone').hidden = true; note(back ? REFUSED : 'The feedback form didn’t take the message Flick kept for later.', true); } else refusedBack = back;
+      send('refused-seen');
+    }
     if (s.result) {
       busy = false;
       const r = s.result;
@@ -84,7 +100,8 @@
   });
 
   window.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape' || !open || !$('askBox').hidden) return;
+    // (a question in front, Accept, pairing, Quick Share: answered with its buttons; this view stays behind it)
+    if (e.key !== 'Escape' || !open || [...document.querySelectorAll('.modal')].some((m) => !m.hidden)) return;
     e.stopImmediatePropagation();
     showView(false);
   }, true);

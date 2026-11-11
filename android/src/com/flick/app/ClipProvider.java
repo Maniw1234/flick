@@ -19,7 +19,9 @@ import java.util.List;
  * the pasting app access to the one image on the clipboard). The newest few are kept in the app's cache.
  */
 public class ClipProvider extends ContentProvider {
-    static final String AUTHORITY = "com.flick.app.clip";
+    // <package>.clip: the Google Play version has its own package name, and an authority is only ever one app's.
+    // Android makes the provider (onCreate) before any of the app's code runs, so this is set before it's used.
+    static volatile String AUTHORITY = "com.flick.app.clip";
     private static final int KEEP = 3;
 
     static File dir(Context c) { return new File(c.getApplicationContext().getCacheDir(), "clip"); }
@@ -38,7 +40,7 @@ public class ClipProvider extends ContentProvider {
         return new Uri.Builder().scheme("content").authority(AUTHORITY).appendPath(f.getName()).build();
     }
 
-    @Override public boolean onCreate() { return true; }
+    @Override public boolean onCreate() { AUTHORITY = getContext().getPackageName() + ".clip"; return true; }
 
     private File resolve(Uri u) {
         List<String> seg = u.getPathSegments();

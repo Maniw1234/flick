@@ -1,0 +1,34 @@
+/* the first-time tour (tour.js) and Advanced settings' animation choices */
+h3 { font-size: 13px; font-weight: 600; margin: 16px 2px 7px; color: rgba(255,255,255,0.86); }
+.hsub { margin: -3px 2px 7px; }
+.fxopts { margin-top: 10px; }
+.fxopts.off { display: none; }       /* (animations off: their choices show once they're on) */
+
+/* (the tour shows Send files and Transfers even with nothing connected or moving: where they will be) */
+body.touring #sendRow, body.touring #xf { display: block !important; }
+body.touring #xfList:empty::before { content: 'Nothing is moving right now.'; display: block; padding: 11px 0; color: var(--sub); }
+
+.tour { position: fixed; inset: 0; z-index: 9; }
+.thole { position: fixed; border-radius: 10px; box-shadow: 0 0 0 200vmax rgba(0,0,0,0.66); outline: 2px solid var(--accent); outline-offset: 0;
+  transition: left .22s cubic-bezier(.2,.8,.2,1), top .22s cubic-bezier(.2,.8,.2,1), width .22s cubic-bezier(.2,.8,.2,1), height .22s cubic-bezier(.2,.8,.2,1); }
+.tarrow { position: fixed; width: 18px; height: 10px; }
+.tarrow::before { content: ''; position: absolute; inset: 0; background: var(--accent); clip-path: polygon(50% 100%, 0 0, 100% 0); }
+.tarrow.up::before { clip-path: polygon(50% 0, 0 100%, 100% 100%); }
+/* (very large text: the words scroll, the buttons stay in sight) */
+.tbox { position: fixed; left: 12px; right: 12px; max-width: 380px; margin: 0 auto; background: #2b2b2b; border: 2px solid var(--accent); border-radius: 10px;
+  padding: 14px 16px 12px; box-shadow: 0 16px 48px rgba(0,0,0,.55); user-select: text; display: flex; flex-direction: column; max-height: calc(100% - 16px); }
+.tbox > [aria-live] { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.tbtns { flex: none; justify-content: flex-end; }
+.tcount { color: var(--sub); font-size: 12px; }
+.ttitle { font-weight: 600; font-size: 15px; margin-top: 3px; }
+.ttext { margin-top: 5px; line-height: 1.45; color: rgba(255,255,255,0.88); }
+.tbtns { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; }
+.tbtns .tgap { flex: 1; }
+.tbtns .btn { padding: 6px 14px; }
+@media (prefers-reduced-motion: reduce) { .thole { transition: none; } }
+/* Windows' contrast themes: the dimming, the light and the box in the theme's own colors */
+@media (forced-colors: active) {
+  .thole { forced-color-adjust: none; outline: 3px solid Highlight; box-shadow: 0 0 0 200vmax rgba(0,0,0,0.7); }
+  .tarrow::before { forced-color-adjust: none; background: Highlight; }
+  .tbox { border-color: Highlight; }
+}

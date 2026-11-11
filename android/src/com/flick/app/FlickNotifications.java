@@ -33,7 +33,8 @@ public class FlickNotifications extends NotificationListenerService {
     private static volatile FlickNotifications live;
     private static final NotifyGate GATE = new NotifyGate();
     private static final Set<String> SKIP = new HashSet<String>(Arrays.asList(
-            "android", "com.android.systemui", "com.flick.app", "com.android.providers.downloads",
+            // (both Flicks: with the GitHub and the Google Play version on one phone, neither passes on the other's)
+            "android", "com.android.systemui", Store.GITHUB_PKG, Store.PLAY_PKG, "com.android.providers.downloads",
             "com.android.bluetooth", "com.android.shell", "com.android.phone.overlay",
             "com.google.android.inputmethod.latin", "com.android.inputmethod.latin", "com.samsung.android.honeyboard",
             "com.sec.android.inputmethod", "com.touchtype.swiftkey", "com.google.android.apps.inputmethod.hindi"));

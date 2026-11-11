@@ -1,0 +1,50 @@
+/* What's moving (transfers.js): Transfers at the top of the main view. Every row is as tall whatever it shows (moving,
+   paused, ended), so nothing below it moves as a transfer goes on or ends. */
+
+.xf h2 { margin-top: 10px; }
+.xf h2:focus { outline: none; }
+.xfrow { display: flex; align-items: flex-start; gap: 10px; min-height: 64px; padding: 8px 0; border-top: 1px solid var(--line); min-width: 0; }
+#xfList > .xfrow:first-child { border-top: 0; }
+.xfrow:focus { outline: none; }
+.xfrow:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 6px; }
+.xfdir { flex: none; width: 28px; height: 28px; margin-top: 2px; border-radius: 50%; display: grid; place-items: center; background: rgba(255,255,255,0.07); }
+.xfdir svg { width: 14px; height: 14px; fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.xfrow.ok .xfdir { background: rgba(108,203,95,0.16); }
+.xfrow.ok .xfdir svg { stroke: var(--ok); }
+.xfrow.bad .xfdir { background: rgba(255,153,164,0.14); }
+.xfrow.bad .xfdir svg { stroke: #ff99a4; }
+.xfrow.off .xfdir svg { stroke: var(--sub); }
+.xfmain { flex: 1; min-width: 0; }
+.xftop { display: flex; align-items: center; gap: 8px; min-height: 22px; }
+.xfname { flex: 1; display: flex; align-items: baseline; gap: 6px; min-width: 0; line-height: 18px; }
+.xfname > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.xfn { flex: 0 1 auto; }
+.xfcur { flex: 1 1 0; min-width: 40px; color: var(--sub); font-size: 12px; }
+.xfcur:empty { display: none; }
+.xfcur::before { content: '·' / ''; margin-right: 6px; }
+.xfmore { display: block; width: 100%; text-align: left; background: none; border: 0; border-top: 1px solid var(--line); padding: 9px 0 10px 38px; color: var(--sub); font-size: 12px; cursor: pointer; }
+.xfmore:hover { color: var(--text); }
+.xfmore:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 4px; }
+.xfsub { display: flex; color: var(--sub); font-size: 12px; line-height: 16px; margin-top: 1px; overflow: hidden; white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* (a long device name is cut short, never what comes after it: the % always shows) */
+.xfwho, .xfhow { flex: none; white-space: pre; }
+.xfdev { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.xfrow.bad .xfsub { color: #ff99a4; }
+.xfbar { height: 3px; border-radius: 2px; background: rgba(255,255,255,0.12); overflow: hidden; margin-top: 6px; }
+.xfbar > i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 2px; transition: width .25s linear; }
+.xfbar.busy > i { width: 30%; animation: xfslide 1.1s ease-in-out infinite alternate; }
+@keyframes xfslide { from { transform: translateX(-10%); } to { transform: translateX(240%); } }
+.xfrow.paused .xfbar > i, .xfrow.wait .xfbar > i { background: rgba(255,255,255,0.45); }
+.xfrow.ok .xfbar > i { background: var(--ok); }
+.xfrow.bad .xfbar, .xfrow.off .xfbar { visibility: hidden; }
+.xfx { flex: none; padding: 2px 10px; font-size: 12px; line-height: 18px; }
+.xfx[aria-disabled="true"] { opacity: .6; cursor: default; filter: none; }
+@media (prefers-reduced-motion: reduce) { .xfbar.busy > i { animation: none; width: 100%; opacity: .5; } .xfbar > i { transition: none; } }
+/* what a screen reader hears as a transfer ends (not shown) */
+.xflive { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+/* contrast themes (forced colors): the bar's fill is a background, which they'd paint over */
+@media (forced-colors: active) {
+  .xfbar { forced-color-adjust: none; background: Canvas; box-shadow: inset 0 0 0 1px GrayText; }
+  .xfbar > i, .xfrow.ok .xfbar > i { background: Highlight; }
+  .xfrow.paused .xfbar > i, .xfrow.wait .xfbar > i { background: GrayText; }
+}

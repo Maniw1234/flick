@@ -26,15 +26,27 @@
     b.setAttribute('aria-label', k.label);
     b.appendChild(A.svgEl('<svg viewBox="0 0 24 24" aria-hidden="true">' + k.svg + '</svg>'));
     b.appendChild(h('span', '', k.text));
-    let rep = 0, held = false;
-    const stop = () => { clearTimeout(rep); clearInterval(rep); rep = 0; b.classList.remove('down'); };
+    let rep = 0, held = false, pid = null;
+    function stop() {
+      clearTimeout(rep); clearInterval(rep); rep = 0; b.classList.remove('down');
+      pid = null;
+      document.removeEventListener('pointerup', upAnywhere, true);
+      document.removeEventListener('pointercancel', upAnywhere, true);
+    }
+    function upAnywhere(e) { if (e.pointerId === pid) stop(); }
     if (k.repeat) {
-      // volume keeps changing while held, like the buttons on a remote
+      // volume keeps changing while held, like the buttons on a remote. Until that finger is up, wherever it is, or the
+      // key is gone: another sheet put in this one's place under the finger took the key off the page, its pointerup
+      // never came, and the PC's volume went on changing every 160 ms for good
       b.addEventListener('pointerdown', (e) => {
-        if (b.disabled || performance.now() - openedAt < 300) return;
+        if (state() !== 'ok' || performance.now() - openedAt < 300) return;
+        stop();
         held = true; b.classList.add('down');
+        pid = e.pointerId;
         send(k);
-        rep = setTimeout(() => { rep = setInterval(() => send(k), 160); }, 450);
+        rep = setTimeout(() => { rep = setInterval(() => { if (b.isConnected) send(k); else stop(); }, 160); }, 450);
+        document.addEventListener('pointerup', upAnywhere, true);
+        document.addEventListener('pointercancel', upAnywhere, true);
         try { b.setPointerCapture(e.pointerId); } catch (x) { /* ignore */ }
       });
       b.addEventListener('pointerup', stop);
@@ -54,7 +66,9 @@
     const s = state();
     note.textContent = s === 'off' ? 'Connect to your PC to use the remote' : s === 'old' ? X.OLD_PC : 'Controls what’s playing on ' + X.pcName();
     note.classList.toggle('warn', s !== 'ok');
-    for (const b of box.querySelectorAll('.fkey')) b.disabled = s !== 'ok';
+    // (off, not disabled: a key with the keyboard's or a switch's focus keeps it when the link drops, where a disabled one
+    // let it fall to the start of the page; a press then does nothing, see send)
+    for (const b of box.querySelectorAll('.fkey')) { if (s === 'ok') b.removeAttribute('aria-disabled'); else b.setAttribute('aria-disabled', 'true'); }
   }
 
   function open() {

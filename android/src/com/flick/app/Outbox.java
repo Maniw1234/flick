@@ -73,9 +73,14 @@ final class Outbox {
         Aborted(String refused) { super(refused != null ? refused : "canceled on the PC"); this.refused = refused; }
     }
 
-    /** The PC's 410: canceled there, or turned down by its user (why declined | timeout, a PC set to "Ask each time"). */
+    /**
+     * The PC's 410: canceled there (by its user: canceled true, whatever its why), or turned down by its user (why
+     * declined | timeout, a PC set to "Ask each time").
+     */
     private static Aborted aborted(Job j, Wire.Answer a) {
-        String why = a.json().optString("why", "");
+        JSONObject o = a.json();
+        if (Boolean.TRUE.equals(o.opt("canceled"))) return new Aborted();
+        String why = o.optString("why", "");
         if ("declined".equals(why)) return new Aborted("Declined on " + j.pcName);
         if ("timeout".equals(why)) return new Aborted("Not accepted on " + j.pcName + " in time");
         return new Aborted();
@@ -114,17 +119,31 @@ final class Outbox {
         boolean begun;                                // this attempt sent the PC data: ask how far it got before more
         boolean retake;                               // paused and resumed before the pause took effect (see failed)
         String state = QUEUED, why, want, sig, refused;
+        String left;                                  // what didn't go of a send that went (its note: see sendBundle)
+        String there;                                 // canceled on the PC by its user meanwhile: why, for the list (see refused)
         volatile String att;                          // written under this, read by the part threads
         int ways, restarts, fails;
         int refusals;                                 // tries the PC answered with an error in a row (see Refusal)
-        long total, ended, waitingSince, wakeAt;
+        long total, ended;
+        // when it began waiting for the PC (the wall clock, saved: the give-up counts the waiting before a restart too)
+        long waitingSince;
+        // the same on mono() (this process; waitHere: set): what counts in this process, whatever the wall clock does
+        long waitFrom;
+        boolean waitHere;
+        long wakeAt;                                  // when it tries again (mono())
+        long born;                                    // when it was made (mono(); before this process: as long before)
+        long noted;                                   // the ending (its time) whose History entries are settled (see Sends)
         final Set<Integer> had = new HashSet<Integer>();
         AtomicBoolean stop = new AtomicBoolean(false);
         final Object disk = new Object();             // its record is written by one thread at a time (see save)
+        boolean dropped;                              // its record is deleted for good (guarded by disk)
         String[] psums;                               // each part's checksum once the PC has it whole (this attempt)
         // each part's checksum so far at a few points it passed (this attempt, this process): carrying on after a cut
         // starts from the last point the PC has, instead of reading everything the PC has again (see sendPart)
         final Map<Integer, TreeMap<Long, MessageDigest>> marks = new HashMap<Integer, TreeMap<Long, MessageDigest>>();
+        // a bundle's files that couldn't be read when their turn came and were left out (this attempt, this process):
+        // a stream carrying on after a cut doesn't go back to them, so they're kept here to be said (see sendBundle)
+        final Set<String> unread = Collections.synchronizedSet(new HashSet<String>());
         // progress (any thread)
         final AtomicLong sent = new AtomicLong();
         private double rate;
@@ -136,11 +155,21 @@ final class Outbox {
             this.bundle = items.size() != 1 || items.get(0).dir;
             this.label = items.size() == 1 ? items.get(0).name : items.size() + " items";
             this.skipDup = skipDup; this.parallel = parallel;
+            this.born = mono() - Math.max(0, now() - created);
         }
 
         synchronized boolean finished() { return isEnd(state); }
+        /** How long it has waited for the PC so far (0: it isn't waiting). */
+        synchronized long waited() {
+            if (waitingSince == 0) return 0;
+            return waitHere ? mono() - waitFrom : Math.max(0, now() - waitingSince);
+        }
         synchronized String state() { return state; }
         synchronized String why() { return why; }
+        synchronized long ended() { return ended; }
+        synchronized String refusal() { return refused; }
+        /** It ended, and that ending's History entries aren't settled yet (see Sends). */
+        synchronized boolean historyDue() { return isEnd(state) && ended > 0 && noted != ended; }
         synchronized boolean committed() { return committed; }
         synchronized long total() { return total; }
         synchronized double rate() { return RUNNING.equals(state) ? rate : 0; }
@@ -169,7 +198,7 @@ final class Outbox {
                 o.put("eta", r > 1 && total > s ? Math.round((total - s) / r) : -1);
                 o.put("created", created);
                 if (ended > 0) o.put("ended", ended);
-                if (WAITING.equals(state)) o.put("retryIn", Math.max(0, wakeAt - now()));
+                if (WAITING.equals(state)) o.put("retryIn", Math.max(0, wakeAt - mono()));
                 if (!had.isEmpty()) o.put("had", had.size());
                 o.put("committed", committed);
                 JSONArray it = new JSONArray();
@@ -224,6 +253,7 @@ final class Outbox {
             o.put("total", total);
             o.put("sent", sent.get());
             o.put("ended", ended);
+            if (noted > 0) o.put("noted", noted);
             o.put("waitingSince", waitingSince);
             JSONArray h = new JSONArray();
             for (Integer i : had) h.put(i.intValue());
@@ -265,6 +295,7 @@ final class Outbox {
             j.total = o.optLong("total", 0);
             j.sent.set(o.optLong("sent", 0));
             j.ended = o.optLong("ended", 0);
+            j.noted = o.optLong("noted", 0);
             j.waitingSince = o.optLong("waitingSince", 0);
             JSONArray h = o.optJSONArray("had");
             for (int i = 0; h != null && i < h.length(); i++) j.had.add(h.optInt(i));
@@ -318,7 +349,12 @@ final class Outbox {
         };
     }
 
+    /** The wall clock: for what is shown and saved (when a send was made, ended). Waits are measured with mono(). */
     static long now() { return System.currentTimeMillis(); }
+
+    private static final long T0 = Wire.mono();
+    /** Milliseconds on a clock that only moves forward (setting the phone's clock doesn't move it), from 1. */
+    static long mono() { return Wire.mono() - T0 + 1; }
 
     static boolean isEnd(String s) { return DONE.equals(s) || FAILED.equals(s) || CANCELED.equals(s) || SKIPPED.equals(s); }
 
@@ -399,7 +435,7 @@ final class Outbox {
                 // a canceled one was dropped on the PC too, and so was one turned down there: it starts over
                 if (CANCELED.equals(j.state) || j.refused != null) newAttempt(j);
                 j.state = QUEUED; j.why = null; j.ended = 0; j.fails = 0; j.refusals = 0; j.waitingSince = 0; j.restarts = 0; j.committed = true; j.retried = true;
-                j.again = true; j.refused = null;
+                j.again = true; j.refused = null; j.there = null;
             }
         }
         save(j);
@@ -410,10 +446,12 @@ final class Outbox {
     /**
      * The PC turned it down after all: a PC set to "Ask each time" for this phone, where it was declined (why
      * "declined") or not accepted within a minute ("timeout"). The send ends as failed, saying so; Try again asks again.
+     * Or its user canceled it there (why "canceled"): it ends as canceled, "Canceled on <PC>".
      */
     void refused(String tid, String why) {
         Job j = get(tid);
         if (j == null) return;
+        if ("canceled".equals(why)) { canceledThere(j); return; }
         String text = "timeout".equals(why) ? "Not accepted on " + j.pcName + " in time" : "Declined on " + j.pcName;
         boolean now;
         synchronized (j) {
@@ -425,6 +463,27 @@ final class Outbox {
         if (now) settle(j, FAILED, text);
     }
 
+    /** The History entries of j's ending at `ended` are settled (kept with it: not again after a restart). */
+    void noted(Job j, long ended) {
+        synchronized (j) {
+            if (j.ended != ended || j.noted == ended) return;              // (tried again since: that ending is another)
+            j.noted = ended;
+        }
+        save(j);
+    }
+
+    private void canceledThere(Job j) {
+        String text = "Canceled on " + j.pcName;
+        boolean now;
+        synchronized (j) {
+            if (j.finished()) return;
+            j.there = text;
+            if (RUNNING.equals(j.state)) { Watchdog.abort(j.stop); now = false; }      // the runner settles it
+            else now = true;
+        }
+        if (now) settle(j, CANCELED, text);
+    }
+
     /** A finished send leaves the list. */
     void forget(String tid) {
         Job j;
@@ -433,7 +492,16 @@ final class Outbox {
             if (j == null || !j.finished()) return;
             jobs.remove(tid);
         }
-        new File(dir, tid + ".json").delete();
+        drop(j);
+    }
+
+    /** j's record off the disk, for good: a save under way doesn't write it back (nor leave its .tmp to bring it back). */
+    private void drop(Job j) {
+        synchronized (j.disk) {
+            j.dropped = true;
+            new File(dir, j.tid + ".json").delete();
+            new File(dir, j.tid + ".json.tmp").delete();
+        }
     }
 
     /** Where a PC is now (the page found it, over Wi-Fi or another link): sends waiting for it try again there. */
@@ -461,6 +529,16 @@ final class Outbox {
 
     synchronized List<Job> list() { return new ArrayList<Job>(jobs.values()); }
 
+    /** The items of Flick's own list (ids) that sends not over yet (queued, going, waiting, paused) still read. */
+    Set<String> heldIds() {
+        Set<String> out = new HashSet<String>();
+        for (Job j : list()) {
+            if (j.finished()) continue;
+            for (Item it : j.items) if (it.id != null) out.add(it.id);
+        }
+        return out;
+    }
+
     /** Something is still to do: running, waiting for the PC, or queued (paused ones don't count). */
     boolean active() {
         for (Job j : list()) { String s = j.state(); if (QUEUED.equals(s) || RUNNING.equals(s) || WAITING.equals(s)) return true; }
@@ -479,7 +557,7 @@ final class Outbox {
         List<Job> start = new ArrayList<Job>();
         long later = Long.MAX_VALUE;
         synchronized (this) {
-            long now = now();
+            long now = mono();
             for (Job j : jobs.values()) {
                 synchronized (j) {
                     boolean due = QUEUED.equals(j.state) || (WAITING.equals(j.state) && j.wakeAt <= now);
@@ -511,11 +589,14 @@ final class Outbox {
                 failed(j, e);
                 return;
             }
-            String want, refused;
-            synchronized (j) { want = j.want; refused = j.refused; }
+            String want, refused, there;
+            synchronized (j) { want = j.want; refused = j.refused; there = j.there; }
             if (refused != null) { settle(j, FAILED, refused); return; }   // turned down on the PC as it finished
+            if (there != null) { settle(j, CANCELED, there); return; }     // (or canceled there)
             // canceled just as it finished: it's on the PC anyway
-            settle(j, end, null);
+            String note;
+            synchronized (j) { note = j.left; j.left = null; }
+            settle(j, end, DONE.equals(end) ? note : null);
             if (CANCELED.equals(want)) env.log("send " + j.tid + " finished before it could be canceled");
         } finally {
             env.moving(false);
@@ -525,9 +606,10 @@ final class Outbox {
     }
 
     private void failed(Job j, Throwable e) {
-        String want, refused;
-        synchronized (j) { want = j.want; j.want = null; refused = j.refused; }
+        String want, refused, there;
+        synchronized (j) { want = j.want; j.want = null; refused = j.refused; there = j.there; }
         if (refused != null) { settle(j, FAILED, refused); return; }     // turned down on the PC ("Ask each time")
+        if (there != null) { settle(j, CANCELED, there); return; }       // canceled there
         if (CANCELED.equals(want)) { settle(j, CANCELED, null); tellCancel(j); return; }
         if (PAUSED.equals(want)) {
             synchronized (j) { j.state = PAUSED; j.why = null; }
@@ -565,13 +647,19 @@ final class Outbox {
             late = j.want;
             j.want = null;
             if (late != null) { delay = 0; }
-            else if (!j.committed && now() - j.created > DRAG_MS) { delay = -1; }   // a drag that was never finished
+            else if (!j.committed && mono() - j.born > DRAG_MS) { delay = -1; }   // a drag that was never finished
             else {
                 j.fails++;
                 if (e instanceof Refusal) j.refusals++;
-                long now = now();
-                if (j.waitingSince == 0) j.waitingSince = now;
-                if (now - j.waitingSince > GIVE_UP_MS) delay = -2;
+                long now = mono(), wall = now();
+                // the waiting is counted on mono(): a clock set forward doesn't end it at once, nor one set back
+                // lengthen it. Waiting from before a restart counts as the wall clock says (unless it went back since:
+                // once counted here, a clock set back changes nothing, the give-up included).
+                if (j.waitingSince == 0 || (!j.waitHere && wall < j.waitingSince)) { j.waitFrom = now; j.waitHere = true; }
+                else if (!j.waitHere) { j.waitFrom = now - (wall - j.waitingSince); j.waitHere = true; }
+                long waited = now - j.waitFrom;
+                j.waitingSince = Math.max(1, wall - waited);         // (saved: in the clock's terms as it is now)
+                if (waited > GIVE_UP_MS) delay = -2;
                 else if (j.refusals >= MAX_REFUSALS) delay = -3;
                 else {
                     long[] b = BACKOFF_MS;
@@ -606,7 +694,11 @@ final class Outbox {
 
     private void settle(Job j, String state, String why) {
         if (dead) return;
+        boolean tell = false;
         synchronized (j) {
+            // canceled by the user just as it failed for good (after failed() last looked): it ends as canceled, not
+            // as failed with the Cancel lost, and the PC is told to drop what it has
+            if (FAILED.equals(state) && CANCELED.equals(j.want)) { state = CANCELED; why = null; tell = true; }
             j.state = state;
             j.why = why;
             j.want = null;
@@ -617,6 +709,7 @@ final class Outbox {
         save(j);
         env.changed(j);
         trim();
+        if (tell) tellCancel(j);
     }
 
     private static void newAttempt(Job j) {
@@ -627,6 +720,7 @@ final class Outbox {
         j.begun = false;
         j.psums = null;
         synchronized (j.marks) { j.marks.clear(); }
+        j.unread.clear();
     }
 
     // what the PC answered to a part, a stream or a commit
@@ -648,7 +742,7 @@ final class Outbox {
 
     private void progress(Job j, long n) {
         long s = j.sent.addAndGet(n);
-        long t = now();
+        long t = mono();
         boolean note = false;
         synchronized (j) {
             j.fails = 0;
@@ -670,9 +764,37 @@ final class Outbox {
         Wire.Link l;
         int fails;
         synchronized (j) { fails = j.fails; }
-        l = env.link(j, fails > 0);
+        l = link(j, fails > 0);
         String auth = env.auth(j);
         return j.bundle ? sendBundle(j, l, auth) : sendFile(j, l, auth);
+    }
+
+    /**
+     * Where the PC is (env.link), on another thread: looking for it on the network (a few seconds) or connecting to an
+     * address it left (CONNECT_MS) would otherwise hold a Cancel or Pause until it's over.
+     */
+    private Wire.Link link(final Job j, final boolean look) throws IOException {
+        final AtomicBoolean stop = stop(j);
+        final Future<Wire.Link> f;
+        try {
+            f = pool.submit(new Callable<Wire.Link>() { @Override public Wire.Link call() throws Exception { return env.link(j, look); } });
+        } catch (Throwable e) { return env.link(j, look); }                    // (shutting down)
+        Watchdog.Guard g = Watchdog.guard(stop, new java.io.Closeable() { @Override public void close() { f.cancel(false); } });
+        try {
+            return f.get();
+        } catch (java.util.concurrent.CancellationException e) {
+            throw new IOException("stopped");
+        } catch (InterruptedException e) {
+            throw new IOException("stopped");
+        } catch (ExecutionException e) {
+            Throwable c = e.getCause();
+            if (c instanceof IOException) throw (IOException) c;
+            if (c instanceof RuntimeException) throw (RuntimeException) c;
+            if (c instanceof Error) throw (Error) c;
+            throw new IOException(String.valueOf(c));
+        } finally {
+            g.close();
+        }
     }
 
     private String q(Job j, String auth) {
@@ -702,11 +824,15 @@ final class Outbox {
         save(j);
         if (check) {
             boolean[] full = new boolean[1];
-            Set<Integer> have = Have.check(l, auth, Collections.singletonList(f), Collections.singletonList(it.name), total, full);
+            Set<Integer> have = Have.check(l, auth, Collections.singletonList(f), Collections.singletonList(it.name), total, full, cutter(stop(j)));
             if (full[0]) throw new Fatal("Not enough space on " + j.pcName);
-            synchronized (j) { j.checked = true; if (have.contains(0)) j.had.add(0); }
-            save(j);
-            if (have.contains(0)) { tellHave(j, l, auth, it.name, 1); return SKIPPED; }
+            if (have != null) {
+                synchronized (j) { j.checked = true; if (have.contains(0)) j.had.add(0); }
+                save(j);
+                if (have.contains(0)) { tellHave(j, l, auth, it.name, 1); return SKIPPED; }
+            } else if (stop(j).get()) {
+                throw new IOException("stopped");
+            }   // (no answer: it goes, and the next try asks again)
         } else if (j.had() > 0) {
             tellHave(j, l, auth, it.name, 1);
             return SKIPPED;
@@ -718,7 +844,7 @@ final class Outbox {
         final long[] from = new long[n];
         final boolean[] done = new boolean[n];
         // how far the PC got: only worth a round trip when this attempt has already sent it something
-        Wire.Answer st = begun ? Wire.get(l, "/api/status?" + q(j, auth), 15000) : null;
+        Wire.Answer st = begun ? Wire.get(l, "/api/status?" + q(j, auth), 15000, cutter(stop(j))) : null;
         if (st != null && st.code == 403) check(j, st);
         if (st != null && st.code == 410) { if (retried(j)) throw new Restart("tried again"); throw aborted(j, st); }
         if (st != null && st.code == 507) check(j, st);
@@ -815,12 +941,12 @@ final class Outbox {
             throw e;
         }
         Wire.Call c;
-        try { c = Wire.Call.open(l, "POST", target, len - from, "application/octet-stream", READ_MS); }
+        try { c = Wire.Call.open(l, "POST", target, len - from, "application/octet-stream", READ_MS, null, false, cutter(stop)); }
         catch (IOException e) { try { raf.close(); } catch (IOException x) { /* ignore */ } throw e; }
         Watchdog.Guard g = Watchdog.guard(stop, c);
         boolean through = false;
         try {
-            OutputStream out = g.watch(c.body());
+            OutputStream out = Wire.pieces(g.watch(c.body()));
             raf.seek(off + from);
             long left = len - from, pos = from, next = (from / MARK + 1) * MARK;
             while (left > 0) {
@@ -836,6 +962,8 @@ final class Outbox {
             }
             g.idle();
             through = true;
+            // (the PC has all of it already: its answer was lost, or is late)
+            if (!awaitAnswer(j, l, auth, c, index, -1, stop)) { accepted(j); return hex(md.digest()); }
             check(j, c.answer(64 * 1024));
             accepted(j);
             return hex(md.digest());
@@ -853,6 +981,69 @@ final class Outbox {
             try { raf.close(); } catch (IOException e) { /* ignore */ }
             c.close();
         }
+    }
+
+    static volatile int WAIT_MS = 5000;                    // a PC silent this long after a body is asked how far it got
+
+    /**
+     * The PC's answer to a part (part >= 0) or a stream (stream >= 0) whose bytes are all written. Megabytes of them can
+     * still be on their way then (the system's buffers, over a slow link), and the PC answers once they're all in: as
+     * long as it keeps getting them (/api/status), its answer is waited for, however long that takes, where a fixed
+     * wait from the last write gave up on a link that was still delivering (a failed try, "Waiting for" the PC). True
+     * when the answer began; false when the PC has it all already (its answer lost, or late). Throws when the PC gets
+     * nothing more for READ_MS.
+     */
+    private boolean awaitAnswer(Job j, Wire.Link l, String auth, Wire.Call c, int part, int stream, AtomicBoolean stop) throws IOException {
+        String seen = null;
+        long since = mono();
+        while (true) {
+            if (c.answerWithin(Math.min(WAIT_MS, READ_MS))) return true;
+            if (stop.get()) throw new IOException("stopped");
+            String at = arrived(j, l, auth, part, stream);
+            if ("done".equals(at)) return false;
+            long t = mono();
+            if (at != null && !at.equals(seen)) { seen = at; since = t; }
+            else if (t - since >= READ_MS) throw new java.net.SocketTimeoutException("no answer");
+        }
+    }
+
+    /**
+     * How far the PC got with part (or stream) of j's attempt: words that change as its bytes come in, "done" when it
+     * has them all, null when it can't say (it can't be reached, or doesn't know the transfer).
+     */
+    private String arrived(Job j, Wire.Link l, String auth, int part, int stream) {
+        try {
+            Wire.Answer st = Wire.get(l, "/api/status?" + q(j, auth), 15000, cutter(stop(j)));
+            if (st.code != 200) return null;
+            JSONObject o = st.json();
+            if (Boolean.TRUE.equals(o.opt("done"))) return "done";                   // (the whole transfer)
+            JSONArray dn = o.optJSONArray("done");
+            if (dn == null) return null;
+            if (part >= 0) {
+                JSONArray sv = o.optJSONArray("saved");
+                if (sv == null) return null;
+                return dn.optBoolean(part, false) ? "done" : "saved " + sv.optLong(part, -1);
+            }
+            JSONArray nx = o.optJSONArray("next"), pt = o.optJSONArray("part");
+            if (nx == null || pt == null) return null;
+            if (dn.optBoolean(stream, false)) return "done";
+            JSONObject p = pt.optJSONObject(stream);
+            return "next " + nx.optInt(stream, -1) + (p == null ? "" : " at " + p.optInt("i", -1) + ":" + p.optLong("written", -1));
+        } catch (Throwable e) { return null; }
+    }
+
+    /** The flag a Cancel or Pause of this try sets (Watchdog.abort): every request of the try is cut by it. */
+    private static AtomicBoolean stop(Job j) { synchronized (j) { return j.stop; } }
+
+    /** For Wire: a request under stop is cut by Watchdog.abort(stop), as the parts are. */
+    static Wire.Cutter cutter(final AtomicBoolean stop) {
+        return new Wire.Cutter() {
+            @Override public java.io.Closeable watch(java.io.Closeable c) {
+                final Watchdog.Guard g = Watchdog.guard(stop, c);
+                return new java.io.Closeable() { @Override public void close() { g.close(); } };
+            }
+            @Override public boolean cut() { return stop.get(); }
+        };
     }
 
     /**
@@ -924,7 +1115,7 @@ final class Outbox {
     /** Every part is in: the PC checks each part against the phone's checksums (worked out as they arrived). */
     private void commit(Job j, Wire.Link l, String auth, String sha, long total, AtomicBoolean stop) throws IOException {
         int readMs = (int) Math.min(30 * 60000L, 60000L + total / (25L << 20) * 1000L);
-        Wire.Call c = Wire.Call.open(l, "POST", "/api/part?" + q(j, auth) + "&commit=1&sums=" + sha, 0, null, readMs);
+        Wire.Call c = Wire.Call.open(l, "POST", "/api/part?" + q(j, auth) + "&commit=1&sums=" + sha, 0, null, readMs, null, false, cutter(stop));
         Watchdog.Guard g = Watchdog.guard(stop, c);
         try {
             check(j, c.answer(64 * 1024));
@@ -960,10 +1151,14 @@ final class Outbox {
             long bytes = 0;
             for (File f : files) if (f != null) bytes += f.isFile() ? f.length() : 0;
             boolean[] full = new boolean[1];
-            Set<Integer> have = Have.check(l, auth, tops, names, bytes, full);
+            Set<Integer> have = Have.check(l, auth, tops, names, bytes, full, cutter(stop));
             if (full[0]) throw new Fatal("Not enough space on " + j.pcName);
-            synchronized (j) { j.checked = true; for (Integer k : have) j.had.add(at.get(k)); }
-            save(j);
+            if (have != null) {
+                synchronized (j) { j.checked = true; for (Integer k : have) j.had.add(at.get(k)); }
+                save(j);
+            } else if (stop.get()) {
+                throw new IOException("stopped");
+            }   // (no answer: they all go, and the next try asks again)
         }
         Bundle b = new Bundle();
         Set<Integer> had;
@@ -989,6 +1184,7 @@ final class Outbox {
         }
         save(j);
         final List<Bundle> streams = b.split(j.ways);
+        for (Bundle s : streams) s.leftOut = j.unread;
         final int K = streams.size();
         final int[] skip = new int[K];
         final long[] from = new long[K];
@@ -996,13 +1192,13 @@ final class Outbox {
         boolean begun;
         synchronized (j) { begun = j.begun; }
         // how far the PC got: only worth a round trip when this attempt has already sent it something
-        Wire.Answer st = begun ? Wire.get(l, "/api/status?" + q(j, auth), 15000) : null;
+        Wire.Answer st = begun ? Wire.get(l, "/api/status?" + q(j, auth), 15000, cutter(stop(j))) : null;
         if (st != null && st.code == 403) check(j, st);
         if (st != null && st.code == 410) { if (retried(j)) throw new Restart("tried again"); throw aborted(j, st); }
         if (st != null && st.code == 507) check(j, st);
         if (st != null && st.code == 200) {
             JSONObject o = st.json();
-            if (o.optBoolean("done", false)) return DONE;
+            if (o.optBoolean("done", false)) { leftNote(j, missing); return DONE; }
             JSONArray nx = o.optJSONArray("next"), pt = o.optJSONArray("part"), dn = o.optJSONArray("done");
             if (!"bundle".equals(o.optString("kind")) || o.optInt("streams", 0) != K || nx == null || pt == null || dn == null) throw new Restart("the PC has something else under this name");
             for (int si = 0; si < K; si++) {
@@ -1031,25 +1227,36 @@ final class Outbox {
             }));
         }
         finish(fs, stop);
+        leftNote(j, missing);
         return DONE;
+    }
+
+    /**
+     * What didn't go of a bundle that went is said, as phone-to-phone sends say it: items gone from the phone since they
+     * were picked, and files that couldn't be read when their turn came (it ended as if all of it had gone).
+     */
+    private static void leftNote(Job j, int missing) {
+        int left = missing + j.unread.size();
+        synchronized (j) { j.left = left == 0 ? null : left + (left == 1 ? " file" : " files") + " couldn\u2019t be read (changed or gone since picked) and didn\u2019t go."; }
     }
 
     private void sendStream(final Job j, Wire.Link l, String auth, Bundle b, int si, int K, int skip, long from, AtomicBoolean stop) throws IOException {
         String target = "/api/bundle?" + q(j, auth) + "&streams=" + K + "&stream=" + si + "&resume=1&skip=" + skip + "&from=" + from +
                 "&files=" + (b.manifestFiles >= 0 ? b.manifestFiles : b.files) + "&bytes=" + (b.manifestBytes >= 0 ? b.manifestBytes : b.bytes) +
                 (j.committed() ? "&committed=1" : "");
-        Wire.Call c = Wire.Call.open(l, "POST", target, Wire.CHUNKED, "application/x-flick-bundle", 120000);
+        Wire.Call c = Wire.Call.open(l, "POST", target, Wire.CHUNKED, "application/x-flick-bundle", 120000, null, false, cutter(stop));
         Watchdog.Guard g = Watchdog.guard(stop, c);
         final long[] last = {0};
         boolean through = false;
         try {
-            OutputStream out = new BufferedOutputStream(g.watch(c.body()), BUF);
+            OutputStream out = new BufferedOutputStream(Wire.pieces(g.watch(c.body())), BUF);
             b.write(out, stop, new Bundle.Progress() {
                 @Override public void onBytes(long sent, long total) { long d = sent - last[0]; last[0] = sent; if (d > 0) progress(j, d); }
             }, skip, from);
             out.flush();
             g.idle();
             through = true;
+            if (!awaitAnswer(j, l, auth, c, -1, si, stop)) { accepted(j); return; }      // (the PC has all of it already)
             check(j, c.answer(64 * 1024));
             accepted(j);
             return;
@@ -1106,7 +1313,7 @@ final class Outbox {
     // ------------------------------------------------------------ telling the PC
     /** The PC has all of it already: it shows that, and nothing is sent. */
     private void tellHave(Job j, Wire.Link l, String auth, String name, int files) throws IOException {
-        Wire.Answer a = Wire.call(l, "POST", "/api/have?" + auth + "&tid=" + Wire.enc(j.tid) + "&skip=1&name=" + Wire.enc(name) + "&files=" + files, new byte[0], null, 15000);
+        Wire.Answer a = Wire.call(l, "POST", "/api/have?" + auth + "&tid=" + Wire.enc(j.tid) + "&skip=1&name=" + Wire.enc(name) + "&files=" + files, new byte[0], null, 15000, cutter(stop(j)));
         if (a.code != 200) throw new IOException("http " + a.code);
     }
 
@@ -1134,11 +1341,14 @@ final class Outbox {
         // one thread at a time: two at once (the send itself, and the page moving it to the PC's new address, say) wrote
         // over each other's half-made file, and could leave a damaged record or none (the send lost on the next start)
         synchronized (j.disk) {
+            if (j.dropped) return;
             try {
                 byte[] b = j.save().toString().getBytes("UTF-8");
                 File tmp = new File(dir, j.tid + ".json.tmp"), f = new File(dir, j.tid + ".json");
-                OutputStream o = new FileOutputStream(tmp);
-                try { o.write(b); } finally { o.close(); }
+                FileOutputStream o = new FileOutputStream(tmp);
+                // on the disk before it replaces the old record: after a power cut, the old one or the new one, never
+                // an empty file (deleted as damaged at the next start: the send lost)
+                try { o.write(b); o.getFD().sync(); } finally { o.close(); }
                 if (!tmp.renameTo(f)) { f.delete(); tmp.renameTo(f); }
             } catch (Throwable e) {
                 env.log("outbox: can't save " + j.tid + ": " + e);
@@ -1147,6 +1357,15 @@ final class Outbox {
     }
 
     private void load() {
+        // what a kill left mid-save (nothing writes while this runs): a half-written new copy goes; a whole one whose old
+        // copy was already deleted (save's second way) takes its place
+        File[] tmps = dir.listFiles(new FilenameFilter() { @Override public boolean accept(File d, String n) { return n.endsWith(".json.tmp"); } });
+        if (tmps != null) for (File t : tmps) {
+            File f = new File(dir, t.getName().substring(0, t.getName().length() - 4));
+            boolean whole = false;
+            if (!f.exists()) { try { whole = Job.load(new JSONObject(read(t))) != null; } catch (Throwable e) { /* half-written */ } }
+            if (!whole || !t.renameTo(f)) t.delete();
+        }
         File[] fs = dir.listFiles(new FilenameFilter() { @Override public boolean accept(File d, String n) { return n.endsWith(".json"); } });
         if (fs == null) return;
         List<Job> found = new ArrayList<Job>();
@@ -1177,7 +1396,7 @@ final class Outbox {
             for (Job j : jobs.values()) if (j.finished()) ended.add(j);
             for (int i = 0; i < ended.size() - KEEP_ENDED; i++) { drop.add(ended.get(i)); jobs.remove(ended.get(i).tid); }
         }
-        for (Job j : drop) new File(dir, j.tid + ".json").delete();
+        for (Job j : drop) drop(j);
     }
 
     private static String read(File f) throws IOException {

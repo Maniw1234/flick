@@ -27,6 +27,9 @@ const crypto = require('crypto');
 const MESSAGE_MAX = 5000;
 const OUTBOX_MAX = 20;
 const RETRY_MS = 5 * 60 * 1000;
+const sleepSync = (ms) => { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch (e) { /* ignore */ } };
+const HELD = 'held';                            // a file that's there but can't be read now (see _load)
+const HELD_WAITS = [50, 100, 200, 300, 350];    // (about a second)
 
 const ready = (f) => !/PLACEHOLDER/.test(f.id + f.type + f.message + f.email + f.device);
 const formUrl = (f) => 'https://docs.google.com/forms/d/e/' + encodeURIComponent(f.id) + '/formResponse';
@@ -52,7 +55,10 @@ class Feedback {
     this.o = o;
     this.log = o.log || (() => {});
     this.file = path.join(o.userDir, 'feedback-outbox.json');
+    this.refusedFile = path.join(o.userDir, 'feedback-refused.json');
+    this.rereadMs = o.rereadMs || 2000;
     this.outbox = this._load();
+    this._refused = this._loadRefused();
     this.busy = false;
     this.timer = setInterval(() => { if (this.outbox.length) this.flush(); }, RETRY_MS);
     if (this.timer.unref) this.timer.unref();
@@ -66,17 +72,66 @@ class Feedback {
   /** What the window shows next to "Include device info": exactly what goes in that field. */
   deviceInfo() { return 'Flick ' + this.o.version + ' · ' + windowsName() + ' · ' + os.arch(); }
 
-  info() { return { ready: this.ready, device: this.deviceInfo(), waiting: this.outbox.length }; }
+  info() {
+    const r = this.refused;
+    return { ready: this.ready, device: this.deviceInfo(), waiting: this.outbox.length, refused: r ? { type: r.type, message: r.message, email: r.email } : null };
+  }
 
+  // The messages waiting. A file that's there but can't be read now (Windows: held a moment by an antivirus, a backup or
+  // sync program; EMFILE, EIO) is tried again for about a second, then left as it is: nothing is written over it until
+  // it reads (_reread), when what this run kept goes with it. (None, or damaged: nothing waits.)
   _load() {
-    try {
-      const a = JSON.parse(fs.readFileSync(this.file, 'utf8'));
-      if (Array.isArray(a)) return a.filter((x) => x && typeof x.message === 'string' && x.message).slice(0, OUTBOX_MAX);
-    } catch (e) { /* nothing waits */ }
+    const a = this._readDisk(HELD_WAITS);
+    if (a !== HELD) return a;
+    this.held = true;
+    this.log('feedback: the messages waiting could not be read now: kept as they are, read again in a moment');
+    this._reread();
     return [];
   }
 
+  _readDisk(waits) {
+    let text;
+    for (let i = 0; ; i++) {
+      try { text = fs.readFileSync(this.file, 'utf8'); break; } catch (e) {
+        if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return [];
+        if (i >= waits.length) return HELD;
+        sleepSync(waits[i]);
+      }
+    }
+    try {
+      const a = JSON.parse(text);
+      if (Array.isArray(a)) return a.filter((x) => x && typeof x.message === 'string' && x.message).slice(0, OUTBOX_MAX);
+    } catch (e) { /* damaged */ }
+    return [];
+  }
+
+  _reread() {
+    this.rereadT = setTimeout(() => {
+      this.rereadT = null;
+      this.rereadTries = (this.rereadTries || 0) + 1;
+      if (!this._tryRead()) this._reread();
+    }, Math.min(60000, this.rereadMs * 2 ** Math.min(6, this.rereadTries || 0)));
+    if (this.rereadT.unref) this.rereadT.unref();
+  }
+
+  // the waiting messages read at last: those on disk first (older), then this run's; written if this run kept any
+  _tryRead() {
+    if (!this.held) return true;
+    const disk = this._readDisk([]);
+    if (disk === HELD) return false;
+    this.held = false;
+    clearTimeout(this.rereadT); this.rereadT = null;
+    const mine = this.outbox, ids = new Set(mine.map((x) => x.id)), sent = this.heldSent || new Set();
+    this.outbox = disk.filter((x) => !ids.has(x.id) && !sent.has(x.id)).concat(mine).slice(-OUTBOX_MAX);
+    this.heldSent = null;
+    if (mine.length || sent.size) this._save();
+    this.log('feedback: the messages waiting were read now');
+    if (this.outbox.length && !this.busy) setTimeout(() => this.flush(), 1000).unref();
+    return true;
+  }
+
   _save() {
+    if (this.held) { this._tryRead(); return; }     // (never written over while it can't be read: see _load; once it reads, written there)
     try {
       fs.mkdirSync(path.dirname(this.file), { recursive: true });
       if (!this.outbox.length) { fs.rmSync(this.file, { force: true }); return; }
@@ -84,6 +139,28 @@ class Feedback {
       fs.writeFileSync(tmp, JSON.stringify(this.outbox));
       fs.renameSync(tmp, this.file);
     } catch (e) { this.log('feedback not kept: ' + e.message); }
+  }
+
+  // A waiting message the form refused, offered back in Send feedback until the window has put it back in the form: on
+  // disk, so a restart before the user opens the window (an update, a reboot) doesn't lose the text
+  get refused() { return this._refused; }
+  set refused(item) {
+    this._refused = item || null;
+    try {
+      if (!item) { fs.rmSync(this.refusedFile, { force: true }); return; }
+      fs.mkdirSync(path.dirname(this.refusedFile), { recursive: true });
+      const tmp = this.refusedFile + '.tmp';
+      fs.writeFileSync(tmp, JSON.stringify(item));
+      fs.renameSync(tmp, this.refusedFile);
+    } catch (e) { this.log('feedback: the refused message not kept: ' + e.message); }
+  }
+
+  _loadRefused() {
+    try {
+      const x = JSON.parse(fs.readFileSync(this.refusedFile, 'utf8'));
+      if (x && typeof x === 'object' && typeof x.message === 'string' && x.message) return x;
+    } catch (e) { /* none */ }
+    return null;
   }
 
   /** The form's fields from what the user filled in: the device info only if it was left ticked. */
@@ -150,13 +227,17 @@ class Feedback {
         const r = await this._post(item);
         if (r === 'offline') break;
         this.outbox = this.outbox.filter((x) => x.id !== item.id);
+        if (this.held) (this.heldSent = this.heldSent || new Set()).add(item.id);
         this._save();
         if (r === 'ok' && this.o.onSent) this.o.onSent(item);
+        // (the form doesn't take it: sending it again won't help. The user, told it would go, is told it didn't, and
+        // finds it back in the form, not lost)
+        if (r === 'refused') { this.refused = item; if (this.o.onRefused) this.o.onRefused(item); }
       }
     } finally { this.busy = false; }
   }
 
-  stop() { clearInterval(this.timer); }
+  stop() { clearInterval(this.timer); clearTimeout(this.rereadT); }
 }
 
 module.exports = { Feedback, FORM, ready, formUrl, windowsName };

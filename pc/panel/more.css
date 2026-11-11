@@ -1,7 +1,5 @@
 /* Clipboard history (clips.js), "Ask each time" (ask.js and the Paired phones list) and Send feedback (feedback.js) */
 
-#cEntry, #bEntry { margin-top: 8px; }
-#bEntry { margin-top: 12px; }
 #cEntrySub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* clipboard history */
@@ -57,3 +55,10 @@
 .fbsend:disabled { opacity: .5; cursor: default; filter: none; }
 .fbnote { min-height: 18px; margin: 10px 2px 0; color: var(--sub); font-size: 12.5px; line-height: 1.4; }
 .fbnote.bad { color: #ff99a4; }
+@media (forced-colors: active) {
+  .fbchk input:checked + .fbbox { forced-color-adjust: none; background: Highlight; border-color: Highlight; }
+  .fbchk input:checked + .fbbox::after { border-color: HighlightText; }
+}
+
+/* (the window zoomed: the one-line note under Clipboard history wraps rather than being cut short) */
+@media (max-width: 400px) { #cEntrySub { white-space: normal; } }

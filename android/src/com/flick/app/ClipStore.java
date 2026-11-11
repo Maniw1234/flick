@@ -11,6 +11,7 @@ import java.io.InputStream;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.Locale;
 
 /**
@@ -29,6 +30,7 @@ final class ClipStore {
 
     private final File dir, index;
     private ArrayList<JSONObject> items;              // newest first; loaded on first use
+    private boolean unread;                           // the index is there but couldn't be read (see load)
 
     ClipStore(File dir) { this.dir = dir; this.index = new File(dir, "index.json"); }
 
@@ -78,7 +80,8 @@ final class ClipStore {
                 o.put("h", ((png[20] & 0xffL) << 24) | ((png[21] & 0xff) << 16) | ((png[22] & 0xff) << 8) | (png[23] & 0xff));
             } else {
                 String t = text.replaceAll("\\s+", " ").trim();
-                o.put("preview", t.length() > PREVIEW ? t.substring(0, PREVIEW - 1) + "…" : t);
+                String blank = blank(text);
+                o.put("preview", blank != null ? blank : t.length() > PREVIEW ? cut(t, PREVIEW - 1) + "…" : t);
             }
             if (!dir.isDirectory() && !dir.mkdirs()) return null;
             writeBytes(payload(o), body);
@@ -90,6 +93,24 @@ final class ClipStore {
         } catch (Exception e) {
             return null;
         }
+    }
+
+    /**
+     * "Blank text (N characters)" for text with nothing to see in it (spaces, tabs, a zero-width or no-break space, a
+     * control character: an empty table cell, say), so its row in the list says something; null for any other text.
+     */
+    static String blank(String text) {
+        int n = 0;
+        for (int i = 0; i < text.length(); ) {
+            int cp = text.codePointAt(i);
+            i += Character.charCount(cp);
+            n++;
+            int ty = Character.getType(cp);
+            boolean unseen = Character.isWhitespace(cp) || Character.isSpaceChar(cp) || ty == Character.CONTROL || ty == Character.FORMAT
+                    || cp == 0x034F || cp == 0x115F || cp == 0x1160 || cp == 0x2800 || cp == 0x3164 || cp == 0xFFA0;
+            if (!unseen) return null;
+        }
+        return "Blank text (" + n + (n == 1 ? " character)" : " characters)");
     }
 
     /** The list for the page (no contents): each entry with "thumb" (a data: URL) for pictures that have one. */
@@ -152,25 +173,44 @@ final class ClipStore {
         new File(dir, o.optString("id") + ".jpg").delete();
     }
 
+    // An index that couldn't be read (too many files open, a disk error) isn't a damaged one: taken as empty, the next
+    // clip was saved alone over the whole list. It's read again on the next use and isn't written over until it has
+    // been (clips added meanwhile go on top of it then).
     private ArrayList<JSONObject> load() {
-        if (items != null) return items;
-        items = new ArrayList<JSONObject>();
-        if (!index.isFile()) return items;
+        if (items != null && !unread) return items;
+        if (items == null) items = new ArrayList<JSONObject>();
+        if (!index.isFile()) { unread = false; return items; }
+        String text;
+        try { text = HistoryStore.read(index); } catch (IOException e) { unread = true; return items; }
+        ArrayList<JSONObject> got = new ArrayList<JSONObject>(items);
+        HashSet<String> have = new HashSet<String>();
+        HashSet<String> ids = new HashSet<String>();    // the ids listed (a file of one of them is never dropped)
+        for (JSONObject o : items) { have.add(o.optString("hash")); ids.add(o.optString("id")); }
         try {
-            JSONArray a = new JSONArray(HistoryStore.read(index));
-            for (int i = 0; i < a.length() && items.size() < MAX; i++) {
+            JSONArray a = new JSONArray(text);
+            for (int i = 0; i < a.length(); i++) {
                 JSONObject o = a.optJSONObject(i);
-                if (o != null && o.optString("id").matches("[0-9a-f]{16}") && payload(o).isFile()) items.add(o);
+                if (o == null || !o.optString("id").matches("[0-9a-f]{16}")) continue;
+                if (got.size() < MAX && payload(o).isFile() && !have.contains(o.optString("hash"))) { got.add(o); ids.add(o.optString("id")); }
+                // one of the index's that the clips added meanwhile left no room for (or that was copied again meanwhile):
+                // off the list, so its files go too (they stayed on disk until the history was cleared)
+                else if (!items.isEmpty() && !ids.contains(o.optString("id"))) drop(o);
             }
         } catch (Exception e) {
-            items.clear();                                // a damaged index: start over
+            got = new ArrayList<JSONObject>(items);       // a damaged index: start over
         }
+        boolean added = !items.isEmpty();
+        items = got;
+        unread = false;
+        if (added) save();                               // (what was added meanwhile)
         return items;
     }
 
     private void save() {
+        ArrayList<JSONObject> l = load();
+        if (unread) return;                               // (stays in memory: see load)
         JSONArray a = new JSONArray();
-        for (JSONObject o : load()) a.put(o);
+        for (JSONObject o : l) a.put(o);
         try { HistoryStore.write(index, a.toString()); } catch (IOException e) { /* stays in memory */ }
     }
 
@@ -190,6 +230,21 @@ final class ClipStore {
     }
 
     private static String str(String s) { return s == null ? "" : (s.length() > 60 ? s.substring(0, 60) : s); }
+
+    /**
+     * t cut to at most n chars, at the end of a whole character as it's seen: an emoji is two chars or more (a family or a
+     * flag several), an accented letter can be two. Cut inside one, the list showed a broken character (read back from
+     * index.json, a "?").
+     */
+    static String cut(String t, int n) {
+        if (t.length() <= n) return t;
+        java.text.BreakIterator b = java.text.BreakIterator.getCharacterInstance(Locale.ROOT);
+        b.setText(t.substring(0, Math.min(t.length(), n + 64)));     // (what's around the cut is enough: a text can be 1 MB)
+        int end = b.isBoundary(n) ? n : b.preceding(n);
+        // (one "character" longer than all of it, accents piled on one letter: cut there, but never inside an emoji's pair)
+        if (end <= 0) end = Character.isHighSurrogate(t.charAt(n - 1)) ? n - 1 : n;
+        return t.substring(0, end);
+    }
 
     static boolean isPng(byte[] b) {
         return b != null && b.length >= 8 && (b[0] & 0xff) == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G' && b[4] == 0x0d && b[5] == 0x0a && b[6] == 0x1a && b[7] == 0x0a;

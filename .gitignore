@@ -4,11 +4,40 @@ node_modules/
 
 # signing secrets never belong in the repo (see signing/README.md)
 *.p12
+*.pfx
 *.jks
 *.keystore
 *.lineage
 *.pem
+*.key
+*.p8
 password.txt
+# environment files, which hold tokens
+.env
+.env.*
+# the signing key's backup holds the key and its password (also in its README.txt), whole or unpacked: its README.txt
+# wherever it is unpacked (the repository has no README.txt of its own)
+Flick-signing-key*.zip
+Flick-signing-key*/
+flick-keys/
+README.txt
+# the key (JSON) of the Google service account that uploads to Google Play (the PLAY_SERVICE_ACCOUNT secret, see
+# ci/play_upload.js): under whatever name it was saved with here (the only JSON file the repository keeps is
+# pc/package.json)
+*service-account*.json
+*service_account*.json
+*serviceaccount*.json
+play-*.json
+play/*.json
+ci/*.json
+
+# a phone app or Google Play bundle put anywhere here (none is committed: the builds' own are under build/ and
+# pc/phone-app/)
+*.apk
+*.aab
+
+# the debug rounds' own notes: never published
+/audit/
 
 # the phone app the PC app carries: built by build_apk.sh or by the release workflow (ci/phone_app.sh)
 pc/phone-app/

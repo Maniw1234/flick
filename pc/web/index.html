@@ -26,8 +26,10 @@
   </header>
 
   <div class="banner" id="banner" role="status" hidden></div>
+  <!-- what screen readers are told: each screen once (not a countdown's every second), how files sent went, new files from the PC -->
+  <div class="sr" id="say" role="status" aria-live="polite"></div>
 
-  <section class="msg" id="msg" aria-live="polite">
+  <section class="msg" id="msg">
     <div class="art" id="art" aria-hidden="true">
       <svg class="dev" viewBox="0 0 30 52"><rect x="1.5" y="1.5" width="27" height="49" rx="6"/><path d="M12 6.5h6"/></svg>
       <span class="dots"><i></i><i></i><i></i></span>

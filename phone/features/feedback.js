@@ -6,9 +6,11 @@
   const h = X.h;
   const NOT_READY = 'This version of Flick can’t send feedback yet.';
   const page = X.page({ id: 'fFeedback', title: 'Send feedback' });
-  let info = {}, type = 'bug', busy = false, busyT = 0, f = null;
+  // busy: a message sent, the app's answer still to come; sent: its words (they're back on a page opened meanwhile)
+  let info = {}, type = 'bug', busy = false, busyT = 0, f = null, sent = null;
 
-  // Settings › Help, the last group (shared with Show tips again, features/tips.js): Send feedback goes last in it
+  // Settings › Help (shared with the other features' rows, core.js X.helpCard): Send feedback goes after the tour's and
+  // the tips' rows, before Get Flick for your PC, Privacy and the notices
   A.on('settings-end', (body) => {
     if (!A.has('feedbackSend')) return;
     const row = h('button', 'srow nav');
@@ -37,10 +39,11 @@
     return l;
   }
 
+  // (a send still on its way stays so: the page opened again meanwhile shows it sending, with its words, and takes the
+  // answer; it was built as new, the answer was dropped, and Send was ready for the same message again)
   function build() {
     const body = page.body;
     body.innerHTML = '';
-    busy = false;
     const form = h('form', 'fbform');
     form.setAttribute('novalidate', '');
     form.autocomplete = 'off';
@@ -94,13 +97,15 @@
     msg.oninput = mail.oninput = () => { if (note.classList.contains('bad')) { note.textContent = ''; note.classList.remove('bad'); } };   // being fixed
     body.appendChild(form);
     f = { form, seg, msgLbl, msg, mail, dev, crash, send, note };
-    setType('bug');
+    setType(busy && sent ? sent.type : 'bug');
+    if (busy && sent) { msg.value = sent.message; mail.value = sent.email; }
     render();
   }
 
   function setType(v) {
     type = v === 'idea' ? 'idea' : 'bug';
     for (const b of f.seg.querySelectorAll('button')) { const on = b.dataset.v === type; b.classList.toggle('on', on); b.setAttribute('aria-checked', String(on)); }
+    A.rove(f.seg);
     f.msgLbl.textContent = type === 'idea' ? 'What’s your idea?' : 'What went wrong?';
     f.msg.placeholder = type === 'idea' ? 'What would make Flick better for you?' : 'What did you do, what happened, and what did you expect?';
   }
@@ -121,6 +126,7 @@
     if (!message) { note(type === 'idea' ? 'Write your idea first.' : 'Say what went wrong first.', true); f.msg.focus(); return; }
     if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { note('That email address doesn’t look right.', true); f.mail.focus(); return; }
     busy = true;
+    sent = { type, message, email };
     note('');
     render();
     try { document.activeElement.blur(); } catch (e) { /* the keyboard goes */ }
@@ -148,6 +154,7 @@
     }
     if (!busy || !f) return;
     busy = false;
+    sent = null;
     clearTimeout(busyT);
     if (e.ok || e.queued) {
       if (!page.isOpen()) A.toast(e.ok ? 'Your feedback was sent' : 'Feedback saved, it goes once you’re online', 2400);

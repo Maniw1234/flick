@@ -79,18 +79,21 @@ input[type=text]:focus { border-bottom: 2px solid var(--accent); background: rgb
 
 .intro { padding: 12px 14px 14px; margin-top: 10px; }
 .intro-title { font-weight: 600; font-size: 14px; margin-bottom: 6px; }
+.intro .mono { font-size: 12px; line-height: inherit; overflow-wrap: anywhere; }
 .intro ol, .intro ul { margin: 0 0 12px; padding-left: 18px; color: rgba(255,255,255,0.82); line-height: 1.55; }
 .intro-btns { display: flex; align-items: center; gap: 16px; }
 .btn { border: 0; border-radius: 4px; padding: 6px 16px; cursor: pointer; color: var(--on-accent); background: var(--accent); font-weight: 600; }
 .btn:hover { filter: brightness(1.08); }
 .btn.ghost { background: rgba(255,255,255,0.08); color: var(--text); font-weight: 400; }
+/* (busy: not disabled, so the keyboard stays on it) */
+.btn[aria-disabled="true"] { opacity: .5; cursor: default; filter: none; }
 .dev { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-top: 1px solid var(--line); }
 .dev .d { color: var(--sub); font-size: 12px; }
 .link { border: 0; background: transparent; color: var(--accent); cursor: pointer; padding: 4px 0; font-size: 13px; text-align: left; }
 .link:hover { text-decoration: underline; }
 .link.danger { color: #ff99a4; }
 .foot { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 16px 2px 0; }
-.ver { color: rgba(255,255,255,0.4); font-size: 11px; margin-top: 8px; }
+.ver { color: rgba(255,255,255,0.55); font-size: 11px; margin-top: 8px; }
 
 .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: grid; place-items: center; z-index: 10; }
 .sheet { width: 320px; background: #2b2b2b; border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 22px 20px 18px; text-align: center; box-shadow: 0 16px 48px rgba(0,0,0,.5); animation: pop .22s cubic-bezier(.2,.9,.3,1); }
@@ -99,18 +102,26 @@ input[type=text]:focus { border-bottom: 2px solid var(--accent); background: rgb
 .psub { color: var(--sub); margin-top: 4px; }
 .pbtns { display: flex; gap: 8px; margin-top: 18px; } .pbtns .btn { flex: 1; padding: 7px; }
 @keyframes pop { from { transform: scale(.96); opacity: 0; } }
-.ver.upd { color: rgba(255,255,255,0.62); margin-top: 4px; line-height: 1.4; }
-.ver.upd .link { display: inline; font-size: 11px; padding: 0; }
 
 /* sending to the phone */
 .send { margin: 6px 0 4px; }
 .send .btn { width: 100%; padding: 9px 16px; font-size: 14px; }
 .sendsub { color: var(--sub); font-size: 12px; line-height: 1.4; margin: 7px 2px 0; }
-.note { margin: 8px 0 0; padding: 9px 12px; border-radius: 6px; background: rgba(255,255,255,0.07); font-size: 12.5px; line-height: 1.4; }
+.note { margin: 8px 0 0; padding: 9px 12px; border-radius: 6px; background: rgba(255,255,255,0.07); font-size: 12.5px; line-height: 1.4; user-select: text; }
+/* what main has to say: over the bar at the bottom, on Home and on every view (they end above it: --note-h, panel.js) */
+#note { flex: none; margin: 0 16px 8px; max-height: 40vh; overflow-y: auto; }
+/* "Fix it"'s answer, under it: steps and a command to copy, until closed */
+.note.fwhelp { margin: 4px 0 8px; align-self: stretch; }
+.note.fwhelp .mono { margin: 6px 0 2px; user-select: all; }
+.note.fwhelp .link { padding: 4px 0 0; }
+.note.oss .link { display: block; text-align: left; padding: 6px 0 0; }   /* (Open-source notices: one license a line) */
+/* what a screen reader says (the notes, as they come): out of sight, never out of its reach */
+.srlive { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .drop { position: fixed; inset: 8px; z-index: 50; display: grid; place-items: center; border-radius: 10px; border: 2px dashed var(--accent);
   background: rgba(20,20,20,0.88); font-size: 15px; font-weight: 600; pointer-events: none; }
 .sub0 { color: var(--sub); font-size: 12px; line-height: 1.4; margin-top: 2px; }
 .sub0.ok { color: #6ccb5f; } .sub0.warn { color: #fce100; }
+.sub0 .loglink { display: inline; font-size: 12px; padding: 0; }      /* ("Couldn't start. Open the log") */
 #hotkeySub { user-select: text; }       /* (under Wayland it holds a command to copy) */
 
 /* Quick Share prompt */
@@ -118,3 +129,20 @@ input[type=text]:focus { border-bottom: 2px solid var(--accent); background: rgb
 .qslist { margin: 12px 0 0; max-height: 120px; overflow: auto; text-align: left; font-size: 12.5px; color: var(--sub); }
 .qslist div { display: flex; justify-content: space-between; gap: 10px; padding: 3px 2px; }
 .qslist div span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+/* Windows' contrast themes (forced colors) replace backgrounds and drop shadows, which is all a switch, the side picked
+   or the chosen animation show their state with: draw those in the theme's own colors instead */
+@media (forced-colors: active) {
+  .tog span { forced-color-adjust: none; background: Canvas; border-color: CanvasText; }
+  .tog span::after { background: CanvasText; }
+  .tog input:checked + span { background: Highlight; border-color: Highlight; }
+  .tog input:checked + span::after { background: HighlightText; }
+  .seg button.on { forced-color-adjust: none; background: Highlight; color: HighlightText; }
+  .theme.on { outline: 2px solid Highlight; outline-offset: -2px; }
+  .theme.on .tname::after { forced-color-adjust: none; background: Highlight; }
+  .dot { forced-color-adjust: none; background: GrayText; }
+  .dot.on { background: Highlight; }
+  input[type=range]::-webkit-slider-runnable-track { forced-color-adjust: none; background: GrayText; }
+}
+/* The window zoomed (Ctrl+Plus, up to 200%: it is 420 px wide at 100%): a row's control goes under its label rather
+   than past the window's side */
+@media (max-width: 400px) { .row { flex-wrap: wrap; } .row select { max-width: 100%; } }

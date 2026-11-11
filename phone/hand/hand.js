@@ -46,23 +46,35 @@
 
   class Model {
     constructor(engine, bytes) {
+      const bad = () => new Error('hand: not a hand model');
       const dv = new DataView(bytes);
-      const magic = String.fromCharCode(dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3));
-      if (magic !== 'FHM1') throw new Error('hand: not a hand model');
+      const magic = bytes.byteLength >= 8 ? String.fromCharCode(dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3)) : '';
+      if (magic !== 'FHM1') throw bad();
       const jl = dv.getUint32(4, true);
+      if (8 + jl > bytes.byteLength) throw bad();
       const head = JSON.parse(new TextDecoder().decode(new Uint8Array(bytes, 8, jl)));
+      // A damaged file, or one that isn't a model of these, is refused here rather than run: its sizes, where its input
+      // and outputs are, and every op of its program (hb_check) must stay inside its own memory
+      const int = (v, max) => Number.isInteger(v) && v >= 0 && v <= max;
+      const size = (shape) => (Array.isArray(shape) && shape.every((v) => int(v, 1 << 16)) ? shape.reduce((a, b) => a * b, 1) : -1);
+      const MAX = (1 << 28) - 1;                   // floats: what one allocation of the engine can hold
+      if (!head || !int(head.arena, MAX) || head.arena < 1 || !int(head.weights, MAX) || !Array.isArray(head.ops)) throw bad();
+      if (8 + jl + head.weights * 2 > bytes.byteLength || !head.input || !Array.isArray(head.input.shape) || head.input.shape.length !== 3 ||
+          head.input.shape[2] !== 3 || !int(head.input.off, MAX) || size(head.input.shape) < 1 || head.input.off + size(head.input.shape) > head.arena) throw bad();
+      for (const o of Object.values(head.outputs || {})) if (!o || !int(o.off, MAX) || size(o.shape) < 0 || o.off + size(o.shape) > head.arena) throw bad();
       const e = (this.e = engine);
       this.head = head;
       const words = [];
-      for (const op of head.ops) words.push(op.length, ...op);
+      for (const op of head.ops) { if (!Array.isArray(op) || !op.every((v) => Number.isInteger(v) && v >= -0x80000000 && v <= 0x7fffffff)) throw bad(); words.push(op.length, ...op); }
       this.nwords = words.length;
       this.prog = e.malloc(words.length * 4);
+      e.i32(this.prog, words.length).set(words);
+      if (e.x.hb_check(this.prog, words.length, head.arena, head.weights) !== 0) throw bad();
       this.arena = e.malloc(head.arena * 4);
       this.w = e.malloc(head.weights * 4);
       const w16 = e.malloc(head.weights * 2);
       e.u8(w16, head.weights * 2).set(new Uint8Array(bytes, 8 + jl, head.weights * 2));
       e.x.hb_expand(w16, this.w, head.weights);  // (the float16 copy stays allocated: the allocator only grows)
-      e.i32(this.prog, words.length).set(words);
       this.inPtr = this.arena + head.input.off * 4;
       [this.ih, this.iw] = head.input.shape;
     }
@@ -115,9 +127,11 @@
       this.thumb = engine.malloc(32 * 24);
     }
 
-    // copies a frame into the engine's memory (grown when a bigger frame comes)
+    // copies a frame into the engine's memory (grown when a bigger frame comes). One whose size doesn't add up isn't
+    // looked at: the engine samples w x h pixels from it, and a short one left the last frame's pixels in the rest
     load(rgba, w, h) {
       const n = w * h * 4;
+      if (!(Number.isInteger(w) && Number.isInteger(h) && w > 0 && h > 0 && n <= rgba.length && n <= 1 << 28)) throw new Error('hand: not a frame');
       if (n > this.frameBytes) {
         this.frame = this.e.malloc(n);
         this.frameBytes = n;

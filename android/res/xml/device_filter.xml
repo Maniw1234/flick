@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- the phone on the other end of the USB cable, switched over by Flick (an Android accessory: Google's ids) (UsbPeer) -->
+<resources>
+    <usb-device vendor-id="6353" product-id="11520" />
+    <usb-device vendor-id="6353" product-id="11521" />
+</resources>

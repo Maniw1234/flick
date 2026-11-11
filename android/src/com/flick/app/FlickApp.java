@@ -17,5 +17,10 @@ public class FlickApp extends Application {
         // connections to a PC go over its network, also for what runs without Flick's screen (the share sheet, tiles,
         // the widget, the background link): see Sends.Nets
         Sends.Nets.install(this);
+        // what moves between this phone and other devices shows in the notifications and on the page
+        Moving.install(new TransferService.Shown(this));
+        // Find my phone's alarm volume, if Flick was stopped while ringing (off the main thread: a settings read)
+        final Context app = this;
+        Bg.run("ring volume", new Runnable() { @Override public void run() { Ringer.restoreLeft(app); } });
     }
 }

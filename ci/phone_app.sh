@@ -7,9 +7,11 @@
 # phones aren't asked to update for nothing. Otherwise the phone app is built as <version> and signed with Flick's
 # key, which comes from $FLICK_SIGNING_KEY: the backup file Flick-signing-key.zip, base64-encoded (see
 # signing/README.md). FORCE_PHONE_BUILD=1 always builds. Either way the result has to be Flick, signed with Flick's key.
+# A build also makes the Google Play version's bundle, build/Flick-play.aab (BUNDLETOOL: bundletool 1.18.3), which the
+# workflow uploads to Google Play; a reused phone app has nothing new for Play.
 #
 # Needs gh (with GH_TOKEN), GITHUB_REPOSITORY, SIGNER (uber-apk-signer 1.3.0), java and node; a build also needs javac,
-# zip, and Android platform 34 + build tools 34.0.0 from $ANDROID_HOME (installed with sdkmanager if missing), unless
+# python3, jarsigner, and Android platform 36 + build tools 36.0.0 from $ANDROID_HOME (installed with sdkmanager if missing), unless
 # AJ/A2/D8 or DX point at them (see build_apk.sh).
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -56,15 +58,22 @@ if [ -z "$how" ]; then
   [ "${GITHUB_ACTIONS:-}" = true ] && echo "::add-mask::$(cat "$K/password.txt")"
 
   if [ -z "${AJ:-}" ] && [ -n "${ANDROID_HOME:-}" ]; then
-    if [ ! -f "$ANDROID_HOME/platforms/android-34/android.jar" ] || [ ! -x "$ANDROID_HOME/build-tools/34.0.0/d8" ]; then
-      { yes || true; } | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-34" "build-tools;34.0.0" > /dev/null
+    if [ ! -f "$ANDROID_HOME/platforms/android-36/android.jar" ] || [ ! -x "$ANDROID_HOME/build-tools/36.0.0/d8" ]; then
+      { yes || true; } | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-36" "build-tools;36.0.0" > /dev/null
     fi
-    export AJ="$ANDROID_HOME/platforms/android-34/android.jar" A2="$ANDROID_HOME/build-tools/34.0.0/aapt2" D8="$ANDROID_HOME/build-tools/34.0.0/d8"
+    export AJ="$ANDROID_HOME/platforms/android-36/android.jar" A2="$ANDROID_HOME/build-tools/36.0.0/aapt2" D8="$ANDROID_HOME/build-tools/36.0.0/d8"
   fi
 
   if [ "${FORCE_PHONE_BUILD:-0}" = 1 ]; then echo "building the phone app as $V ($CODE)"
   else echo "the phone app changed since ${PREV:-the first release}: building it as $V ($CODE)"; fi
   FLICK_KEYS="$K" SIGNER="$SIGNER" "$ROOT/build_apk.sh" "$CODE" "$V"
+  # the Google Play version (its own package name, no updater) from the same code, same version
+  rm -f "$ROOT/build/Flick-play.aab"
+  if [ -n "${BUNDLETOOL:-}" ]; then
+    # (it leaves pc/phone-app, the GitHub version that ships inside the PC app, as it is)
+    FLICK_VARIANT=play FLICK_KEYS="$K" SIGNER="$SIGNER" "$ROOT/build_apk.sh" "$CODE" "$V"
+    [ -s "$ROOT/build/Flick-play.aab" ] || fail "the Google Play bundle wasn't made"
+  fi
   how="built and signed"
 fi
 

@@ -26,10 +26,12 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
-/** Read-only view of the phone's shared storage, like a file manager. */
+/**
+ * The phone's shared storage as Flick uses it: listed like a file manager, and where files that arrive are put (a name
+ * reserved, the file moved in, leftovers swept).
+ */
 final class Files {
     private Files() {}
 
@@ -134,7 +136,7 @@ final class Files {
         String[] k = d.list();
         if (k == null) return 0;
         int n = 0;
-        for (String s : k) if (!s.startsWith(".") && !s.endsWith(PART)) n++;   // as listDir shows them
+        for (String s : k) if (!s.startsWith(".")) n++;   // as listDir shows them
         return n;
     }
 
@@ -166,7 +168,9 @@ final class Files {
                 stop(cancel);
                 ArrayList<File> dirs = new ArrayList<File>(), files = new ArrayList<File>();
                 for (File k : kids) {
-                    if (k.getName().startsWith(".") || k.getName().endsWith(PART)) continue;   // hidden, or a download still arriving
+                    // hidden, or a download still arriving (isPart: a part file's name starts with "." too; a received
+                    // "Notes.flickpart" is the user's file and shows)
+                    if (k.getName().startsWith(".")) continue;
                     if (k.isDirectory()) dirs.add(k); else files.add(k);
                 }
                 Collections.sort(dirs, new Comparator<File>() {
@@ -257,10 +261,6 @@ final class Files {
 
     // ------------------------------------------------------------ categories (MediaStore)
     static String query(Context c, String cat, int offset, int limit) { return query(c, cat, offset, limit, null, null, null); }
-
-    static String query(Context c, String cat, int offset, int limit, String sort, String q) {
-        return query(c, cat, offset, limit, sort, q, null);
-    }
 
     /**
      * A page of a category. sort: "date-desc" (newest first, the default), "date-asc", "name-asc", "name-desc",
@@ -457,7 +457,7 @@ final class Files {
     // next download sees. The part file is hidden (".IMG_0001.jpg.flickpart") until the file is complete; then it is
     // renamed, under the same lock and never over an existing file.
     static final String PART = ".flickpart";
-    private static final Object NAMES = new Object();
+    private static final Object NAMES = SyncEngine.NAMES;       // (shared with sync runs: a synced Download/Flick)
 
     /** A file being received: written to part, then finish() gives it its name. */
     static final class Incoming {
@@ -472,13 +472,20 @@ final class Files {
         File finish() throws IOException {
             synchronized (NAMES) {
                 File to = dest.exists() ? free(dir, name, 2) : dest;
+                SyncEngine.unclaim(dest);
                 if (to == null || !part.renameTo(to)) { part.delete(); throw new IOException("rename failed"); }
                 return to;
             }
         }
 
-        void cancel() { part.delete(); }
+        void cancel() {
+            synchronized (NAMES) { SyncEngine.unclaim(dest); }
+            part.delete();
+        }
     }
+
+    /** A part file's name (partOf, peerStage; 1.8.0 and newer): a received file named "Notes.flickpart" isn't one. */
+    static boolean isPart(String n) { return n.startsWith(".") && n.endsWith(PART); }
 
     /** The hidden file a download is written to before it is complete. */
     static File partOf(File f) { return new File(f.getParentFile(), "." + f.getName() + PART); }
@@ -489,22 +496,43 @@ final class Files {
         synchronized (NAMES) {
             for (int i = 1; i < 10000; i++) {
                 File f = new File(dir, numbered(safe, i)), p = partOf(f);
-                if (!f.exists() && p.createNewFile()) return new Incoming(dir, safe, f, p);
+                if (!f.exists() && p.createNewFile()) { SyncEngine.claim(f); return new Incoming(dir, safe, f, p); }
             }
             File f = new File(dir, System.currentTimeMillis() + "_" + safe), p = partOf(f);
             if (!p.createNewFile()) throw new IOException("no free name");
+            SyncEngine.claim(f);
             return new Incoming(dir, safe, f, p);
         }
     }
 
     /** The first of "name.ext", "name (2).ext", "name (3).ext"… from number `from` on that is free (null: none). */
-    private static File free(File dir, String safe, int from) {
+    private static File free(File dir, String safe, int from) { return free(dir, safe, from, false); }
+
+    /** free(), for a folder ("Trip", "Trip (2)"…: a folder's name has no extension) when folder is true. */
+    private static File free(File dir, String safe, int from, boolean folder) {
         for (int i = Math.max(1, from); i < 10000; i++) {
-            File f = new File(dir, numbered(safe, i));
+            File f = new File(dir, folder ? (i <= 1 ? safe : safe + " (" + i + ")") : numbered(safe, i));
             if (!f.exists() && !partOf(f).exists()) return f;
         }
         return null;
     }
+
+    /**
+     * A complete file or folder (on the same drive as dir: a rename, not a copy) put into dir as name, or as the next
+     * free "name (2)"… when that's taken. Returns where it went.
+     */
+    static File moveIn(File src, File dir, String name) throws IOException {
+        String safe = Library.sanitize(name);
+        boolean folder = src.isDirectory();
+        synchronized (NAMES) {
+            File to = free(dir, safe, 1, folder);
+            if (to == null || !src.renameTo(to)) throw new IOException("can't put " + safe + " in place");
+            return to;
+        }
+    }
+
+    /** Where files from another phone are put together before they go into Download/Flick (hidden until then). */
+    static File peerStage(String tid) { return new File(inbox(), ".peer-" + tid + PART); }
 
     /** "name.ext" (i = 1), "name (2).ext", "name (3).ext"… */
     static String numbered(String safe, int i) {
@@ -514,13 +542,25 @@ final class Files {
                 : safe + " (" + i + ")";
     }
 
-    /** Part files that a killed app or a crash left in Download/Flick (a day old: nothing still writes them). */
+    /**
+     * Part files that a killed app or a crash left in Download/Flick (a day old: nothing still writes them), and what
+     * arrived of a send from another phone that was cut off the same way (peerStage).
+     */
     static void sweepParts() {
         File[] fs = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Flick").listFiles();
         if (fs == null) return;
         long old = System.currentTimeMillis() - 24L * 60 * 60 * 1000;
-        for (File f : fs) if (f.getName().endsWith(PART) && f.isFile() && f.lastModified() < old) f.delete();
+        for (File f : fs) {
+            if (!isPart(f.getName()) || f.lastModified() >= old) continue;
+            if (f.isFile()) f.delete();
+            else if (f.isDirectory() && f.getName().startsWith(".peer-")) PeerServer.deleteTree(f);
+        }
     }
 
-    static String lower(String s) { return s == null ? "" : s.toLowerCase(Locale.US); }
+    /** What arrived of sends from other phones that a killed app left in Download/Flick (peerStage): as the app starts. */
+    static void sweepPeerParts() {
+        File[] fs = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Flick").listFiles();
+        if (fs == null) return;
+        for (File f : fs) if (f.isDirectory() && f.getName().startsWith(".peer-") && f.getName().endsWith(PART)) PeerServer.deleteTree(f);
+    }
 }

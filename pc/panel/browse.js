@@ -1,6 +1,6 @@
 'use strict';
 // Browse phone (main -> features.js -> browse.js): the phone's photos, videos, downloads, documents and folders in a
-// grid with thumbnails; pick files and Copy to PC. The view comes as 'panel:browse' (whole), thumbnails as they arrive as
+// grid with thumbnails; pick files and Copy to PC. The view comes as 'panel:browse' (page by page), thumbnails as they arrive as
 // 'panel:browse-thumbs', a copy's progress as 'panel:browse-job'; actions go back as 'panel:feat' (b-*).
 (function () {
   const api = window.flick;
@@ -27,10 +27,16 @@
   let J = null;               // the latest copy
   let open = false;
   let closedJob = '';         // the copy whose result was closed
+  let said = '';              // the copy and how far a screen reader was told about it (its start, then its end)
+  let toJob = false;          // Copy to PC had the keyboard: it goes on to the copy once that shows
   const thumbs = new Map();   // path -> data URL
   const tiles = new Map();    // path -> tile element
   const sel = new Map();      // path -> size: the files picked
   let moreAsked = 0;
+  // What the grid shows: its listing and the paths of its tiles, in order. A page more of the same listing (a big folder
+  // comes 60 at a time, each time the whole list so far) only adds its tiles at the end: drawing thousands anew for
+  // each page took seconds, and lost the keyboard's place.
+  let drawn = { key: '', paths: [] };
 
   // ---------------- the entry on the main view ----------------
   function renderEntry() {
@@ -51,6 +57,7 @@
     else { send('b-close'); sel.clear(); }
   }
   $('bEntry').onclick = () => showView(true);
+  (window.flickViews = window.flickViews || {}).b = (on) => { if (open !== !!on) showView(on); };   // (the bar closes it: nav.js)
   // Back goes up a folder first, then out of the view
   function back() {
     if (B && B.path && B.root && B.path !== B.root && B.crumbs && B.crumbs.length) { send('b-up'); return; }
@@ -85,7 +92,7 @@
     if (!v || v.status === 'loading') { skeleton(); renderBar(); return; }
     const st = v.status;
     if (st !== 'ready') {
-      grid.textContent = ''; tiles.clear();
+      grid.textContent = ''; tiles.clear(); drawn = { key: '', paths: [] };
       if (st === 'none') message('No phone connected', 'Open Flick on your phone, or turn on “Stay connected in the background” there.', 'Try again');
       else if (st === 'old') message('Update Flick on ' + name, 'Then you can browse it from here.');
       else if (st === 'off') message('Browsing is off on ' + name, 'On your phone, open Flick, go to Settings and turn on “Let your PC browse this phone”.', 'Try again');
@@ -99,16 +106,31 @@
       return;
     }
     if (!v.items.length) {
-      grid.textContent = ''; tiles.clear();
+      grid.textContent = ''; tiles.clear(); drawn = { key: '', paths: [] };
       message(EMPTY[v.crumbs && v.crumbs.length ? 'dir' : v.cat] || 'Nothing here', '');
       renderBar();
       return;
     }
-    grid.textContent = '';
-    tiles.clear();
-    for (const x of v.items) grid.appendChild(tile(x));
-    // drop picks that this listing no longer shows
-    for (const p of [...sel.keys()]) if (!v.items.some((x) => x.path === p)) sel.delete(p);
+    const key = v.device + '\n' + v.cat + '\n' + v.path, n = drawn.paths.length;
+    let more = drawn.key === key && n > 0 && v.items.length > n;
+    for (let i = 0; more && i < n; i++) if (v.items[i].path !== drawn.paths[i]) more = false;
+    const add = document.createDocumentFragment();
+    if (more) {
+      for (const x of v.items.slice(n)) { add.appendChild(tile(x)); drawn.paths.push(x.path); }
+      grid.appendChild(add);
+    } else {
+      // (drawn anew: the keyboard stays on the tile it was on, if it's still there)
+      const was = document.activeElement && grid.contains(document.activeElement) ? document.activeElement.dataset.path : null;
+      grid.textContent = '';
+      tiles.clear();
+      for (const x of v.items) add.appendChild(tile(x));
+      grid.appendChild(add);
+      drawn = { key, paths: v.items.map((x) => x.path) };
+      // drop picks that this listing no longer shows
+      const have = new Set(drawn.paths);
+      for (const p of [...sel.keys()]) if (!have.has(p)) sel.delete(p);
+      if (was) { const t = [...grid.children].find((c) => c.dataset.path === was); if (t) t.focus(); }
+    }
     $('bMore').hidden = !(v.more && v.loading);
     renderBar();
     moreAsked = 0;
@@ -117,7 +139,7 @@
 
   function skeleton() {
     const grid = $('bGrid');
-    grid.textContent = ''; tiles.clear();
+    grid.textContent = ''; tiles.clear(); drawn = { key: '', paths: [] };
     for (let i = 0; i < 9; i++) { const t = el('div', 'btile bskel'); t.appendChild(el('span', 'bth')); t.appendChild(el('span', 'bname')); grid.appendChild(t); }
   }
 
@@ -145,9 +167,12 @@
     const t = el('button', 'btile' + (x.dir ? ' dir' : ''));
     t.type = 'button';
     t.title = x.name;
+    t.dataset.path = x.path;
     const th = el('span', 'bth');
     if (x.dir) {
       th.appendChild(svg('0 0 32 32', FOLDER, 'bfolder'));
+      // (in the list with the files, so an option like them for a screen reader; not one to pick: it opens)
+      t.setAttribute('role', 'option');
       t.setAttribute('aria-label', 'Folder ' + x.name + ', ' + plural(x.count || 0, 'item', 'items'));
       t.onclick = () => send('b-dir', { path: x.path });
     } else {
@@ -190,6 +215,8 @@
 
   // the bottom: the picks and Copy to PC, or the copy under way and how it went
   function renderBar() {
+    // (a button that hides itself here, Copy to PC, Stop, Close, hands the keyboard on, never to the page)
+    const a = document.activeElement, had = open && a && ($('bBar').contains(a) || $('bJob').contains(a)) ? a : null;
     const running = !!(J && J.state === 'running');
     const showJob = !!(J && (running || J.id !== closedJob));
     $('bJob').hidden = !showJob;
@@ -202,6 +229,42 @@
       $('bCopy').disabled = running;
     }
     $('bView').classList.toggle('hasbar', !$('bBar').hidden || showJob);
+    tell();
+    if (had && !had.getClientRects().length) {
+      if (had === $('bCopy')) toJob = true;
+      handOn();
+    } else if (toJob && showJob && document.activeElement === $('bView')) handOn();
+    else if (document.activeElement !== $('bView')) toJob = false;
+  }
+  function handOn() {
+    const job = ['bJobStop', 'bJobShow', 'bJobClose'].map($).find((b) => b.getClientRects().length);
+    if (job) { toJob = false; job.focus(); return; }
+    // (the copy hasn't shown yet: the view holds the keyboard until it does)
+    if (toJob) { $('bView').focus(); return; }
+    // the box closed: back to the files, one that can be seen
+    const body = $('bBody').getBoundingClientRect(), all = [...$('bGrid').querySelectorAll('button')];
+    const t = all.find((x) => { const r = x.getBoundingClientRect(); return r.height && r.top >= body.top && r.bottom <= body.bottom; }) || all[0];
+    (t || $('bBack')).focus();
+  }
+
+  // What a screen reader says about a copy: that it started and how it ended, once each. The box itself isn't read out
+  // as it changes (it changes with every file, up to 4 times a second).
+  function tell() {
+    const j = J;
+    if (!j || !j.id) return;
+    const ended = j.state !== 'running', k = j.id + (ended ? ':end' : ':run');
+    if (said === k || (ended && said !== j.id + ':run')) { if (ended && said !== k) said = k; return; }
+    said = k;
+    const name = j.deviceName || 'your phone';
+    let text;
+    if (!ended) text = 'Copying ' + plural(j.n, 'file', 'files') + ' from ' + name + '…';
+    else if (j.state === 'done') text = $('bJobTitle').textContent + '. ' + $('bJobSub').textContent;
+    else if (j.state === 'stopped') text = 'Stopped. ' + $('bJobSub').textContent;
+    else text = 'Couldn’t copy the files. ' + $('bJobSub').textContent;
+    const live = $('bLive');
+    live.textContent = '';
+    clearTimeout(live._t);
+    live._t = setTimeout(() => { live.textContent = text; }, 60);
   }
 
   function renderJob() {
@@ -263,6 +326,13 @@
     if (!s) return;
     if (s.job) J = s.job;
     if (!s.open) { renderBar(); return; }
+    // A page more of the listing this window has brings only the items it hasn't had (from: how many it has). One that
+    // doesn't follow on from them waits for the whole list, which is on its way (the window just loaded, or the view
+    // was opened anew); should it ever not come, the listing is asked for again.
+    if (s.from) {
+      if (!B || !B.items || B.items.length !== s.from || B.device !== s.device || B.cat !== s.cat || B.path !== s.path) { if (B) send('b-refresh'); return; }
+      s.items = B.items.concat(s.items);
+    }
     if (B && (B.device !== s.device || B.cat !== s.cat || B.path !== s.path)) { sel.clear(); $('bBody').scrollTop = 0; }
     for (const [p, url] of Object.entries(s.thumbs || {})) thumbs.set(p, url);
     B = s;
@@ -284,7 +354,8 @@
 
   // Escape: up a folder, then out of the view (before panel.js would hide the window)
   window.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape' || !open || !$('askBox').hidden) return;
+    // (a question in front, Accept, pairing, Quick Share: answered with its buttons; this view stays behind it)
+    if (e.key !== 'Escape' || !open || [...document.querySelectorAll('.modal')].some((m) => !m.hidden)) return;
     e.stopImmediatePropagation();
     back();
   }, true);

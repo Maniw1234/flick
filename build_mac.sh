@@ -15,9 +15,22 @@ ARCHS=${ARCHS:-arm64 x64}
 VERSION=$(node -p "require('$PC/package.json').version")
 ON_MAC=0; [ "$(uname -s)" = Darwin ] && ON_MAC=1
 ezip() { case "$1" in arm64) echo "$EZIP_ARM64";; x64) echo "$EZIP_X64";; *) echo "unknown architecture $1" >&2; exit 1;; esac; }
+ekey() { case "$1" in arm64) echo electronSha256MacArm64;; *) echo electronSha256MacX64;; esac; }
+# Electron's zip must be the one pc/package.json pins for this system (CI checks every download the same way): any
+# other zip, or another version, stops the build instead of being packaged without a word. Prints its version.
+pinned() {  # <Electron zip> <the key of its SHA-256 in pc/package.json>
+  node -e '
+    const [pkg, zip, key, v] = process.argv.slice(1);
+    const p = require(pkg);
+    let got;
+    try { got = require("crypto").createHash("sha256").update(require("fs").readFileSync(zip)).digest("hex"); } catch (e) { got = "unreadable (" + e.code + ")"; }
+    if (got !== p[key]) { console.error("!! " + zip + " is not the Electron zip pc/package.json pins (" + key + " " + p[key] + "): its SHA-256 is " + got); process.exit(1); }
+    if (v !== p.electronVersion) { console.error("!! " + zip + " is Electron " + v + ", but pc/package.json says electronVersion " + p.electronVersion); process.exit(1); }
+    console.log(v);' "$PC/package.json" "$1" "$2" "$(unzip -p "$1" version 2> /dev/null)"
+}
 ELECTRON=""
 for ARCH in $ARCHS; do
-  V=$(unzip -p "$(ezip "$ARCH")" version)
+  V=$(pinned "$(ezip "$ARCH")" "$(ekey "$ARCH")")
   [ -z "$ELECTRON" ] && ELECTRON=$V
   [ "$V" = "$ELECTRON" ] || { echo "!! the Electron zips are different versions ($ELECTRON, $V)"; exit 1; }
 done
@@ -27,6 +40,7 @@ echo "== app code"
 CODE=$OUT/app
 mkdir -p "$CODE"
 # every module at the top of pc/ ships (a new one can't be forgotten here), plus the folders the windows load
+# (signing/sign_release.js checks the update bundles against the same list: keep the two in step)
 cp "$PC"/*.js "$PC/package.json" "$CODE/"
 for d in overlay panel catcher assets phone-app web air; do if [ -d "$PC/$d" ]; then cp -R "$PC/$d" "$CODE/"; fi; done
 # Air grab's hand tracker (the phone app's): this Mac's camera sees where the hand opens (pc/air.js)
@@ -49,7 +63,10 @@ else
 fi
 
 echo "== app bundle (what installed copies download to update themselves)"
-( cd "$CODE" && zip -qr -X "$OUT/flick-app-mac-$VERSION.zip" . )
+# its files stored as they are (-0), not compressed: a downloaded version is compared with this bundle at every start
+# (pc/updatecore.js, checkUpdate), and with compressed files that start first waited for all of them to be unpacked.
+# The download is a little bigger. Every Flick since 1.0.0 unpacks both kinds.
+( cd "$CODE" && zip -qr -X -0 "$OUT/flick-app-mac-$VERSION.zip" . )
 
 echo "== icon"
 # .icns: "icns", its length, then one (type, length, PNG) entry per size; the 2x types take the next size's PNG
@@ -79,6 +96,9 @@ for ARCH in $ARCHS; do
   cp "$D/electron/LICENSE" "$D/electron/LICENSES.chromium.html" "$APP/Contents/Resources/"
   rm -rf "$D/electron"
   mv "$APP/Contents/MacOS/Electron" "$APP/Contents/MacOS/Flick"
+  # no running other code as Flick through Electron (ELECTRON_RUN_AS_NODE, NODE_OPTIONS, --inspect): packaging/fuses.js;
+  # on a Mac they are in the Electron Framework, which codesign signs again below
+  node "$ROOT/packaging/fuses.js" "$APP/Contents/Frameworks/Electron Framework.framework/Electron Framework"
   rm -f "$APP/Contents/Resources/default_app.asar" "$APP/Contents/Resources/electron.icns"
   cp -R "$CODE" "$APP/Contents/Resources/app"
   cp "$OUT/flick.icns" "$APP/Contents/Resources/flick.icns"
@@ -92,10 +112,14 @@ p.update({
     'CFBundleIdentifier': 'com.flick.pc', 'CFBundleIconFile': 'flick.icns',
     'CFBundleShortVersionString': version, 'CFBundleVersion': version,
     'LSApplicationCategoryType': 'public.app-category.utilities', 'NSHumanReadableCopyright': 'Flick',
+    # macOS 13 or newer, as the README says (Electron's own says 12, where the flick-keys helper, built for 13, quietly
+    # doesn't start): an older Mac says so itself rather than running a Flick whose shortcuts don't work
+    'LSMinimumSystemVersion': '13.0',
     # Flick can't reach the phone without the local network: macOS asks the user once, with this line
     'NSLocalNetworkUsageDescription': 'Flick finds your phone on the local network and sends files to it and from it.',
-    # every Bonjour service Flick advertises or looks for: Quick Share (pc/quickshare.js, through pc/mdns.js)
-    'NSBonjourServices': ['_FC9F5ED42C8A._tcp'],
+    # every Bonjour service Flick advertises or looks for (pc/mdns.js): Flick's own, where phones find it (pc/server.js),
+    # and Quick Share's (pc/quickshare.js)
+    'NSBonjourServices': ['_flick._tcp', '_FC9F5ED42C8A._tcp'],
     # Air grab: after a file is grabbed on the phone, the camera looks for the hand for a few seconds (pc/air.js)
     'NSCameraUsageDescription': 'Air grab: for a few seconds after you grab a file on your phone, or select files here, Flick looks for your hand. Nothing is recorded.',
     # the send shortcut and Air grab: which files are selected in Finder (pc/selnow.js, pc/selwatch.js); macOS asks once

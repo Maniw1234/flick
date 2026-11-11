@@ -19,6 +19,16 @@ const STREAM_CAP = 8 * 1024 * 1024;
 // may be 10 s old when the link is held back. So one stuck reader is reset well before that, costing its own stream,
 // not the whole link.
 let STUCK_MS = 20000;
+// (measured with a clock that only moves forward: the wall clock changed must not cut or keep a stuck stream)
+const mono = () => performance.now();
+// Streams one link may have open at once: a phone uses a handful (its page's link, a few transfer streams, kept
+// connections, thumbnails), as many as the computer takes from one address on the network (server.js SOCKS_PER_ADDR).
+// One opened past that is reset at once.
+const MAX_STREAMS = 64;
+// A PING is answered, and an OPEN past MAX_STREAMS reset, only while little waits to be sent on the link (as a
+// WebSocket's pongs: ws.js PONG_QUEUED): whatever sends them and never reads the answers can't pile them up here. (A
+// phone hears the link by any frame: what's waiting is on its way to it.)
+const PONG_QUEUED = 64 * 1024;
 
 function frame(type, id, payload) {
   const p = payload || Buffer.alloc(0);
@@ -66,6 +76,9 @@ class MuxLink extends EventEmitter {
   constructor(sock, label) {
     super();
     this.sock = sock; this.label = label || 'bluetooth';
+    // Many small frames go both ways on this one socket (each answer is a header frame, then its body): with Nagle's
+    // algorithm on, the second write of an answer waited for the phone's delayed ACK, about 44 ms on every request.
+    if (sock && typeof sock.setNoDelay === 'function') sock.setNoDelay(true);
     this.streams = new Map();
     this.buf = Buffer.alloc(0);
     this.ready = false; this.closed = false; this.paused = false;
@@ -73,6 +86,8 @@ class MuxLink extends EventEmitter {
     sock.on('close', () => this._close());
     sock.on('error', () => this._close());
     sock.write(MAGIC);
+    // (the phone says FLKMUX1 as it links: a link that doesn't, in a while, holds no place)
+    this.magicT = setTimeout(() => { if (!this.ready) this.close(); }, 15000);
   }
   _send(b, cb) {
     if (this.closed) return cb && cb(new Error('link closed'));
@@ -85,7 +100,7 @@ class MuxLink extends EventEmitter {
   _pause() {
     if (this.paused) return;
     this.paused = true; this.sock.pause();
-    this.overLen = Infinity; this.progressAt = Date.now();
+    this.overLen = Infinity; this.progressAt = mono();
     this.pauseT = setInterval(() => this._check(), 200);
   }
   _check() {
@@ -93,9 +108,9 @@ class MuxLink extends EventEmitter {
     let over = 0;
     for (const s of this.streams.values()) if (s.readableLength > STREAM_CAP) over += s.readableLength;
     if (!over) { this._resume(); return; }
-    if (over < this.overLen) this.progressAt = Date.now();
+    if (over < this.overLen) this.progressAt = mono();
     this.overLen = over;
-    if (Date.now() - this.progressAt > STUCK_MS) {
+    if (mono() - this.progressAt > STUCK_MS) {
       for (const s of [...this.streams.values()]) if (s.readableLength > STREAM_CAP) s.destroy();
       this._resume();
     }
@@ -113,6 +128,7 @@ class MuxLink extends EventEmitter {
       if (!this.buf.subarray(0, MAGIC.length).equals(MAGIC)) { this.sock.destroy(); return; }
       this.buf = this.buf.subarray(MAGIC.length);
       this.ready = true;
+      clearTimeout(this.magicT);
       this.emit('ready');
     }
     while (this.buf.length >= 9) {
@@ -128,7 +144,9 @@ class MuxLink extends EventEmitter {
     const s = this.streams.get(id);
     switch (type) {
       case T.OPEN:
-        if (!s && id) { const ns = new MuxStream(this, id); this.streams.set(id, ns); this.emit('stream', ns); }
+        if (s || !id) break;
+        if (this.streams.size >= MAX_STREAMS) { if (this.sock.writableLength < PONG_QUEUED) this._send(frame(T.RST, id), () => {}); break; }
+        { const ns = new MuxStream(this, id); this.streams.set(id, ns); this.emit('stream', ns); }
         break;
       case T.DATA:
         if (s && !s.remoteDone) { s.push(p); if (s.readableLength > STREAM_CAP) this._pause(); }
@@ -140,7 +158,7 @@ class MuxLink extends EventEmitter {
         if (s) { s.remoteDone = true; this.streams.delete(id); s.destroy(); }
         break;
       case T.PING:
-        this._send(frame(T.PONG, 0, p), () => {});
+        if (this.sock.writableLength < PONG_QUEUED) this._send(frame(T.PONG, 0, p), () => {});
         break;
       default: break;
     }
@@ -148,6 +166,7 @@ class MuxLink extends EventEmitter {
   _close() {
     if (this.closed) return;
     this.closed = true;
+    clearTimeout(this.magicT);
     clearInterval(this.pauseT); this.pauseT = null;
     for (const s of [...this.streams.values()]) s.destroy();
     this.streams.clear();
@@ -192,4 +211,4 @@ class MuxClient extends EventEmitter {
   }
 }
 
-module.exports = { MuxLink, MuxClient, MuxStream, MAGIC, T, frame, STREAM_CAP, _setStuckMs: (ms) => { STUCK_MS = ms; } };
+module.exports = { MuxLink, MuxClient, MuxStream, MAGIC, T, frame, STREAM_CAP, MAX_STREAMS, _setStuckMs: (ms) => { STUCK_MS = ms; } };

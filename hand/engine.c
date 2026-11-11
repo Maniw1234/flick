@@ -22,7 +22,10 @@ static uintptr_t heap_top = 0;
 EXPORT void *hb_malloc(int bytes) {
   if (!heap_top) heap_top = ((uintptr_t)&__heap_base + 15) & ~(uintptr_t)15;
   uintptr_t p = heap_top;
+  // (a size below 0, from a damaged model file, moved the top back: the next block overlapped the ones before it)
+  if (bytes < 0) return 0;
   uintptr_t end = (p + (uintptr_t)bytes + 15) & ~(uintptr_t)15;
+  if (end < p) return 0;
   uintptr_t have = __builtin_wasm_memory_size(0) * 65536u;
   if (end > have) {
     uintptr_t pages = (end - have + 65535u) / 65536u;
@@ -371,6 +374,83 @@ EXPORT void hb_run(const int32_t *prog, int words, float *A, const float *W) {
   }
 }
 
+// ------------------------------------------------------------------ checking a program (once, as its model loads)
+// hb_run does what the program says: a model file that isn't one of these, or a damaged one, read and wrote anywhere in
+// the engine's memory. A program runs only once every op is one the engine knows, with as many ints as it takes, sizes
+// that make sense, and every tensor inside the arena (arena floats) or the weights (weights floats). Returns 0 when it is
+// good, else 1 + the number of the first op that isn't.
+static const int8_t OP_INTS[] = {0, 17, 9, 15, 6, 6, 6, 8, 6, 5, 8, 4, 4};   // each op's ints, its code included
+static int inside(long long off, long long n, long long size) { return off >= 0 && n >= 0 && off + n <= size; }
+static int dim(long long v, long long max) { return v >= 1 && v <= max; }
+EXPORT int hb_check(const int32_t *prog, int words, int arena, int weights) {
+  const long long A = arena, W = weights, D = 1 << 16, C = 1 << 20;
+  if (words < 0 || arena < 1 || weights < 0) return 1;
+  const int32_t *p = prog, *end = prog + words;
+  for (int k = 1; p < end; k++) {
+    int n = p[0];
+    if (n < 1 || n > end - p - 1) return k;
+    const int32_t *a = p + 1;
+    if (a[0] < CONV || a[0] > COPY || n != OP_INTS[a[0]]) return k;
+    int ok = 0;
+    switch (a[0]) {
+      case CONV: {  // in, out, ih, iw, cin, oh, ow, cout, kh, kw, s, pt, pl, act, W, B (cout: at most conv's acc_buf)
+        long long ih = a[3], iw = a[4], cin = a[5], oh = a[6], ow = a[7], co = a[8], kh = a[9], kw = a[10];
+        ok = dim(ih, D) && dim(iw, D) && dim(cin, C) && dim(oh, D) && dim(ow, D) && dim(co, 4096) && dim(kh, 64) && dim(kw, 64) &&
+             dim(a[11], 64) && a[12] >= 0 && a[12] <= 64 && a[13] >= 0 && a[13] <= 64 && inside(a[1], ih * iw * cin, A) &&
+             inside(a[2], oh * ow * co, A) && inside(a[15], kh * kw * cin * co, W) && inside(a[16], co, W);
+        break;
+      }
+      case CONV1:  // in, out, P, cin, cout, act, W, B
+      case FC: {   // in, out, cin, cout, act, W, B
+        int f = a[0] == FC;
+        long long P = f ? 1 : a[3], cin = a[f ? 3 : 4], co = a[f ? 4 : 5];
+        ok = dim(P, A) && dim(cin, C) && dim(co, C) && inside(a[1], P * cin, A) && inside(a[2], P * co, A) &&
+             inside(a[f ? 6 : 7], cin * co, W) && inside(a[f ? 7 : 8], co, W);
+        break;
+      }
+      case DW: {  // in, out, ih, iw, c, oh, ow, k, s, pt, pl, act, W, B
+        long long ih = a[3], iw = a[4], c = a[5], oh = a[6], ow = a[7], kk = a[8];
+        ok = dim(ih, D) && dim(iw, D) && dim(c, C) && dim(oh, D) && dim(ow, D) && dim(kk, 64) && dim(a[9], 64) && a[10] >= 0 &&
+             a[10] <= 64 && a[11] >= 0 && a[11] <= 64 && inside(a[1], ih * iw * c, A) && inside(a[2], oh * ow * c, A) &&
+             inside(a[13], kk * kk * c, W) && inside(a[14], c, W);
+        break;
+      }
+      case ADD:  // a, b, out, n, act
+        ok = inside(a[1], a[4], A) && inside(a[2], a[4], A) && inside(a[3], a[4], A);
+        break;
+      case PRELU:  // in, out, P, c, alpha
+        ok = dim(a[3], A) && dim(a[4], C) && inside(a[1], (long long)a[3] * a[4], A) && inside(a[2], (long long)a[3] * a[4], A) &&
+             inside(a[5], a[4], W);
+        break;
+      case PADC:  // in, out, P, cin, cout (cin <= cout: the zeros go at the end)
+        ok = dim(a[3], A) && dim(a[4], C) && dim(a[5], C) && a[4] <= a[5] && inside(a[1], (long long)a[3] * a[4], A) &&
+             inside(a[2], (long long)a[3] * a[5], A);
+        break;
+      case MAXPOOL2: {  // in, out, ih, iw, c, oh, ow (2 x 2, stride 2)
+        long long ih = a[3], iw = a[4], c = a[5], oh = a[6], ow = a[7];
+        ok = dim(ih, D) && dim(iw, D) && dim(c, C) && dim(oh, D) && dim(ow, D) && 2 * oh <= ih && 2 * ow <= iw &&
+             inside(a[1], ih * iw * c, A) && inside(a[2], oh * ow * c, A);
+        break;
+      }
+      case RESIZE2X: {  // in, out, ih, iw, c
+        long long ih = a[3], iw = a[4], c = a[5];
+        ok = dim(ih, D) && dim(iw, D) && dim(c, C) && inside(a[1], ih * iw * c, A) && inside(a[2], 4 * ih * iw * c, A);
+        break;
+      }
+      case MEAN:  // in, out, P, c
+        ok = dim(a[3], A) && dim(a[4], C) && inside(a[1], (long long)a[3] * a[4], A) && inside(a[2], a[4], A);
+        break;
+      case SIGMOID:  // in, out, n
+      case COPY:     // from, to, n
+        ok = inside(a[1], a[3], A) && inside(a[2], a[3], A);
+        break;
+    }
+    if (!ok) return k;
+    p += n + 1;
+  }
+  return 0;
+}
+
 // ------------------------------------------------------------------ camera frame -> input tensor
 // Samples an RGBA frame (sw x sh) into an RGB float tensor (ow x oh, values 0..1) through an affine map: the source
 // point for output pixel centre (x + 0.5, y + 0.5) is (m0 x' + m1 y' + m2, m3 x' + m4 y' + m5), in source pixels.
@@ -382,6 +462,10 @@ EXPORT void hb_warp(const uint8_t *src, int sw, int sh, float *out, int ow, int 
     for (int x = 0; x < ow; x++) {
       float xc = x + 0.5f;
       float sx = m[0] * xc + m[1] * yc + m[2] - 0.5f, sy = m[3] * xc + m[4] * yc + m[5] - 0.5f;
+      // a point well outside the frame samples what any point there does (black, or the nearest edge) from just outside
+      // it: a map that isn't a number, or one far out, made the conversion to int below undefined
+      if (!(sx >= -2.f)) sx = -2.f; else if (sx > (float)sw + 1.f) sx = (float)sw + 1.f;
+      if (!(sy >= -2.f)) sy = -2.f; else if (sy > (float)sh + 1.f) sy = (float)sh + 1.f;
       int x0 = sx < 0.f ? (int)sx - 1 : (int)sx, y0 = sy < 0.f ? (int)sy - 1 : (int)sy;
       float fx = sx - (float)x0, fy = sy - (float)y0;
       float r = 0.f, g = 0.f, b = 0.f;

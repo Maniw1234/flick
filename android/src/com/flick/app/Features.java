@@ -28,7 +28,8 @@ final class Features {
 
     static final String CH_LINK = "link";              // the background link's ongoing notification (low)
     static final String CH_RING = "ring";              // "your PC is looking for this phone" (high)
-    static final String CH_LINKS = "links-in";         // a link the PC sent (high)
+    static final String CH_LINKS = "links-in";         // a link the PC or another device sent (high)
+    static final String CH_ASK = "ask";                // files from a device set to "Ask each time", waiting (high)
 
     private Features() {}
 
@@ -71,9 +72,10 @@ final class Features {
         final Context c = a.getApplicationContext();
         String v = value == null ? "" : value.trim();
         if ("bg".equals(name)) {
-            boolean on = "1".equals(v) || "true".equals(v);
+            boolean on = "1".equals(v) || "true".equals(v), was = bg(c);
             put(c, BG, on ? "1" : "0");
-            if (on) { Page.askNotifications(a); LinkService.start(c); }
+            // (on while on already: Settings' "Allow notifications", the user asking for them)
+            if (on) { Page.askNotifications(a, was); LinkService.start(c); }
             else LinkService.stop(c);
         } else if ("clipFromPc".equals(name)) {
             put(c, CLIP, "1".equals(v) || "true".equals(v) ? "1" : "0");
@@ -160,22 +162,34 @@ final class Features {
             link.setShowBadge(false);
             nm.createNotificationChannel(link);
             NotificationChannel ring = new NotificationChannel(CH_RING, "Find my phone", NotificationManager.IMPORTANCE_HIGH);
-            ring.setDescription("When your PC makes this phone ring");
+            ring.setDescription("When your PC or another phone makes this phone ring");
             ring.setSound(null, null);                 // Flick plays the alarm itself
             ring.enableVibration(false);               // and vibrates itself
             ring.setShowBadge(false);
             ring.setLockscreenVisibility(android.app.Notification.VISIBILITY_PUBLIC);
             nm.createNotificationChannel(ring);
-            NotificationChannel links = new NotificationChannel(CH_LINKS, "Links from your PC", NotificationManager.IMPORTANCE_HIGH);
-            links.setDescription("A link your PC sent, to open on this phone");
+            NotificationChannel links = new NotificationChannel(CH_LINKS, "Links from your devices", NotificationManager.IMPORTANCE_HIGH);
+            links.setDescription("A link your PC or another device sent, to open on this phone");
             nm.createNotificationChannel(links);
+            NotificationChannel ask = new NotificationChannel(CH_ASK, "Files to accept", NotificationManager.IMPORTANCE_HIGH);
+            ask.setDescription("Files from a device set to Ask each time, waiting for Accept");
+            nm.createNotificationChannel(ask);
         }
+    }
+
+    /**
+     * The package Flick's resources are under, for looking one up by name: the Google Play version renames the app's
+     * package only (build_apk.sh), its resources keep the name they were built with.
+     */
+    static String resPackage(Context c) {
+        try { return c.getResources().getResourcePackageName(c.getApplicationInfo().icon); }
+        catch (Throwable e) { return c.getPackageName(); }
     }
 
     /** Small icon for Flick's notifications (from res, there's no R class). */
     static int icon(Context c, String name, int fallback) {
         try {
-            int id = c.getResources().getIdentifier(name, "drawable", c.getPackageName());
+            int id = c.getResources().getIdentifier(name, "drawable", resPackage(c));
             return id != 0 ? id : fallback;
         } catch (Throwable e) { return fallback; }
     }

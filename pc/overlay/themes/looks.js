@@ -1,6 +1,6 @@
 'use strict';
 /* Flick overlay: the animations Meteor, Volt, Warp and Glitch (looks/*.js), and "Surprise me" (one of them at random for
-   each flick). A look is worked out from the time since the flick alone and is timed to its sound (sounds/<look>.wav: its
+   each flick). A look is worked out from the time since the flick alone and is timed to its sound (sounds/<look>.ogg: its
    big moment is where the card lands, or where it leaves for the phone). fx2.js draws it, with the desktop photo bent,
    dimmed and lit under it. The card a look flies is drawn here (hiddenOnPC) until the look is over; after that the
    overlay draws it as usual (the icon, a fade). Several flicks at once each play their own look, drawn as one frame. */
@@ -299,7 +299,6 @@
       // (these go to Flick's log: which graphics chip draws the animations, or that they're drawn plainly)
       console.log(X.ready() ? 'looks: drawn by ' + (X.renderer || 'an unknown graphics chip') : 'looks: the effects can\'t start here, so cards fly plainly');
       if (X.software) { perf.lite = true; console.log('looks: no graphics chip, the light version'); }
-      A.preload(NAMES);
     },
     reset() {
       for (const p of plays.splice(0)) { if (p.snd) p.snd.stop(); finish(p); }
@@ -429,6 +428,9 @@
     return E.S.side === 'right' ? c.pose.x - half > E.S.W : c.pose.x + half < 0;
   }
 
+  // the sounds are decoded as the overlay loads (they're small: a few hundredths of a second), so the first flick's is
+  // heard on time even when the graphics are made ready only then (overlay.js)
+  A.preload(NAMES);
   for (const n of NAMES) THEMES[n] = theme;
   THEMES.surprise = theme;
   // test hook: what's playing

@@ -15,6 +15,10 @@ const crypto = require('crypto');
 const { EventEmitter } = require('events');
 const pb = require('./pb');
 const { MdnsService } = require('./mdns');
+// Keep-alives and the caps on questions are timed by a clock that only moves forward: the wall clock set ahead (a time
+// sync, the user setting it) failed a share waiting for its Accept as "phone went quiet", and set back it held the caps
+// for as long as it went back.
+const mono = () => performance.now();
 
 // ---------------------------------------------------------------- schemas (field number, type, sub-schema, repeated)
 const S = {};
@@ -32,8 +36,8 @@ S.OfflineFrame = { version: [1, 'enum'], v1: [2, 'msg', S.V1Frame] };
 // UKEY2
 S.Ukey2Message = { message_type: [1, 'enum'], message_data: [2, 'bytes'] };
 S.CipherCommitment = { handshake_cipher: [1, 'enum'], commitment: [2, 'bytes'] };
-S.Ukey2ClientInit = { version: [1, 'i32'], random: [2, 'bytes'], cipher_commitments: [3, 'msg', S.CipherCommitment, 'rep'], next_protocol: [4, 'string'] };
-S.Ukey2ServerInit = { version: [1, 'i32'], random: [2, 'bytes'], handshake_cipher: [3, 'enum'], public_key: [4, 'bytes'] };
+S.Ukey2ClientInit = { version: [1, 'i32'], random: [2, 'bytes'], cipher_commitments: [3, 'msg', S.CipherCommitment, 'rep'], next_protocol: [4, 'string'], next_protocols: [5, 'string', undefined, 'rep'] };
+S.Ukey2ServerInit = { version: [1, 'i32'], random: [2, 'bytes'], handshake_cipher: [3, 'enum'], public_key: [4, 'bytes'], selected_next_protocol: [5, 'string'] };
 S.Ukey2ClientFinished = { public_key: [1, 'bytes'] };
 S.Ukey2Alert = { type: [1, 'enum'], error_message: [2, 'string'] };
 S.EcP256PublicKey = { x: [1, 'bytes'], y: [2, 'bytes'] };
@@ -172,8 +176,10 @@ class Inbound extends EventEmitter {
   constructor(sock, server) {
     super();
     this.sock = sock;
+    this.addr = String(sock.remoteAddress || '').replace(/^::ffff:/, '');
     this.srv = server;
     this.id = crypto.randomBytes(4).toString('hex');
+    this.born = mono();
     this.chunks = []; this.have = 0;   // what arrived and isn't a whole frame yet: pieces, joined only once it is
     this.state = 'request';          // request → clientInit → clientFinish → response → encrypted
     this.keys = null;
@@ -184,28 +190,33 @@ class Inbound extends EventEmitter {
     this.remote = { name: 'Android phone' };
     this.accepted = false;
     this.closed = false;
+    this.reported = false;           // 'failed' was said (once: see _failed)
     this.bytes = 0; this.total = 0; this.buffered = 0;
     this.pending = 0; this.held = false;   // bytes received and not written yet; the socket paused while there are many
+    this.wq = Promise.resolve();     // the writes, in one line (see _fileWrite)
     sock.setNoDelay(true);
     sock.on('data', (d) => this._data(d));
     sock.on('close', () => this._close('closed'));
     sock.on('error', () => this._close('error'));
     this.idle = setTimeout(() => this.fail('handshake timeout'), 15000);
-    this.lastRx = Date.now(); this.lastTx = Date.now();
+    this.lastRx = mono(); this.lastTx = mono();
     this.kaInterval = 5000; this.kaTimeout = 30000; this.kaSeq = 0;
   }
 
   // after the key exchange: answer and send keep-alives, and give up when the phone goes quiet
   _startKeepAlive() {
     clearTimeout(this.idle);
+    // (a phone says what it shares at once: a link that says nothing only holds a place others need)
+    const offerBy = mono() + 30000;
     this.kaTimer = setInterval(() => {
-      const now = Date.now();
+      const now = mono();
+      if (!this.offer && now > offerBy) return this.fail('shared nothing');
       if (!this.held && now - this.lastRx > this.kaTimeout) return this.fail('phone went quiet');
       if (now - this.lastTx >= this.kaInterval) this._send({ version: 1, v1: { type: V1.KEEP_ALIVE, keep_alive: { ack: false, seq_num: ++this.kaSeq } } });
     }, 1000);
   }
 
-  _touch() { this.lastRx = Date.now(); }
+  _touch() { this.lastRx = mono(); }
 
   // A frame comes in many network reads: they're kept as they are and joined once, when the frame is whole (joining
   // on every read copied a 512 KB chunk four or five times over).
@@ -215,10 +226,12 @@ class Inbound extends EventEmitter {
     while (this.have >= 4) {
       while (this.chunks[0].length < 4) this.chunks.splice(0, 2, Buffer.concat(this.chunks.slice(0, 2)));
       const len = this.chunks[0].readUInt32BE(0);
-      if (len > 5 * 1024 * 1024) return this.fail('frame too big');
+      // Until the key exchange is done anyone on the network can send anything: a phone's frames then are a few hundred
+      // bytes, and decoding a 5 MB one of tiny fields cost over half a second of the main thread and ~200 MB of memory
+      if (len > (this.state === 'encrypted' ? 5 * 1024 * 1024 : 64 * 1024)) return this.fail('frame too big');
       if (this.have < 4 + len) break;
       const frame = this._take(4 + len).subarray(4);
-      try { this._frame(frame); } catch (e) { this.srv.log('quick share:', e.message); return this.fail(e.message); }
+      try { this._frame(frame); } catch (e) { return this.fail(e.message); }
       if (this.closed) return;
     }
   }
@@ -237,25 +250,42 @@ class Inbound extends EventEmitter {
     return c.subarray(0, n);
   }
 
-  // A file's chunks are written in the background, in order (a write waits for the one before); the phone is held
-  // back (its socket paused) while much is waiting to be written. A failed write ends the share.
+  // The files' chunks are written in the background, in one line in the order they came (a phone sends one file after
+  // the other): a file is made at its first bytes and closed after its last before the next one is made, so one file
+  // is open at a time however many a share has. The phone is held back (its socket paused) while much is waiting to be
+  // written. A failed write ends the share.
   _fileWrite(f, buf) {
     this.pending += buf.length;
     if (this.pending > 16 * 1024 * 1024 && !this.held) { this.held = true; this.sock.pause(); }
-    f.w = f.w.then(() => writeAll(f.fd, buf)).then(() => {
+    this._queue(f, () => this._made(f).then(() => writeAll(f.fd, buf)).then(() => {
       this.pending -= buf.length;
       if (!this.held || this.pending >= 4 * 1024 * 1024) return;
       this.held = false;
       this._touch();
       if (!this.closed) this.sock.resume();
-    });
-    f.w.catch((e) => { f.bad = true; this.fail('disk ' + (e.code || e.message)); });
+    }));
+  }
+
+  // f.w: the last step of f's in the line (what closing it waits for)
+  _queue(f, step) {
+    const p = this.wq.then(step);
+    this.wq = p.catch(() => {});
+    f.w = p;
+    p.catch((e) => { f.bad = true; this.fail('disk ' + (e.code || e.message)); });
+    return p;
+  }
+
+  // a file is made when its first bytes come, or its end when it has none (see answer)
+  _made(f) {
+    if (f.made) return Promise.resolve();
+    f.made = true;
+    return new Promise((resolve, reject) => fs.open(f.tmp, 'w', 0o600, (e, fd) => { if (e) reject(e); else { f.fd = fd; resolve(); } }));
   }
 
   // every file and text is all here (the last of a file may still be being written)
   _allIn() { return [...this.files.values()].every((f) => f.end && !f.bad) && this.texts.every((t) => t.done); }
 
-  _write(bytes) { if (this.closed) return; const h = Buffer.alloc(4); h.writeUInt32BE(bytes.length, 0); this.lastTx = Date.now(); this.sock.write(Buffer.concat([h, bytes])); }
+  _write(bytes) { if (this.closed) return; const h = Buffer.alloc(4); h.writeUInt32BE(bytes.length, 0); this.lastTx = mono(); this.sock.write(Buffer.concat([h, bytes])); }
 
   _send(offlineFrame) {
     const bytes = pb.encode(S.OfflineFrame, offlineFrame);
@@ -281,7 +311,7 @@ class Inbound extends EventEmitter {
         if (!f.v1 || f.v1.type !== V1.CONNECTION_REQUEST || !f.v1.connection_request) throw new Error('expected a connection request');
         const cr = f.v1.connection_request;
         this.remote = parseEndpointInfo(cr.endpoint_info);
-        this.remote.name = String(this.remote.name || '').replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '') || 'Android phone';
+        this.remote.name = String(this.remote.name || '').replace(/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '') || 'Android phone';
         if (cr.keep_alive_interval_millis > 0 && cr.keep_alive_timeout_millis > cr.keep_alive_interval_millis) {
           this.kaInterval = Math.min(60000, cr.keep_alive_interval_millis); this.kaTimeout = Math.min(300000, cr.keep_alive_timeout_millis);
         }
@@ -296,13 +326,18 @@ class Inbound extends EventEmitter {
         if (!ci.random || ci.random.length !== 32) return this._alert(101, 'bad random');
         const cc = (ci.cipher_commitments || []).find((c) => c.handshake_cipher === P256_SHA512);
         if (!cc || !cc.commitment) return this._alert(102, 'no P256_SHA512');
-        if (ci.next_protocol !== 'AES_256_CBC-HMAC_SHA256') return this._alert(103, 'bad next protocol');
+        // The one protocol spoken here. A newer phone lists every one it can speak (next_protocols) and may want another
+        // first: it's picked from that list then, and the phone is told so (selected_next_protocol), as ukey.proto says.
+        const CBC = 'AES_256_CBC-HMAC_SHA256';
+        const picked = ci.next_protocol !== CBC && (ci.next_protocols || []).includes(CBC);
+        if (ci.next_protocol !== CBC && !picked) return this._alert(103, 'bad next protocol');
         this.clientInitRaw = Buffer.from(raw);
         this.commitment = cc.commitment;
         this.ecdh = crypto.createECDH('prime256v1');
         const pub = this.ecdh.generateKeys();                 // 0x04 || X || Y
         const pk = pb.encode(S.GenericPublicKey, { type: 1, ec_p256_public_key: { x: coord(pub.subarray(1, 33)), y: coord(pub.subarray(33, 65)) } });
-        const si = pb.encode(S.Ukey2ServerInit, { version: 1, random: crypto.randomBytes(32), handshake_cipher: P256_SHA512, public_key: pk });
+        const si = pb.encode(S.Ukey2ServerInit, Object.assign({ version: 1, random: crypto.randomBytes(32), handshake_cipher: P256_SHA512, public_key: pk },
+          picked ? { selected_next_protocol: CBC } : {}));
         this.serverInitRaw = pb.encode(S.Ukey2Message, { message_type: UKEY.SERVER_INIT, message_data: si });
         this._write(this.serverInitRaw);
         this.state = 'clientFinish';
@@ -382,7 +417,7 @@ class Inbound extends EventEmitter {
     if (h.type === PAYLOAD.BYTES) {
       let p = this.payloads.get(key);
       if (!p) {
-        // a hostile sender could open endless control payloads and never finish them; keep the lid on before accept
+        // a hostile sender could open endless control payloads and never finish them; keep the lid on (before accept and after)
         if (this.payloads.size >= 32) throw new Error('too many payloads');
         p = { chunks: [], size: 0 }; this.payloads.set(key, p);
       }
@@ -420,7 +455,7 @@ class Inbound extends EventEmitter {
       if (c.flags & LAST_CHUNK) {
         if (f.got !== f.size) throw new Error('file shorter than announced');
         f.end = true;                                  // all here: done once the last of it is written and closed
-        f.w.then(() => closeFile(f)).then(() => { f.done = true; this._finishIfDone(); }, () => {});
+        this._queue(f, () => this._made(f).then(() => closeFile(f))).then(() => { f.done = true; this._finishIfDone(); }, () => {});
       }
     }
   }
@@ -434,17 +469,35 @@ class Inbound extends EventEmitter {
       case SHARE.PAIRED_KEY_RESULT:
         return;
       case SHARE.INTRODUCTION: {
+        if (this.offer) return;                        // (one a share: a second can't change what the user was asked about)
         const intro = v1.introduction || {};
-        const BIDI = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;      // direction tricks: "x\u202Egpj.exe" shows as "xexe.jpg"
+        const BIDI = /[\u061c\u200e\u200f\u202a-\u202E\u2066-\u2069]/g;      // direction tricks: "x\u202Egpj.exe" shows as "xexe.jpg"
         const files = (intro.file_metadata || []).map((m) => ({
           name: path.basename(String(m.name || 'file').replace(/\\/g, '/')).replace(BIDI, '') || 'file',
           size: Number(m.size || 0n), payload_id: m.payload_id, mime: m.mime_type || 'application/octet-stream',
         }));
         this.texts = (intro.text_metadata || []).map((t) => ({ title: t.text_title || '', type: t.type || 0, payload_id: t.payload_id, size: Number(t.size || 0n) }));
         if (!files.length && !this.texts.length) { this._sendSharing({ type: SHARE.RESPONSE, connection_response: { status: 4 } }); return this.fail('nothing supported'); }
+        // What a phone sends: sizes from 0 up and an id of its own for each item. A negative size could cancel out a huge
+        // one and slip past the free-space check (a broken or hostile sender): such a share is turned down, nobody asked.
+        const all = files.concat(this.texts);
+        if (all.some((x) => !Number.isSafeInteger(x.size) || x.size < 0) || new Set(all.map((x) => String(x.payload_id))).size !== all.length) {
+          this._sendSharing({ type: SHARE.RESPONSE, connection_response: { status: 4 } });
+          return this.fail('bad introduction');
+        }
+        this.askedAt = this.srv._mayAsk(this.addr);
+        if (!this.askedAt) {
+          // (asked too often: told no without a question, see QuickShare._mayAsk)
+          this.srv._note('a share from ' + this.addr + ' turned down without asking (asked too often)');
+          this.answered = true;
+          this._sendSharing({ type: SHARE.RESPONSE, connection_response: { status: 2 } });
+          setTimeout(() => { this._bye(); this._close('declined'); }, 1000);
+          return;
+        }
         this.offer = { files, texts: this.texts };
         this.total = files.reduce((s, f) => s + f.size, 0);
-        this.emit('request', { id: this.id, from: this.remote.name, pin: this.pin, files: files.map((f) => ({ name: f.name, size: f.size, mime: f.mime })), texts: this.texts.map((t) => ({ title: t.title, type: t.type })) });
+        // (addr: where it comes from, so the window's line of shares waiting their turn can't be filled from one place)
+        this.emit('request', { id: this.id, from: this.remote.name, addr: this.addr, pin: this.pin, files: files.map((f) => ({ name: f.name, size: f.size, mime: f.mime })), texts: this.texts.map((t) => ({ title: t.title, type: t.type })) });
         return;
       }
       case SHARE.CANCEL:
@@ -460,6 +513,11 @@ class Inbound extends EventEmitter {
     if (this.closed || !this.offer || this.answered) return;
     this.answered = true;
     if (!accept) {
+      // (the user's no counts against its address; no answer in time, or no turn for it, doesn't)
+      if (why !== 'timeout' && why !== 'busy') this.srv._turnedDown(this.addr);
+      // (one with no turn for it was never put to the user: it isn't one of the minute's questions, or shares sent only
+      // to be told that, from one device, would leave none for the user's own)
+      if (why === 'busy') this.srv._notAsked(this.askedAt);
       this._sendSharing({ type: SHARE.RESPONSE, connection_response: { status: why === 'timeout' ? 5 : 2 } });
       setTimeout(() => { this._bye(); this._close('declined'); }, 1000);
       return;
@@ -467,24 +525,29 @@ class Inbound extends EventEmitter {
     // the files can't be made where they're staged (that drive was unplugged, a read-only disk): the phone hears no at
     // once, rather than waiting for an answer that never comes
     const refuse = (status, why) => {
-      for (const f of this.files.values()) { try { fs.closeSync(f.fd); fs.unlinkSync(f.tmp); } catch (e) { /* ignore */ } }
+      for (const f of this.files.values()) { try { if (f.fd != null) fs.closeSync(f.fd); if (f.made) fs.unlinkSync(f.tmp); } catch (e) { /* ignore */ } }
       this.files.clear();
       this._sendSharing({ type: SHARE.RESPONSE, connection_response: { status } });
-      this.emit('failed', { id: this.id, why, accepted: false });
+      this._failed(why, false);
       setTimeout(() => { this._bye(); this._close(why); }, 1000);
     };
-    try { fs.mkdirSync(this.srv.tmpDir, { recursive: true }); } catch (e) { this.srv.log('quick share: ' + e.message); return refuse(2, 'disk'); }
+    // (what's arriving is the user's own: no other account on the computer can look into the folder or read a file)
+    try { fs.mkdirSync(this.srv.tmpDir, { recursive: true, mode: 0o700 }); } catch (e) { this.srv.log('quick share: ' + e.message); return refuse(2, 'disk'); }
     // not enough room for what the phone offers: tell it so (Quick Share shows "not enough space") instead of failing midway
     try {
       const st = fs.statfsSync(this.srv.tmpDir);
       if (st.bavail * st.bsize < this.total + 256 * 1024 * 1024) return refuse(3, 'no space');
     } catch (e) { /* can't tell: go ahead */ }
+    // Each file is made when its first bytes come (a phone sends them one after another), so a share of hundreds of
+    // photos neither keeps hundreds of files open (Windows lets a program have 512) nor makes them all at once, here on
+    // the main thread, holding up the window and every other transfer. The first is made now: a folder that can't take
+    // files is known before the phone is told yes.
     try {
-      for (const f of this.offer.files) {
-        const tmp = path.join(this.srv.tmpDir, 'qs-' + this.id + '-' + crypto.randomBytes(3).toString('hex') + '.part');
-        this.files.set(String(f.payload_id), { meta: f, tmp, fd: fs.openSync(tmp, 'w'), got: 0, size: f.size,
+      this.offer.files.forEach((f, i) => {
+        const tmp = path.join(this.srv.tmpDir, 'qs-' + this.id + '-' + i + '.part');
+        this.files.set(String(f.payload_id), { meta: f, tmp, fd: i ? null : fs.openSync(tmp, 'w', 0o600), made: !i, got: 0, size: f.size,
           w: Promise.resolve(), end: false, done: false });
-      }
+      });
     } catch (e) { this.srv.log('quick share: ' + e.message); return refuse(2, 'disk'); }
     this.accepted = true;
     this._touch();
@@ -522,8 +585,19 @@ class Inbound extends EventEmitter {
     if (this.closed) return;
     // (a share that's all here but for the last writes still finishes: see _close)
     const finishing = !this.stopped && this.accepted && this._allIn();
-    if (!this.finished && !finishing) this.emit('failed', { id: this.id, why, accepted: this.accepted });
+    if (!finishing) this._failed(why);
     this._close(why);
+  }
+
+  // A share that went wrong, or whose phone left, is said once: the window's question about it goes, or its card and
+  // Transfers row end (said twice, the window showed its note twice)
+  _failed(why, accepted) {
+    if (this.reported || this.finished) return;
+    this.reported = true;
+    // (a connection that ended before it offered anything was never put to the user: there's nothing to say to them, and
+    // it's only noted in the log, a few times a minute at most: see QuickShare._note)
+    if (!this.offer && !this.accepted) return this.srv._note('a connection from ' + this.addr + ' ended before it shared anything: ' + why);
+    this.emit('failed', { id: this.id, why, accepted: accepted == null ? this.accepted : accepted });
   }
 
   _close(why) {
@@ -540,7 +614,7 @@ class Inbound extends EventEmitter {
       Promise.all(settled).then(() => {
         if (files.some((f) => f.bad)) {
           for (const f of files) fs.unlink(f.tmp, () => {});
-          this.emit('failed', { id: this.id, why: 'disk', accepted: true });
+          this._failed('disk', true);
           return;
         }
         for (const f of files) f.done = true;
@@ -548,7 +622,8 @@ class Inbound extends EventEmitter {
       });
     } else {
       files.forEach((f, i) => { if (!f.done || !this.finished) settled[i].then(() => fs.unlink(f.tmp, () => {})); });
-      if (!this.finished && this.accepted && why !== 'done') this.emit('failed', { id: this.id, why, accepted: true });
+      // the phone left while its files came, or while the PC was still asking about them (the question goes)
+      if (why !== 'done' && (this.accepted || (this.offer && !this.answered))) this._failed(why);
     }
     const sock = this.sock;
     try { sock.end(); } catch (e) { /* ignore */ }
@@ -563,13 +638,45 @@ class QuickShare extends EventEmitter {
   constructor(opts) {
     super();
     this.name = opts.name || os.hostname();
+    // (Flick passes a folder of the user's own; the shared temp folder is only for tests)
     this.tmpDir = opts.tmpDir || path.join(os.tmpdir(), 'flick-quickshare');
     this.log = opts.log || (() => {});
     this.conns = new Map();
     this.server = null;
     this.mdns = null;
     this.state = 'off';
+    this.asked = [];                 // when shares were put to the user (the last minute's)
+    this.downs = new Map();          // address -> when its shares were turned down (the last minute's)
+    this.noted = { at: 0, n: 0, more: 0 };   // connections that came to nothing, noted this minute (see _note)
   }
+
+  // A connection that came to nothing (it ended before it offered anything: a phone that gave up, or anything on the
+  // network sending what isn't Quick Share; or a share turned down unasked) is noted in the log at most 5 times a
+  // minute: anyone on the network can open such connections one after another, without end, and each would be a line
+  // written out. The others are counted, and the count is said with the next one noted.
+  _note(text) {
+    const now = mono(), c = this.noted;
+    if (now - c.at >= 60000) { c.at = now; c.n = 0; }
+    if (++c.n > 5) { c.more++; return; }
+    this.log('quick share: ' + text + (c.more ? ' (and ' + c.more + ' more such connections before this one)' : ''));
+    c.more = 0;
+  }
+
+  // Each question brings Flick's window to the front, so something on the network asking again and again would keep it
+  // in front of whatever the user does: at most 12 questions a minute (a person shares once every few seconds at most),
+  // and a device turned down twice in a minute isn't asked about for 20 s (a share resent after a mis-tap still is)
+  _mayAsk(addr) {
+    const now = mono();
+    for (const [a, ts] of this.downs) { const k = ts.filter((t) => now - t < 60000); if (k.length) this.downs.set(a, k); else this.downs.delete(a); }
+    const d = this.downs.get(addr) || [];
+    if (d.length >= 2 && now - d[d.length - 1] < 20000) return false;
+    this.asked = this.asked.filter((t) => now - t < 60000);
+    if (this.asked.length >= 12) return false;
+    this.asked.push(now);
+    return now;
+  }
+  _notAsked(at) { const i = this.asked.indexOf(at); if (i >= 0) this.asked.splice(i, 1); }
+  _turnedDown(addr) { this.downs.set(addr, (this.downs.get(addr) || []).concat(mono())); }
 
   _set(s) { if (s !== this.state) { this.state = s; this.emit('state', s); } }
 
@@ -602,8 +709,13 @@ class QuickShare extends EventEmitter {
 
   _conn(sock) {
     // a flood of half-open handshakes shouldn't pile up; hold only a handful at once
-    const live = [...this.conns.values()].filter((x) => !x.accepted).length;
-    if (this.conns.size >= 24 || live >= 8) { try { sock.destroy(); } catch (e) { /* ignore */ } return; }
+    const waiting = [...this.conns.values()].filter((x) => !x.accepted);
+    if (waiting.length >= 8) {
+      // full: the oldest that has shared nothing yet makes way (never one the user is being asked about)
+      const old = waiting.filter((x) => !x.offer && mono() - x.born > 3000).sort((a, b) => a.born - b.born)[0];
+      if (old) { old.fail('made way'); waiting.splice(waiting.indexOf(old), 1); }
+    }
+    if (this.conns.size >= 24 || waiting.length >= 8) { try { sock.destroy(); } catch (e) { /* ignore */ } return; }
     const c = new Inbound(sock, this);
     this.conns.set(c.id, c);
     for (const ev of ['request', 'accepted', 'progress', 'done', 'failed']) c.on(ev, (m) => this.emit(ev, m));

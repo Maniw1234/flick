@@ -14,6 +14,7 @@
 .fph .fname > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fph .d { color: var(--sub); font-size: 12px; margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fbtn { flex: none; padding: 4px 10px; font-size: 12.5px; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.fbtn[aria-disabled="true"] { opacity: .6; cursor: default; }
 .fbtn svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 
 /* send a link */
@@ -21,10 +22,8 @@
 .flink input[type=text] { flex: 1; min-width: 0; }
 .flink .btn { flex: none; padding: 6px 16px; }
 
-/* history entry and synced folders on the main view */
-#fHistEntry { margin-top: 8px; }
+/* the entries' icons, and synced folders on the main view */
 .fhico { width: 26px; height: 26px; flex: none; fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-#fHistSub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fpair { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); min-width: 0; }
 .card > .fpair:first-child { border-top: 0; }
 .fpair .fmain { flex: 1; min-width: 0; }
@@ -70,6 +69,7 @@
 .fhacts .wx[hidden] { display: none; }
 .fhempty { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 70px 18px 0; }
 .fhempty .psub { line-height: 1.45; max-width: 290px; }
+.fhempty:focus { outline: none; }
 
 /* "Find my phone": ringing */
 .fring-ico .w1, .fring-ico .w2 { animation: fring 1.2s ease-in-out infinite; }
@@ -77,3 +77,7 @@
 @keyframes fring { 0%, 100% { opacity: .15; } 50% { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .fring-ico .w1, .fring-ico .w2 { animation: none; } }
 #fRing .psub { line-height: 1.45; }
+@media (forced-colors: active) {
+  .fradio[aria-checked="true"] { forced-color-adjust: none; border-color: Highlight; background: Highlight; }
+  .fradio[aria-checked="true"]::after { background: HighlightText; }
+}

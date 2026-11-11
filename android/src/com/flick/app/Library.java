@@ -62,6 +62,12 @@ public final class Library {
     private String listCache;                        // listJson() until the list changes (guarded by this)
     private final Object disk = new Object();        // one write of lib.json at a time
     private long changes, written;                   // the list's version (this) and the one on disk (disk)
+    // ids lib.json held when the app started (also items whose file was gone), and whether it could be read: sweep
+    // removes only folders on no list, and nothing at all when the list couldn't be read
+    private final java.util.Set<String> listed = new java.util.HashSet<String>();
+    private boolean listRead;
+    // imports under way in this process (guarded by itself): their folders are never swept
+    private final java.util.Set<String> importing = new java.util.HashSet<String>();
     // removals finish here (lib.json, then the files), off the caller's thread: the page's bridge, say
     private static final ExecutorService LATER = Transfers.pool("flick-lib", 1);
 
@@ -77,15 +83,75 @@ public final class Library {
 
     // ------------------------------------------------------------ persistence
     private synchronized void load() {
+        // (a kill between the two steps of save's fallback leaves only the complete .tmp)
+        File f = index.exists() ? index : new File(index.getPath() + ".tmp");
+        if (!f.exists()) { listRead = true; return; }
+        // A list that couldn't be read (too many files open, a disk error) isn't a damaged one: it's tried again, and if
+        // it still can't be read it stays where it is, as it is; this run shows the list as the files in lib/ give it
+        // (nothing is swept), and only the next change to the list writes over it.
+        String s = null;
+        for (int tries = 0; s == null && tries < 3; tries++) {
+            try {
+                if (tries > 0) Thread.sleep(40);
+                // read whole, however long the list: cut at a size, a big list read as damaged
+                long len = f.length();
+                if (len > Integer.MAX_VALUE - 1024) throw new IOException("too big");
+                s = new String(readAll(new FileInputStream(f), (int) len + 1024), "UTF-8");
+            } catch (Throwable e) { s = null; }
+        }
+        if (s == null) { rebuild(); return; }
         try {
-            if (!index.exists()) return;
-            String s = new String(readAll(new FileInputStream(index), 8 * 1024 * 1024), "UTF-8");
             JSONArray a = new JSONArray(s);
             for (int i = 0; i < a.length(); i++) {
                 JSONObject o = a.getJSONObject(i);
+                listed.add(o.optString("id"));
                 if (fileOf(o).exists()) items.add(o);
             }
-        } catch (Throwable e) { /* start empty */ }
+            listRead = true;
+        } catch (Throwable e) {
+            // damaged: kept aside, and the list made again from the files in lib/ (started empty, the next change wrote a
+            // list without them, and the next start's sweep took them for leftovers). Nothing is swept this run.
+            items.clear();
+            listed.clear();
+            File aside = new File(index.getPath() + ".damaged");
+            if (!f.renameTo(aside)) { /* left where it is: rewritten at the next change */ }
+            rebuild();
+            save();
+        }
+    }
+
+    /** The list as the files in lib/<id>/ show it (lib.json damaged): one item per folder an import finished, newest first. */
+    private void rebuild() {
+        File[] dirs = root.listFiles();
+        if (dirs == null) return;
+        ArrayList<JSONObject> found = new ArrayList<JSONObject>();
+        for (File d : dirs) {
+            if (!d.isDirectory() || !d.getName().matches("[0-9a-f]{16}") || new File(d, IMPORTING).exists()) continue;
+            File[] in = d.listFiles();
+            File file = null;
+            if (in != null) for (File x : in) if (x.isFile() && !x.getName().startsWith(".")) { file = x; break; }
+            if (file == null) continue;
+            String name = file.getName(), ext = extOf(name);
+            String mime = null;
+            try { mime = ext.length() > 0 ? MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) : null; } catch (Throwable e) { /* unknown */ }
+            if (mime == null) mime = "application/octet-stream";
+            try {
+                JSONObject o = new JSONObject();
+                o.put("id", d.getName());
+                o.put("name", name);
+                o.put("size", file.length());
+                o.put("mime", mime);
+                o.put("ext", ext);
+                o.put("kind", kindOf(mime, ext));
+                o.put("added", file.lastModified());
+                if (new File(thumbs, d.getName() + ".jpg").isFile()) o.put("hasThumb", true);
+                found.add(o);
+            } catch (Throwable e) { /* that one isn't listed */ }
+        }
+        Collections.sort(found, new java.util.Comparator<JSONObject>() {
+            @Override public int compare(JSONObject x, JSONObject y) { long p = x.optLong("added"), q = y.optLong("added"); return p == q ? 0 : (p > q ? -1 : 1); }
+        });
+        items.addAll(found);
     }
 
     /**
@@ -156,14 +222,24 @@ public final class Library {
         return removeAll(Collections.singletonList(id)) > 0;
     }
 
+    /** Which items sends not over yet still hold (Sends sets it: the ids its Outbox's unfinished jobs read). */
+    interface Held { java.util.Set<String> ids(); }
+    static volatile Held held;
+
     /**
      * Several items at once, with one rewrite of lib.json for all of them. Returns how many were removed: they are off
      * the list at once; lib.json and their files follow on Flick's own thread (a big video takes a moment to delete).
+     * An item a send still holds (queued, going, waiting for the PC, paused) stays until the send is over: removed, the
+     * send failed later as "not on this phone any more" (Clear the Flick list with a send waiting for the PC).
      */
     public int removeAll(Collection<String> ids) {
+        Held h = held;
+        if (h == null) { try { Sends.get(ctx); } catch (Throwable e) { /* no sends to hold any */ } h = held; }
+        java.util.Set<String> busy = h == null ? Collections.<String>emptySet() : h.ids();
         final ArrayList<String> gone = new ArrayList<String>();
         synchronized (this) {
             for (String id : ids) {
+                if (busy.contains(id)) continue;
                 JSONObject o = find(id);
                 if (o == null) continue;
                 items.remove(o);
@@ -186,21 +262,41 @@ public final class Library {
         return gone.size();
     }
 
-    /** Import folders a killed app left half-written: still marked as importing a day later, and not on the shelf. */
+    /**
+     * Folders a killed app left on no list (as the app starts, off the main thread): an import cut off (a send from
+     * another phone, a share) and what "Clear the Flick list" hadn't deleted yet. Nobody could see or remove them.
+     * Never a folder an import of this process is writing, one lib.json listed at the start, one changed in the last
+     * few minutes, or anything at all when lib.json couldn't be read; only Flick's own lib/<id> folders.
+     */
     void sweep() {
         File[] dirs = root.listFiles();
         if (dirs == null) return;
-        long old = System.currentTimeMillis() - 24L * 60 * 60 * 1000;
+        boolean read;
+        synchronized (this) { read = listRead; }
+        String base;
+        try { base = root.getCanonicalPath(); } catch (IOException e) { return; }
+        long recent = System.currentTimeMillis() - 5L * 60 * 1000;
         for (File d : dirs) {
+            String id = d.getName();
+            if (!d.isDirectory() || !id.matches("[0-9a-f]{16}")) continue;
             File mark = new File(d, IMPORTING);
-            if (!mark.isFile() || mark.lastModified() >= old) continue;
-            if (find(d.getName()) != null) { mark.delete(); continue; }   // it did make it onto the shelf
+            synchronized (importing) { if (importing.contains(id)) continue; }
+            synchronized (this) {
+                if (find(id) != null) { if (mark.isFile()) mark.delete(); continue; }   // it did make it onto the shelf
+                if (!read || listed.contains(id)) continue;
+            }
+            if (d.lastModified() >= recent || (mark.isFile() && mark.lastModified() >= recent)) continue;
+            try { if (!d.getCanonicalFile().getParent().equals(base)) continue; } catch (IOException e) { continue; }
             deleteTree(d);
-            new File(thumbs, d.getName() + ".jpg").delete();
+            new File(thumbs, id + ".jpg").delete();
         }
     }
 
+    /** id is one of the shelf's (newId: 16 hex digits), so a name made from it stays inside Flick's own folders. */
+    static boolean isId(String id) { return id != null && id.matches("[0-9a-f]{16}"); }
+
     public String thumbBase64(String id) {
+        if (!isId(id)) return "";
         File t = new File(thumbs, id + ".jpg");
         if (!t.exists()) return "";
         try { return Base64.encodeToString(readAll(new FileInputStream(t), 4 * 1024 * 1024), Base64.NO_WRAP); }
@@ -214,7 +310,7 @@ public final class Library {
             java.util.List<String> seg = u.getPathSegments();
             if (seg.size() == 2 && "thumb".equals(seg.get(0))) {
                 File t = new File(thumbs, seg.get(1) + ".jpg");
-                if (!t.exists()) return notFound();
+                if (!isId(seg.get(1)) || !t.exists()) return notFound();
                 WebResourceResponse r = new WebResourceResponse("image/jpeg", null, new FileInputStream(t));
                 Map<String, String> h = new HashMap<String, String>();
                 h.put("Cache-Control", "max-age=31536000");
@@ -285,6 +381,11 @@ public final class Library {
 
     public JSONObject importStream(InputStream in, String name, String mime, Progress p) throws IOException {
         String id = newId();
+        synchronized (importing) { importing.add(id); }
+        try { return importStream(id, in, name, mime, p); } finally { synchronized (importing) { importing.remove(id); } }
+    }
+
+    private JSONObject importStream(String id, InputStream in, String name, String mime, Progress p) throws IOException {
         File dir = new File(root, id);
         dir.mkdirs();
         File mark = new File(dir, IMPORTING);
@@ -309,6 +410,38 @@ public final class Library {
             deleteTree(dir);
             throw e;
         }
+        return added(id, f, safe, n, mime, mark);
+    }
+
+    /**
+     * A complete file on Flick's own storage (one another phone sent), moved onto the shelf as name: no copy. Copied
+     * when it can't be moved (then src stays where it was).
+     */
+    public JSONObject importFile(File src, String name, String mime) throws IOException {
+        String id = newId();
+        synchronized (importing) { importing.add(id); }
+        try {
+            File dir = new File(root, id);
+            String safe = sanitize(name);
+            File f = new File(dir, safe);
+            // marked before the file goes in, as importStream does: a kill before lib.json lists it leaves a folder
+            // sweep knows to remove
+            File mark = new File(dir, IMPORTING);
+            boolean marked = dir.mkdirs();
+            if (marked) { try { marked = mark.createNewFile(); } catch (IOException e) { marked = false; } }
+            if (!marked || !src.renameTo(f)) {
+                deleteTree(dir);
+                InputStream in = new FileInputStream(src);
+                try { return importStream(id, in, safe, mime, null); } finally { try { in.close(); } catch (Throwable e) { /* ignore */ } }
+            }
+            return added(id, f, safe, f.length(), mime, mark);
+        } finally {
+            synchronized (importing) { importing.remove(id); }
+        }
+    }
+
+    /** The shelf's entry for a file now complete in lib/<id>/: its type, thumbnail, place at the top. */
+    private JSONObject added(String id, File f, String safe, long n, String mime, File mark) {
         String ext = extOf(safe);
         if (mime == null || mime.length() == 0 || "application/octet-stream".equals(mime)) {
             String g = ext.length() > 0 ? MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) : null;
@@ -330,7 +463,7 @@ public final class Library {
             listCache = null;
         }
         save();
-        mark.delete();
+        if (mark != null) mark.delete();
         return publicJson(o);
     }
 
@@ -345,7 +478,9 @@ public final class Library {
 
     static String sanitize(String n) {
         if (n == null) n = "file";
-        n = n.replaceAll("[\\\\/:*?\"<>|\\u0000-\\u001f]", "_").trim();
+        // (and the invisible direction marks, as files from other phones and on the PC: "report<U+202E>fdp.apk" shows in
+        // a file manager as "reportkpa.pdf", an app posing as a PDF)
+        n = n.replaceAll("[\\\\/:*?\"<>|\\u0000-\\u001f\\u061c\\u200e\\u200f\\u202a-\\u202e\\u2066-\\u2069]", "_").trim();
         while (n.startsWith(".")) n = n.substring(1);
         if (n.length() == 0) n = "file";
         // At most 150 characters and 237 bytes (file systems allow 255 bytes per name; this leaves room for " (2)" and
@@ -478,6 +613,11 @@ public final class Library {
         o2.inSampleSize = s;
         Bitmap b = BitmapFactory.decodeFile(f.getPath(), o2);
         if (b == null) return null;
+        return scaleTo(oriented(b, f), max);
+    }
+
+    /** b (decoded from f by BitmapFactory, which doesn't) turned the way f's EXIF says it's seen. */
+    static Bitmap oriented(Bitmap b, File f) {
         try {
             ExifInterface ex = new ExifInterface(f.getPath());
             int or = ex.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
@@ -490,7 +630,7 @@ public final class Library {
                 b = r;
             }
         } catch (Throwable e) { /* ignore orientation */ }
-        return scaleTo(b, max);
+        return b;
     }
 
     @TargetApi(28)
@@ -548,7 +688,16 @@ public final class Library {
             r.setDataSource(f.getPath());
             byte[] pic = r.getEmbeddedPicture();
             if (pic == null) return null;
-            return scaleTo(BitmapFactory.decodeByteArray(pic, 0, pic.length), max);
+            // decoded at about the size wanted, not whole: a cover can be 3000 px a side (36 MB decoded), and a music
+            // folder's thumbnails are made four at a time
+            BitmapFactory.Options o = new BitmapFactory.Options();
+            o.inJustDecodeBounds = true;
+            BitmapFactory.decodeByteArray(pic, 0, pic.length, o);
+            int s = 1;
+            while (o.outWidth / (s * 2) >= max && o.outHeight / (s * 2) >= max) s *= 2;
+            BitmapFactory.Options o2 = new BitmapFactory.Options();
+            o2.inSampleSize = s;
+            return scaleTo(BitmapFactory.decodeByteArray(pic, 0, pic.length, o2), max);
         } catch (Throwable e) { return null; }
         finally { try { r.release(); } catch (Throwable e) { /* ignore */ } }
     }

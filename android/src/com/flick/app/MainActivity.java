@@ -22,6 +22,7 @@ import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.RoundedCorner;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
@@ -35,6 +36,7 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+import android.widget.Toast;
 import android.webkit.WebViewClient;
 import android.widget.TextView;
 
@@ -56,25 +58,46 @@ public class MainActivity extends Activity {
     private volatile boolean ready = false;
     private final ArrayList<String> queue = new ArrayList<String>();
     private String devId, devName;
-    private AppLock lock;                            // "Lock Flick" (Settings)
+    private volatile AppLock lock;                   // "Lock Flick" (Settings)
 
     AppLock lock() { return lock; }
+
+    private String crashLater;                       // what made Flick close, shown once Lock Flick is unlocked (main thread)
+
+    /** Lock Flick was unlocked (main thread): a crash report that waited for it shows now. */
+    void unlocked() {
+        String c = crashLater;
+        crashLater = null;
+        if (c == null) return;
+        try { startActivity(new Intent(this, CrashActivity.class).putExtra(CrashActivity.EXTRA, c)); }
+        catch (Throwable e) { /* Settings › Send feedback still offers it */ }
+    }
 
     // ------------------------------------------------------------ lifecycle
     @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
-        // Flick closed unexpectedly last time: say what happened (once), instead of starting as usual
+        // Flick closed unexpectedly last time: say what happened (once), instead of starting as usual. Not when it was
+        // opened to take something (another app's share, the phone on a USB cable): that would be lost behind the report
+        // and its Open Flick; the report waits for the next time Flick is opened as usual
         String crash = null;
-        try { crash = CrashReport.take(this); } catch (Throwable e) { /* ignore */ }
+        Intent launch = getIntent();
+        String act = launch == null ? null : launch.getAction();
+        boolean taking = act != null && !Intent.ACTION_MAIN.equals(act) && (launch.getFlags() & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) == 0;
+        if (!taking) { try { crash = CrashReport.take(this); } catch (Throwable e) { /* ignore */ } }
         if (crash != null && !crash.contains("CrashActivity")) {     // (never a loop of crash screens)
-            try { startActivity(new Intent(this, CrashActivity.class).putExtra(CrashActivity.EXTRA, crash)); finish(); return; }
-            catch (Throwable e) { /* start as usual */ }
+            // with Lock Flick on it waits until Flick is unlocked: what went wrong can name a file or a device
+            if (AppLock.on(this) && AppLock.secure(this)) crashLater = crash;
+            else {
+                try { startActivity(new Intent(this, CrashActivity.class).putExtra(CrashActivity.EXTRA, crash)); finish(); return; }
+                catch (Throwable e) { /* start as usual */ }
+            }
         }
         Page.attach(this);                           // background features reach the page through it
         lock = new AppLock(this);
         setupWindow();
+        if (Build.VERSION.SDK_INT >= 33) Api33.onBack(this);
 
         try {
             web = new WebView(this);
@@ -99,7 +122,9 @@ public class MainActivity extends Activity {
         s.setDomStorageEnabled(true);
         s.setAllowFileAccess(true);
         s.setAllowContentAccess(false);
-        s.setTextZoom(100);
+        // the page's text at the size the user picked for the phone (Settings › Display › Font size), before it's drawn
+        zoom = textZoom(getResources().getConfiguration());
+        s.setTextZoom(zoom);
         s.setSupportZoom(false);
         s.setBuiltInZoomControls(false);
         s.setDisplayZoomControls(false);
@@ -117,13 +142,15 @@ public class MainActivity extends Activity {
                 if (u == null || !u.startsWith("https://flick.local/")) return null;
                 if ("/t".equals(uri.getPath())) return Thumbs.respond(MainActivity.this, uri);
                 if (uri.getPath() != null && uri.getPath().startsWith("/hand/")) return handFile(uri.getPath().substring(6));
+                if (uri.getPath() != null && uri.getPath().startsWith("/notice/")) return noticeFile(uri.getPath().substring(8));
+                if (uri.getPath() != null && uri.getPath().startsWith("/sound/")) return soundFile(uri.getPath().substring(7));
                 return Library.get(MainActivity.this).intercept(u);
             }
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest req) { return true; }
             @Override
             public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
-                ui.post(new Runnable() { @Override public void run() { recreate(); } });
+                renderGone(view, detail != null && detail.didCrash());
                 return true;
             }
         });
@@ -163,6 +190,7 @@ public class MainActivity extends Activity {
         });
         setContentView(web);
         lock.onCreate();                             // covered from the start when Flick is locked
+        oldWebView();
         web.loadUrl("file:///android_asset/www/index.html");
         // a share is handled once: not again when Android restores the activity after killing the app (state != null)
         if (state == null) handleIntent(getIntent());
@@ -178,20 +206,127 @@ public class MainActivity extends Activity {
             }
         });
         Thumbs.trimSoon(this);                       // the thumbnail cache stays a reasonable size
+        try { Peers.get(this).opened(this); opened = true; } catch (Throwable e) { Log.w(TAG, "peers: " + e); }   // other phones can send here
+        // a USB cable to a computer: the page hears it at once, and a PC over the cable is looked for fast
+        usb = new UsbWatch.Listener() {
+            @Override public void changed(boolean cable, boolean tether) { if (cable) { try { discovery().boost(8000); } catch (Throwable e) { /* ignore */ } } }
+        };
+        UsbWatch.start(this, usb);
+        UsbPeer.start(this);                         // another phone on the same cable
     }
 
     /** What shows when there's no WebView to show the page with; a tap tries again. */
     private void noWebView() {
-        TextView t = new TextView(this);
-        t.setText("Flick shows its screen with Android System WebView, and that isn't available right now: it may be "
+        message("Flick shows its screen with Android System WebView, and that isn't available right now: it may be "
                 + "updating, or turned off.\n\nTap to try again, or turn it on in Settings › Apps › Android System WebView.");
+    }
+
+    /** The Chromium version the page's screens are made for: on an older Android System WebView they still work, plainer. */
+    static final int WEBVIEW_MIN = 87;
+
+    /**
+     * An Android System WebView that was never updated (no Play updates, updates turned off) draws the page with an old
+     * engine: it works, plainer than it should look. Said once for each such version, in a short note that doesn't stop
+     * anything, with what to update.
+     */
+    private void oldWebView() {
+        try {
+            // (the engine's own version, from its user agent: a vendor's WebView package may number itself its own way)
+            int major = chromeMajor(WebSettings.getDefaultUserAgent(this));
+            if (major <= 0 || major >= WEBVIEW_MIN) return;
+            SharedPreferences p = getSharedPreferences("flick", MODE_PRIVATE);
+            if (p.getInt("oldWebViewSaid", 0) == major) return;
+            p.edit().putInt("oldWebViewSaid", major).apply();
+            Toast.makeText(this, "Flick looks best with a newer Android System WebView. Update “Android System WebView” "
+                    + "in the Play Store.", Toast.LENGTH_LONG).show();
+        } catch (Throwable e) { /* (nothing to say then) */ }
+    }
+
+    /** "... Chrome/86.0.4240.198 Mobile ..." -> 86; 0 when it can't be read (then nothing is said). */
+    static int chromeMajor(String ua) {
+        if (ua == null) return 0;
+        int at = ua.indexOf("Chrome/");
+        if (at < 0) return 0;
+        int i = at + 7, n = 0, d = 0;
+        while (i < ua.length() && Character.isDigit(ua.charAt(i)) && d < 6) { n = n * 10 + (ua.charAt(i++) - '0'); d++; }
+        return d == 0 ? 0 : n;
+    }
+
+    /** A few words instead of the page; a tap tries again (a new page). */
+    private void message(String text) {
+        TextView t = new TextView(this);
+        t.setText(text);
         t.setTextColor(Color.WHITE);
         t.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
         t.setGravity(Gravity.CENTER);
         int pad = Math.round(32 * getResources().getDisplayMetrics().density);
         t.setPadding(pad, pad, pad, pad);
-        t.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { recreate(); } });
+        t.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { crashedAt = 0; recreate(); } });
         setContentView(t);
+    }
+
+    // ------------------------------------------------------------ the page's renderer
+    private static long crashedAt;                   // when the page last crashed on screen (elapsedRealtime; main thread)
+    private static boolean remadeUnseen;             // a page was made anew out of sight since Flick was last on screen
+    private boolean visible, gone, remaking, opened;
+    private UsbWatch.Listener usb;                   // what the USB cable's news reaches this activity through (until onDestroy)
+
+    /**
+     * The page's renderer is gone: Android needed its memory (mostly while Flick is out of sight), or it crashed. That
+     * WebView can't be used again: it goes now, and whatever was on its way to it goes nowhere. On screen, a new page is
+     * made at once, unless the page crashed there within the last minute too: then Flick says so and a tap tries again
+     * (a page that crashes as it starts would otherwise come back and crash for good). Out of sight, a new page is made
+     * once, ready for when the user comes back; if Android kills that one as well, the next is made when Flick is back on
+     * screen, not again and again for nobody while memory is short.
+     */
+    private void renderGone(WebView view, boolean crashed) {
+        if (view == null || view != web) return;
+        web = null;
+        try { if (view.getParent() instanceof ViewGroup) ((ViewGroup) view.getParent()).removeView(view); } catch (Throwable e) { /* ignore */ }
+        try { view.destroy(); } catch (Throwable e) { /* ignore */ }
+        if (visible) {
+            long now = SystemClock.elapsedRealtime();
+            boolean again = crashed && crashedAt > 0 && now - crashedAt < 60000;
+            if (crashed) crashedAt = now;
+            if (!again) { remake(); return; }
+            if (lock != null) { lock.onDestroy(); lock = null; }      // (nothing of the page is left to cover)
+            message("Flick's screen stopped unexpectedly.\n\nTap to try again.");
+        } else if (!remadeUnseen) {
+            remadeUnseen = true;
+            remake();
+        } else {
+            gone = true;                                 // made anew in onStart
+        }
+    }
+
+    private void remake() {
+        if (remaking) return;
+        remaking = true;
+        ui.post(new Runnable() { @Override public void run() { recreate(); } });
+    }
+
+    // ------------------------------------------------------------ the phone's font size
+    private volatile int zoom = 100;                 // the page's text, in percent of its own sizes
+
+    /**
+     * The page's text zoom for Android's font size, in percent: from Android's Small (85) to 200 (Android 14's largest;
+     * past that Flick's rows can't hold the text). Text grows, and what's sized by it (em, rem); px and pictures don't.
+     */
+    static int textZoom(android.content.res.Configuration c) {
+        float f = c == null || !(c.fontScale > 0) ? 1f : c.fontScale;
+        return Math.max(85, Math.min(200, Math.round(f * 100)));
+    }
+
+    // The font size changed while Flick runs (the manifest keeps the activity through it): the page follows at once,
+    // and hears so ({t:"font", zoom: percent})
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration c) {
+        super.onConfigurationChanged(c);
+        int z = textZoom(c);
+        if (z == zoom || web == null) return;
+        zoom = z;
+        web.getSettings().setTextZoom(z);
+        try { JSONObject o = new JSONObject(); o.put("t", "font"); o.put("zoom", z); emit(o.toString()); } catch (Throwable e) { /* ignore */ }
     }
 
     @Override
@@ -204,7 +339,10 @@ public class MainActivity extends Activity {
     @Override
     protected void onStart() {
         super.onStart();
+        visible = true;
+        if (gone) { gone = false; remake(); }        // the page went while Flick was out of sight: a new one now
         if (lock != null) lock.onStart();            // locks again after more than 30 s away
+        try { Peers.get(this).visible(true); } catch (Throwable e) { /* ignore */ }   // other phones' broadcasts reach it
     }
 
     @Override
@@ -213,10 +351,13 @@ public class MainActivity extends Activity {
         if (web != null) web.onResume();
         emitEvent("resume");
         onScreen = true;
+        remadeUnseen = false;
         Updater u = Updater.peek();
         if (u != null) u.onResume(this);
         Page.onResume(this);                         // features
-        if (lock != null) lock.onResume();
+        if (lock != null && !remaking) lock.onResume();   // (being made anew: the new one asks)
+        if (settingsFor != 0) { int req = settingsFor; settingsFor = 0; answered(req); }
+        nearbyWifiToo();
     }
 
     // Android hands the clipboard over only while Flick's window has focus, which can come a moment after onResume
@@ -253,14 +394,18 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onStop() {
+        visible = false;
         if (lock != null) lock.onStop();
+        try { Peers.get(this).visible(false); } catch (Throwable e) { /* ignore */ }
         super.onStop();
     }
 
     @Override
     protected void onDestroy() {
         if (lock != null) lock.onDestroy();
+        if (opened) { try { Peers.get(this).closed(); } catch (Throwable e) { /* ignore */ } }
         Page.detach(this);                           // features
+        if (usb != null) { UsbWatch.forget(usb); usb = null; }
         Updater u = Updater.peek();
         if (u != null) u.detach(this);
         if (discovery != null) discovery.setActive(false);
@@ -276,9 +421,16 @@ public class MainActivity extends Activity {
 
     @SuppressWarnings("deprecation")
     @Override
-    public void onBackPressed() {
+    public void onBackPressed() { back(); }
+
+    /**
+     * Back: the lock screen, then the page (a sheet, Settings...), then Flick goes behind the other apps. Android 16
+     * (for an app that targets it) no longer calls onBackPressed: Api33 registers this as the window's back callback,
+     * which older targets ignore.
+     */
+    void back() {
         if (lock != null && lock.onBack()) return;
-        if (web == null) { super.onBackPressed(); return; }
+        if (web == null) { moveTaskToBack(true); return; }
         web.evaluateJavascript("(window.__back&&window.__back())?'1':'0'", new ValueCallback<String>() {
             @Override
             public void onReceiveValue(String v) {
@@ -365,6 +517,16 @@ public class MainActivity extends Activity {
         }
     }
 
+    @TargetApi(33)
+    static final class Api33 {
+        static void onBack(final MainActivity a) {
+            a.getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                    new android.window.OnBackInvokedCallback() {
+                        @Override public void onBackInvoked() { a.back(); }
+                    });
+        }
+    }
+
     @TargetApi(31)
     static final class Api31 {
         static int corner(WindowInsets in) {
@@ -436,6 +598,7 @@ public class MainActivity extends Activity {
     private static final int REQ_STORAGE = 42;
     private static final int REQ_BT = 43;
     private static final int REQ_CAMERA = 45;
+    private static final int REQ_NEARBY = 48;
 
     // ------------------------------------------------------------ the camera, for Air grab (asked once)
     boolean cameraGranted() {
@@ -459,9 +622,20 @@ public class MainActivity extends Activity {
         requestPermissions(new String[]{android.Manifest.permission.CAMERA}, REQ_CAMERA);
     }
 
+    // Not one of the app's files: answered "not found" here. Left to the WebView (null), the request went out to the
+    // network, where there is no flick.local to ask.
+    private static WebResourceResponse noAsset() {
+        WebResourceResponse r = Thumbs.empty(404);
+        java.util.Map<String, String> h = new java.util.HashMap<String, String>();
+        h.put("Access-Control-Allow-Origin", "*");
+        h.put("Cache-Control", "no-cache");
+        r.setResponseHeaders(h);
+        return r;
+    }
+
     // the hand tracker's files (assets/www/hand/), for the page's fetch: a file:// page can't fetch files
     private WebResourceResponse handFile(String name) {
-        if (!name.matches("[a-z0-9-]+\\.(wasm|fhm|js)")) return null;
+        if (!name.matches("[a-z0-9-]+\\.(wasm|fhm|js)")) return noAsset();
         try {
             String mime = name.endsWith(".wasm") ? "application/wasm" : name.endsWith(".js") ? "text/javascript" : "application/octet-stream";
             WebResourceResponse r = new WebResourceResponse(mime, null, getAssets().open("www/hand/" + name));
@@ -470,7 +644,32 @@ public class MainActivity extends Activity {
             h.put("Cache-Control", "no-cache");
             r.setResponseHeaders(h);
             return r;
-        } catch (Throwable e) { return null; }
+        } catch (Throwable e) { return noAsset(); }
+    }
+    // a license's text (Settings > Help > Open-source notices), for the page's fetch, as the hand tracker's files are
+    private WebResourceResponse noticeFile(String name) {
+        String asset = "inter".equals(name) ? "www/fonts/Inter-LICENSE.txt" : "mediapipe".equals(name) ? "www/hand/LICENSE-MediaPipe.txt" : null;
+        if (asset == null) return noAsset();
+        try {
+            WebResourceResponse r = new WebResourceResponse("text/plain", "utf-8", getAssets().open(asset));
+            java.util.Map<String, String> h = new java.util.HashMap<String, String>();
+            h.put("Access-Control-Allow-Origin", "*");
+            h.put("Cache-Control", "no-cache");
+            r.setResponseHeaders(h);
+            return r;
+        } catch (Throwable e) { return noAsset(); }
+    }
+    // an animation's sound (assets/www/sounds/), for the page's fetch, as the hand tracker's files are
+    private WebResourceResponse soundFile(String name) {
+        if (!name.matches("[a-z]+\\.ogg")) return noAsset();
+        try {
+            WebResourceResponse r = new WebResourceResponse("audio/ogg", null, getAssets().open("www/sounds/" + name));
+            java.util.Map<String, String> h = new java.util.HashMap<String, String>();
+            h.put("Access-Control-Allow-Origin", "*");
+            h.put("Cache-Control", "no-cache");
+            r.setResponseHeaders(h);
+            return r;
+        } catch (Throwable e) { return noAsset(); }
     }
     private BtLink btLink;
 
@@ -492,11 +691,68 @@ public class MainActivity extends Activity {
         return btLink;
     }
 
+    /** Finding phones that aren't on this Wi-Fi (Bluetooth): Android's "Nearby devices" question (location on 10 and 11). */
+    void askNearby() {
+        if (!BleLink.supported(this) || BleLink.permitted(this)) return;
+        String[] what = Build.VERSION.SDK_INT >= 31
+                ? new String[]{android.Manifest.permission.BLUETOOTH_SCAN, android.Manifest.permission.BLUETOOTH_ADVERTISE, android.Manifest.permission.BLUETOOTH_CONNECT}
+                : new String[]{android.Manifest.permission.ACCESS_FINE_LOCATION};
+        if (wontAsk("nearbyAsked", what)) appSettings(REQ_NEARBY); else BleLink.ask(this, REQ_NEARBY);
+    }
+
+    // ------------------------------------------------------------ Android's questions
+    // A button that asks for a permission never does nothing: once Android won't show its question any more (the user said
+    // no twice, or "Don't ask again" on Android 9 and 10: Android then answers no at once and shows nothing), Flick's page
+    // in Android's settings opens instead, where it can still be allowed.
+
+    /** Android's question for perms, or Flick's settings when Android won't ask. key: see wontAsk. */
+    private void ask(String key, String[] perms, int req) {
+        if (wontAsk(key, perms)) appSettings(req); else requestPermissions(perms, req);
+    }
+
+    /**
+     * Android was asked for perms before (noted under key, the first time this is asked) and wouldn't show its question
+     * again for any of them that isn't allowed.
+     */
+    boolean wontAsk(String key, String... perms) {
+        SharedPreferences p = getSharedPreferences("flick", MODE_PRIVATE);
+        if (!p.getBoolean(key, false)) { p.edit().putBoolean(key, true).apply(); return false; }
+        boolean missing = false;
+        for (String x : perms) {
+            if (checkSelfPermission(x) == android.content.pm.PackageManager.PERMISSION_GRANTED) continue;
+            if (shouldShowRequestPermissionRationale(x)) return false;   // a no once: Android asks again
+            missing = true;
+        }
+        return missing;
+    }
+
+    /** Flick's page in Android's settings (its permissions are there), in place of Android's question req. */
+    void appSettings(int req) { settings(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName())), req); }
+
+    // what Flick asked for when it opened a settings page instead of Android's question: when the user is back, it's
+    // taken as that question's answer (allowed there, or not)
+    private int settingsFor;
+
+    void settings(Intent i, int req) {
+        try { startActivity(i); settingsFor = req; }
+        catch (Throwable e) { toast("Open Settings › Apps › Flick › Permissions to allow it"); }
+    }
+
+    // Bluetooth's "Nearby devices" allowed (by an older Flick) but not Wi-Fi Direct's, the same question on Android 13 and
+    // newer: asked once, which Android answers at once without asking the user again (the same group of permissions)
+    private void nearbyWifiToo() {
+        try {
+            if (!WifiDirect.needsAsk(this) || !BleLink.supported(this) || !BleLink.permitted(this)) return;
+            android.content.SharedPreferences p = getSharedPreferences("flick", MODE_PRIVATE);
+            if (p.getBoolean("nearbyWifiAsked", false)) return;
+            p.edit().putBoolean("nearbyWifiAsked", true).apply();
+            requestPermissions(new String[]{android.Manifest.permission.NEARBY_WIFI_DEVICES}, REQ_NEARBY);
+        } catch (Throwable e) { /* asked with Bluetooth's next time */ }
+    }
+
     /** Android 12+ asks once before Flick may use paired Bluetooth devices. */
     void askBluetooth() {
-        if (Build.VERSION.SDK_INT >= 31 && !BtLink.permitted(this)) {
-            requestPermissions(new String[]{android.Manifest.permission.BLUETOOTH_CONNECT}, REQ_BT);
-        }
+        if (Build.VERSION.SDK_INT >= 31 && !BtLink.permitted(this)) ask("btAsked", new String[]{android.Manifest.permission.BLUETOOTH_CONNECT}, REQ_BT);
     }
     private java.util.concurrent.ExecutorService ioPool;
 
@@ -528,16 +784,23 @@ public class MainActivity extends Activity {
                 catch (Throwable x) { toast("Open Settings › Apps › Flick › Permissions to allow file access"); }
             }
         } else {
-            requestPermissions(new String[]{android.Manifest.permission.READ_EXTERNAL_STORAGE, android.Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQ_STORAGE);
+            ask("storageAsked", new String[]{android.Manifest.permission.READ_EXTERNAL_STORAGE, android.Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQ_STORAGE);
         }
     }
 
     @Override
     public void onRequestPermissionsResult(int req, String[] perms, int[] res) {
         super.onRequestPermissionsResult(req, perms, res);
+        answered(req);
+    }
+
+    // Android answered question req (or the user is back from the settings page opened instead): the page, and what
+    // waits for that permission, hear so
+    private void answered(int req) {
         if (req == REQ_STORAGE) emitEvent("storage");
         if (req == REQ_BT) emitEvent("bt-perm");
         if (req == REQ_CAMERA) emitEvent("camera");
+        if (req == REQ_NEARBY) { try { Peers.get(this).bluetoothChanged(); } catch (Throwable e) { /* ignore */ } emitEvent("ble-perm"); }
         Page.onPermissions(this, req);               // features
     }
 
@@ -597,7 +860,13 @@ public class MainActivity extends Activity {
     }
 
     // ------------------------------------------------------------ adding files
-    void launchPicker(String kind) {
+    private String pickTag;                          // what the page called the pick open now (its 'added' event says it)
+
+    void launchPicker(String kind) { launchPicker(kind, null); }
+
+    /** tag: the page's name for this pick (another phone the files go to, say), handed back with the 'added' event. */
+    void launchPicker(String kind, String tag) {
+        pickTag = tag;
         Intent i;
         if ("media".equals(kind) && Build.VERSION.SDK_INT >= 33) {
             i = new Intent(MediaStore.ACTION_PICK_IMAGES);
@@ -632,15 +901,25 @@ public class MainActivity extends Activity {
     protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
         if (lock != null && lock.onResult(req, res)) return;
-        if (req != REQ_PICK || res != RESULT_OK || data == null) return;
+        if (req != REQ_PICK) return;
+        String tag = pickTag;
+        pickTag = null;
+        if (res != RESULT_OK || data == null) return;
         ArrayList<Uri> uris = new ArrayList<Uri>();
         ClipData cd = data.getClipData();
         if (cd != null) for (int k = 0; k < cd.getItemCount(); k++) { Uri u = cd.getItemAt(k).getUri(); if (u != null) uris.add(u); }
         else if (data.getData() != null) uris.add(data.getData());
-        importAll(uris, null);
+        importAll(uris, null, tag);
     }
 
     private void handleIntent(Intent in) {
+        String act = in == null ? null : in.getAction();
+        // another phone with Flick on the same USB cable (UsbPeer)
+        if (android.hardware.usb.UsbManager.ACTION_USB_ACCESSORY_ATTACHED.equals(act) || android.hardware.usb.UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(act)) {
+            try { UsbPeer.fromIntent(this, in); } catch (Throwable e) { Log.w(TAG, "usb: " + e); }
+            in.setAction(Intent.ACTION_MAIN);        // (not again when the activity is made anew)
+            return;
+        }
         // what another app shared can hold anything (a class Flick doesn't know, say): it never takes Flick down
         try { share(in); } catch (Throwable e) { Log.w(TAG, "share: " + e); }
     }
@@ -673,21 +952,21 @@ public class MainActivity extends Activity {
         // a single web address goes to the page ("Open on <PC>" / "Save to the Flick list"), not into a .txt
         if (uris.isEmpty() && text != null && Page.sharedLink(this, text, in.getStringExtra(Intent.EXTRA_SUBJECT))) { in.setAction(Intent.ACTION_MAIN); return; }
         String subject = in.getStringExtra(Intent.EXTRA_SUBJECT);
-        importAll(uris, text == null ? null : new String[]{text, subject});
+        importAll(uris, text == null ? null : new String[]{text, subject}, null);
         in.setAction(Intent.ACTION_MAIN); // don't re-import on recreate
     }
 
-    private void importAll(final ArrayList<Uri> uris, final String[] text) {
+    private void importAll(final ArrayList<Uri> uris, final String[] text, final String tag) {
         if ((uris == null || uris.isEmpty()) && text == null) return;
         new Thread(new Runnable() {
             @Override
             public void run() {
-                try { importNow(uris, text); } catch (Throwable e) { Log.w(TAG, "import: " + e); }   // never a crash
+                try { importNow(uris, text, tag); } catch (Throwable e) { Log.w(TAG, "import: " + e); }   // never a crash
             }
         }, "flick-import").start();
     }
 
-    private void importNow(ArrayList<Uri> uris, String[] text) {
+    private void importNow(ArrayList<Uri> uris, String[] text, String tag) {
         JSONArray added = new JSONArray();
         Library lib = Library.get(this);
         final int n = (uris == null ? 0 : uris.size()) + (text != null ? 1 : 0);
@@ -717,6 +996,7 @@ public class MainActivity extends Activity {
                 JSONObject o = new JSONObject();
                 o.put("t", "added");
                 o.put("items", added);
+                if (tag != null) o.put("tag", tag);
                 emit(o.toString());
             } catch (Throwable e) { /* ignore */ }
         }

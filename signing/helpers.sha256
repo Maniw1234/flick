@@ -1,0 +1,14 @@
+# The native helpers a release's Windows and Mac update bundles may carry (bin/), each one you have vouched for: its
+# SHA-256, the system (win32 or darwin) and its name in the bundle, one line per helper and system:
+#   <sha256>  win32 bin/flick-bt.exe
+# GitHub builds them from native/ (build_win.sh: flick-bt.exe, flick-keys.exe, flick-sparse.exe; build_mac.sh:
+# flick-keys) and every Windows PC and Mac that updates runs them, so signing/sign_release.js signs a release only when
+# each of its helpers is listed here, as this file is in your checkout.
+#
+# None is listed yet: the first time (and whenever native/ or the compiler CI uses changes), sign_release.js stops,
+# names each helper with its SHA-256 and gives the line to put here. Before putting it here:
+#   1. check that native/ in the release's commit is what you wrote (sign_release.js says which git log to read);
+#   2. best, build the helper yourself the way build_win.sh or build_mac.sh does and compare its SHA-256 (the Windows
+#      ones come out the same byte for byte with the same MinGW compiler: Ubuntu 24.04's gcc-mingw-w64-x86-64);
+#   3. then add the line, run sign_release.js again and commit this file. A helper that later comes out different is
+#      refused until you vouch for it again.

@@ -39,49 +39,61 @@ function findEntry(buf, wanted) {
   return null;
 }
 
+// The string pool at off, as a function (i, max): string i (its first max bytes, or UTF-16 units), read when it's asked
+// for (undefined when there's no such string). Never all of them at once: the APKs in Downloads\Flick can come from
+// another device, and a small crafted one can say it holds millions of long strings, all at one place (reading them all
+// ran Flick out of memory). The manifest needs only a few short ones.
 function readStringPool(b, off) {
+  const end = Math.min(b.length, off + b.readUInt32LE(off + 4));
+  const head = b.readUInt16LE(off + 2);
   const count = b.readUInt32LE(off + 8);
   const flags = b.readUInt32LE(off + 16);
   const stringsStart = b.readUInt32LE(off + 20);
   const utf8 = (flags & 0x100) !== 0;
-  const out = new Array(count);
-  for (let i = 0; i < count; i++) {
-    let p = off + stringsStart + b.readUInt32LE(off + 28 + i * 4);
+  return (i, max) => {
+    if (!Number.isInteger(i) || i < 0 || i >= count) return undefined;
+    const at = off + head + i * 4;
+    if (at + 4 > end) return undefined;
+    let p = off + stringsStart + b.readUInt32LE(at);
+    const byte = () => (p < end ? b[p++] : -1);
     if (utf8) {
-      let u16len = b[p++]; if (u16len & 0x80) p++;                         // UTF-16 length (unused)
-      let len = b[p++]; if (len & 0x80) len = ((len & 0x7f) << 8) | b[p++];
-      out[i] = b.toString('utf8', p, p + len);
-    } else {
-      let len = b.readUInt16LE(p); p += 2;
-      if (len & 0x8000) { len = ((len & 0x7fff) << 16) | b.readUInt16LE(p); p += 2; }
-      out[i] = b.toString('utf16le', p, p + len * 2);
+      const u16len = byte(); if (u16len < 0 || ((u16len & 0x80) && byte() < 0)) return undefined;   // UTF-16 length (unused)
+      let len = byte(); if (len < 0) return undefined;
+      if (len & 0x80) { const lo = byte(); if (lo < 0) return undefined; len = ((len & 0x7f) << 8) | lo; }
+      return b.toString('utf8', p, Math.min(end, p + Math.min(len, max)));
     }
-  }
-  return out;
+    if (p + 2 > end) return undefined;
+    let len = b.readUInt16LE(p); p += 2;
+    if (len & 0x8000) { if (p + 2 > end) return undefined; len = ((len & 0x7fff) << 16) | b.readUInt16LE(p); p += 2; }
+    return b.toString('utf16le', p, Math.min(end, p + Math.min(len, max) * 2));
+  };
 }
+// (what's read of a name, and of a value: package names and versions are short)
+const NAME_MAX = 64, VALUE_MAX = 1024;
 
 /** <manifest> attributes (and <uses-sdk> minSdkVersion, 0 when not given as a number) from a binary AndroidManifest.xml. */
 function parseManifest(b) {
   if (b.length < 8 || b.readUInt16LE(0) !== 0x0003) throw new Error('not binary xml');
-  let strings = [], resIds = [], r = null;
+  let pool = () => undefined, resIds = [], r = null;
   let p = b.readUInt16LE(2);
   while (p + 8 <= b.length) {
     const type = b.readUInt16LE(p), hsize = b.readUInt16LE(p + 2), size = b.readUInt32LE(p + 4);
     if (size < 8 || p + size > b.length) break;
-    if (type === 0x0001) strings = readStringPool(b, p);
+    if (type === 0x0001) pool = readStringPool(b, p);
     else if (type === 0x0180) { resIds = []; for (let q = p + hsize; q + 4 <= p + size; q += 4) resIds.push(b.readUInt32LE(q)); }
     else if (type === 0x0102) {
       const ext = p + hsize;
-      const name = strings[b.readUInt32LE(ext + 4)];
-      if (name === 'manifest' || (r && name === 'uses-sdk')) {
+      const name = pool(b.readUInt32LE(ext + 4), NAME_MAX);
+      // (the one <manifest> there is, then its <uses-sdk>)
+      if ((name === 'manifest' && !r) || (r && name === 'uses-sdk')) {
         const attrStart = b.readUInt16LE(ext + 8), attrSize = b.readUInt16LE(ext + 10), attrCount = b.readUInt16LE(ext + 12);
         if (!r) r = { package: null, versionCode: null, versionName: null, minSdk: 0 };
         for (let i = 0; i < attrCount; i++) {
           const a = ext + attrStart + i * attrSize;
           const ni = b.readUInt32LE(a + 4), raw = b.readUInt32LE(a + 8), dtype = b[a + 15], data = b.readUInt32LE(a + 16);
           const id = ni < resIds.length ? resIds[ni] : 0;
-          const an = strings[ni] || '';
-          const str = raw !== 0xffffffff ? strings[raw] : (dtype === 0x03 ? strings[data] : null);
+          const an = pool(ni, NAME_MAX) || '';
+          const str = raw !== 0xffffffff ? pool(raw, VALUE_MAX) : (dtype === 0x03 ? pool(data, VALUE_MAX) : null);
           if (name === 'uses-sdk') { if (id === ATTR_MIN_SDK && dtype >= 0x10 && dtype <= 0x11) r.minSdk = data; }
           else if (an === 'package' && !id) r.package = str;
           else if (id === ATTR_VERSION_CODE || (!id && an === 'versionCode')) r.versionCode = (dtype >= 0x10 && dtype <= 0x11) ? data : parseInt(str, 10);
