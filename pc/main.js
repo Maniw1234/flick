@@ -44,7 +44,10 @@ if (!app.requestSingleInstanceLock()) {
   } catch (e) { /* ignore */ }
   app.quit(); process.exit(0);
 }
-app.setAppUserModelId('com.flick.pc');
+// (a copy run from source goes by an id of its own: Electron makes a Start menu shortcut for the id on the first
+// notification, and a second shortcut claiming the installed Flick's id costs it its taskbar icon)
+const APP_ID = app.isPackaged ? 'com.flick.pc' : 'com.flick.pc.dev';
+app.setAppUserModelId(APP_ID);
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 
 // macOS: files dropped on Flick in the Dock or opened with it from Finder go to the phone, like Windows' Send to. They
@@ -622,7 +625,7 @@ const fxOn = () => !!store.fx && !noComp;
 function plainNote(text) {
   try {
     const { Notification } = require('electron');
-    if (Notification.isSupported()) new Notification({ title: 'Flick', body: text, silent: true }).show();
+    if (Notification.isSupported()) { new Notification({ title: 'Flick', body: text, silent: true }).show(); setTimeout(startShortcut, 4000).unref(); }
   } catch (e) { log('notification failed', e.message); }
 }
 function fxPlain(type, data) {
@@ -1452,13 +1455,31 @@ function onQsFailed(m) {
 // here, with the name and icon its notifications show.
 function registerAppId() {
   if (!IS_WIN || !app.isPackaged) return;
-  const key = 'HKCU\\Software\\Classes\\AppUserModelId\\com.flick.pc';
+  const key = 'HKCU\\Software\\Classes\\AppUserModelId\\' + APP_ID;
   const icon = path.join(path.dirname(process.execPath), 'Flick.ico');
   const add = (name, value, then) => execFile(winSys('reg.exe'), ['add', key, '/v', name, '/t', 'REG_SZ', '/d', value, '/f'], { windowsHide: true, timeout: 15000 }, (e) => {
     if (e) log('notifications: app id not registered', e.message);
     else if (then) then();
   });
   add('DisplayName', 'Flick', () => fs.access(icon, (e) => { if (!e) add('IconUri', icon); }));
+}
+
+// The taskbar draws Flick's button from the Start menu shortcut that carries its app id, not from the window. Electron
+// makes that shortcut by itself on the first notification, with no icon and aimed at wherever Flick ran from that day;
+// once that is off (Flick moved, or reinstalled elsewhere) the button is a blank page. So the shortcut is kept right:
+// this Flick, with its icon. (Electron leaves a shortcut that is already there alone.)
+function startShortcut() {
+  if (!IS_WIN || !app.isPackaged) return;
+  try {
+    const lnk = path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs', app.getName() + '.lnk');
+    if (!fs.existsSync(lnk)) return;                       // none yet: Electron makes it with the first notification
+    const exe = process.execPath, dir = path.dirname(exe), ico = path.join(dir, 'Flick.ico');
+    const icon = fs.existsSync(ico) ? ico : exe, same = (a, b) => String(a || '').toLowerCase() === String(b || '').toLowerCase();
+    const has = shell.readShortcutLink(lnk);
+    if (has.appUserModelId !== APP_ID) return;             // not Flick's own: someone else's shortcut of the same name
+    if (same(has.target, exe) && same(has.icon, icon)) return;
+    shell.writeShortcutLink(lnk, 'replace', { target: exe, cwd: dir, description: 'Flick', icon, iconIndex: 0, appUserModelId: APP_ID, toastActivatorClsid: has.toastActivatorClsid || undefined });
+  } catch (e) { log('start menu shortcut', e.message); }
 }
 
 // Explorer's right-click "Send to" menu gets "Flick (phone)" (a shortcut that starts Flick with --send <files>)
@@ -4287,6 +4308,7 @@ app.whenReady().then(async () => {
 
   applySendTo();
   registerAppId();
+  startShortcut();
   applyBluetooth();
   applyQuickShare();
   // macOS: the menu bar's Edit menu is what makes copy and paste work in the panel's fields (Electron's default menu

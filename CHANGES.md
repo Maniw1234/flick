@@ -135,6 +135,7 @@ Everything that changed:
   on Windows or a Mac.
 - Fixed: on Windows, a received name could still be one Explorer can't open or delete: one ending in a dot and an
   unusual space, or a very long one that, shortened, became a name Windows keeps for devices (like `nul.txt`).
+- Fixed: on Windows, Flick's button on the taskbar could show a blank page instead of Flick's icon.
 - Fixed: Mark of the Web covers every file of a received folder, not only the first 5,000.
 - Fixed: with Ask each time, Accept saves only what the question showed: anything else is asked about again.
 - Fixed: canceling transfers that don't exist can no longer make Flick on the PC take more and more memory.

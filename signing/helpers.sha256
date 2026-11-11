@@ -12,3 +12,11 @@
 #      ones come out the same byte for byte with the same MinGW compiler: Ubuntu 24.04's gcc-mingw-w64-x86-64);
 #   3. then add the line, run sign_release.js again and commit this file. A helper that later comes out different is
 #      refused until you vouch for it again.
+#
+# 2.1.0 (2026-11-11): native/ is the same as in 2.0.0, byte for byte. The Mac helper is the one in 2.0.0's signed bundle;
+# the Windows ones differ from 2.0.0's only by having no time stamp (build_win.sh, -Wl,--no-insert-timestamp) and came
+# out the same from two separate builds of this code.
+0de507ce23e8be75cf9e266edb7f45b42ff47750269ae0f238d3be048846152e  win32 bin/flick-bt.exe
+db54f3fc69c1e2d03256903975f5693ef9a0cdb49c3c6d9ce83a37bb1fd72632  win32 bin/flick-sparse.exe
+c641b44907982dc37346b2b1f97ccff02006d9ac9e755d4a3b654f1eb3be8df7  win32 bin/flick-keys.exe
+0e8f06ae15524458e4ba2ef5720296d8938f6b0a43ebf16aebc85b012d6a77ce  darwin bin/flick-keys
